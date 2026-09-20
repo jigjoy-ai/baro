@@ -60,7 +60,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use tokio::sync::mpsc;
 
 use app::{App, Planner, ReviewStory, Screen};
-use conversation::{ConversationKind, ConversationPhase, ConversationWireResponse};
+use conversation::{ConversationKind, ConversationPhase, ConversationWireResponse, MessageSource};
 use conversation_frontdoor::{
     apply_or_close_conversation_response, architect_clarification_response,
     close_failed_initial_request, spawn_conversation_architect_validation,
@@ -1443,6 +1443,8 @@ async fn run_app(
         restore_pre_prd_conversation(&mut app, &cwd);
     }
 
+    let startup_goal_source = startup_goal_source(&cli);
+
     // Every new goal is now the first user turn of the durable conversation
     // session. Provider selection may precede it because the front-door agent
     // needs a backend; planning never starts until a validated GoalEnvelope is
@@ -1458,7 +1460,7 @@ async fn run_app(
                 app.api_key_input.clear();
             } else {
                 let message = std::mem::take(&mut app.conversation_input);
-                submit_conversation_message(&mut app, &cwd, tx.clone(), message)
+                submit_conversation_message(&mut app, &cwd, tx.clone(), startup_goal_source, message)
                     .map_err(|error| format!("cannot start conversation: {error}"))?;
             }
         } else if cli.operator {
@@ -2272,11 +2274,14 @@ async fn run_app(
                                 app.openai_api_key = Some(trimmed.to_string());
                                 app.api_key_input.clear();
                                 if !app.conversation_input.is_empty() {
+                                    // Only the startup CLI goal can be waiting
+                                    // here, so it keeps its own provenance.
                                     let message = std::mem::take(&mut app.conversation_input);
                                     if let Err(error) = submit_conversation_message(
                                         &mut app,
                                         &cwd,
                                         tx.clone(),
+                                        startup_goal_source,
                                         message,
                                     ) {
                                         app.start_conversation();
@@ -2531,9 +2536,13 @@ async fn run_app(
                             } else if app.conversation_input.trim().is_empty() {
                             } else if app.conversation_accepts_input() {
                                 let message = app.input_take();
-                                if let Err(error) =
-                                    submit_conversation_message(&mut app, &cwd, tx.clone(), message)
-                                {
+                                if let Err(error) = submit_conversation_message(
+                                    &mut app,
+                                    &cwd,
+                                    tx.clone(),
+                                    MessageSource::InteractivePrompt,
+                                    message,
+                                ) {
                                     app.conversation_error = Some(error);
                                 }
                             } else if matches!(
@@ -3351,6 +3360,17 @@ async fn run_app(
     Ok(())
 }
 
+/// A goal that arrived as file text is not the interactive prompt line and does
+/// not share its 8 000-character ceiling. `--goal-from-file` is how a detaching
+/// parent hands that provenance to the child it re-execs.
+fn startup_goal_source(cli: &cli::cli::Cli) -> MessageSource {
+    if cli::cli::goal_came_from_file(cli.goal_file.as_deref(), cli.goal_from_file) {
+        MessageSource::GoalFile
+    } else {
+        MessageSource::InteractivePrompt
+    }
+}
+
 fn headless_failure_reason(app: &App) -> Option<String> {
     app.exit_reason.clone()
 }
@@ -3819,6 +3839,7 @@ fn submit_conversation_message(
     app: &mut App,
     cwd: &Path,
     tx: mpsc::Sender<AppEvent>,
+    source: MessageSource,
     text: String,
 ) -> Result<(), String> {
     if !app.conversation_accepts_input() {
@@ -3836,7 +3857,7 @@ fn submit_conversation_message(
     let intent = conversation_intent(app);
     let request_id = app.next_conversation_request_id();
     app.conversation
-        .begin_request(request_id, text)
+        .begin_request_from(source, request_id, text)
         .map_err(|error| error.to_string())?;
     app.input_clear();
     spawn_pending_conversation(app, cwd, tx, intent);
@@ -3918,8 +3939,14 @@ async fn accept_conversation_response(
                 .await_conversation_message(&session_id, &request_id)
                 .await
             {
-                Some(text) => submit_conversation_message(app, cwd, tx, text)
-                    .map_err(|error| format!("cannot continue conversation: {error}")),
+                Some(text) => submit_conversation_message(
+                    app,
+                    cwd,
+                    tx,
+                    MessageSource::InteractivePrompt,
+                    text,
+                )
+                .map_err(|error| format!("cannot continue conversation: {error}")),
                 // Nobody is there, by design: headless is started and left
                 // alone until it opens a pull request. A question it cannot
                 // ask must not end the run — the finding is worth keeping,
@@ -3974,6 +4001,7 @@ fn resolve_clarification_without_a_human(
         app,
         cwd,
         tx,
+        MessageSource::InteractivePrompt,
         HEADLESS_CLARIFICATION_DIRECTIVE.to_string(),
     )
     .map_err(|error| format!("cannot continue conversation: {error}"))
@@ -4570,6 +4598,7 @@ async fn begin_progressive_execution(
         progressive_planning::ProgressiveBootstrapInput {
             cwd,
             goal: &spec.goal,
+            goal_source: app.conversation.goal_source(),
             ids: &ids,
             decision_document: spec.decision_doc.as_deref(),
             execution_mode: execution_mode.as_ref(),
@@ -4861,8 +4890,8 @@ mod tests {
         fixed_mode_contract, headless_failure_reason, message_command_line,
         mouse_capture_should_be_enabled, preferred_jigjoy_gateway_key,
         preferred_jigjoy_gateway_url, reconcile_jigjoy_phase_overrides, resolve_parallel_limit,
-        App, JIGJOY_CHEAP_STORY_MODEL, JIGJOY_GATEWAY_URL, JIGJOY_HEAVY_STORY_MODEL,
-        JIGJOY_STRONG_MODEL,
+        startup_goal_source, App, JIGJOY_CHEAP_STORY_MODEL, JIGJOY_GATEWAY_URL,
+        JIGJOY_HEAVY_STORY_MODEL, JIGJOY_STRONG_MODEL,
     };
     use crate::app::Screen;
 
@@ -4882,6 +4911,113 @@ mod tests {
             usage::LOGS_SUMMARY,
         ] {
             assert!(help.contains(summary), "epilogue drifted from {summary}:\n{help}");
+        }
+    }
+
+    // The 8 000-character ceiling belongs to the interactive prompt line. These
+    // exercise the headless `--goal-file` intake end of that split: the file is
+    // read, its provenance decided, and the text admitted by the same
+    // `begin_request_from` the startup branch calls.
+    mod goal_file_intake {
+        use std::fs;
+
+        use clap::Parser;
+
+        use super::startup_goal_source;
+        use crate::app::App;
+        use crate::cli::cli::{resolve_goal, Cli};
+        use crate::conversation::{MessageSource, MAX_GOAL_FILE_CHARS};
+
+        fn goal_file_cli(goal: &str) -> (tempfile::TempDir, Cli, String) {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("goal.md");
+            fs::write(&path, goal).unwrap();
+            let cli = Cli::parse_from([
+                "baro",
+                "--headless",
+                "--goal-file",
+                path.to_str().unwrap(),
+            ]);
+            let resolved = resolve_goal(cli.goal.as_deref(), cli.goal_file.as_deref(), |p| {
+                fs::read_to_string(p)
+            })
+            .unwrap()
+            .unwrap();
+            (dir, cli, resolved)
+        }
+
+        #[test]
+        fn goal_file_12000_chars_starts_headless_run() {
+            let goal = "a".repeat(12_000);
+            let (_dir, cli, resolved) = goal_file_cli(&goal);
+            assert_eq!(resolved.encode_utf16().count(), 12_000);
+
+            let source = startup_goal_source(&cli);
+            assert_eq!(source, MessageSource::GoalFile);
+
+            // Startup aborts at main's `--goal-file` branch exactly when intake
+            // refuses the goal, so admission here is the run starting.
+            let mut app = App::new();
+            let request_id = app.next_conversation_request_id();
+            app.conversation
+                .begin_request_from(source, &request_id, resolved.clone())
+                .expect("a 12 000-character --goal-file goal must not abort headless startup");
+
+            let turn = &app.conversation.transcript()[0];
+            assert_eq!(turn.text, resolved);
+            assert_eq!(turn.source, MessageSource::GoalFile);
+            assert_eq!(app.conversation.goal_source(), MessageSource::GoalFile);
+        }
+
+        #[test]
+        fn interactive_prompt_over_8000_chars_still_errors() {
+            let mut app = App::new();
+            let request_id = app.next_conversation_request_id();
+            let error = app
+                .conversation
+                .begin_request_from(
+                    MessageSource::InteractivePrompt,
+                    &request_id,
+                    "x".repeat(8_001),
+                )
+                .unwrap_err();
+
+            assert_eq!(error.to_string(), "user message is 8001 characters; limit is 8000");
+            assert!(app.conversation.transcript().is_empty());
+        }
+
+        #[test]
+        fn a_goal_file_over_the_intake_ceiling_is_noted_not_refused() {
+            let total = MAX_GOAL_FILE_CHARS + 500;
+            let (_dir, cli, resolved) = goal_file_cli(&"b".repeat(total));
+
+            let mut app = App::new();
+            let request_id = app.next_conversation_request_id();
+            app.conversation
+                .begin_request_from(startup_goal_source(&cli), &request_id, resolved)
+                .expect("an over-ceiling goal file is truncated, never refused");
+
+            let kept = MAX_GOAL_FILE_CHARS;
+            let text = &app.conversation.transcript()[0].text;
+            assert_eq!(
+                text.lines().next().unwrap(),
+                format!(
+                    "note: goal truncated for intake; read characters 1-{kept} of {total}; characters {}-{total} were not read",
+                    kept + 1
+                )
+            );
+            assert_eq!(text.lines().nth(1).unwrap(), "b".repeat(kept));
+        }
+
+        #[test]
+        fn only_goal_file_provenance_lifts_the_prompt_line_ceiling() {
+            let typed = Cli::parse_from(["baro", "--headless", "ship it"]);
+            assert_eq!(startup_goal_source(&typed), MessageSource::InteractivePrompt);
+
+            // The detached child is re-execed without --goal-file; the marker is
+            // the only thing that still says where its goal came from.
+            let respawned = Cli::parse_from(["baro", "--headless", "--goal-from-file", "ship it"]);
+            assert_eq!(startup_goal_source(&respawned), MessageSource::GoalFile);
         }
     }
 

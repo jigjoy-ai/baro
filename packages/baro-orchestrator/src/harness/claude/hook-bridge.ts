@@ -15,15 +15,29 @@
 import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 
-import { surfaceRemedyLines } from "../../execution/gate-registry.js"
+import {
+    SHELL_SCRATCH_DIRNAME,
+    shellContainmentRemedyLine,
+    surfaceRemedyLines,
+} from "../../execution/gate-registry.js"
 import {
     GUARD_REFUSALS_FILE,
     publishCommandRefusal,
 } from "../../execution/publish-guard.js"
+import { shellContainmentHookSource } from "../../execution/shell-containment.js"
 
 export interface StoryHookSurface {
     writes: readonly string[]
     ownedElsewhere: Readonly<Record<string, string>>
+}
+
+/** What the hook needs to judge a command; written beside surface.json. */
+interface ContainmentSettings {
+    /** Absent for a caller that cannot name it: the hook then trusts the
+     * working directory Claude Code reports with the tool call. */
+    worktreeRoot?: string
+    collabCommand?: string
+    collabCapability?: string
 }
 
 // The __name shim covers bundlers that wrap serialized functions with keepNames.
@@ -33,6 +47,8 @@ const HOOK_SCRIPT = `#!/usr/bin/env node
 import { appendFileSync, readFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
+
+${shellContainmentHookSource()}
 
 const mode = process.argv[2]
 let input = {}
@@ -62,13 +78,10 @@ if (mode === "post-bash") {
 }
 
 if (mode === "pre-bash") {
-    const __name = (fn) => fn
-    const publishCommandRefusal = ${publishCommandRefusal.toString()}
     const command = String(toolInput.command ?? "")
-    const reason = publishCommandRefusal(command)
-    if (reason) {
+    const here = dirname(fileURLToPath(import.meta.url))
+    const refuse = (reason) => {
         try {
-            const here = dirname(fileURLToPath(import.meta.url))
             appendFileSync(
                 join(here, "${GUARD_REFUSALS_FILE}"),
                 JSON.stringify({ command, reason }) + "\\n",
@@ -83,6 +96,54 @@ if (mode === "pre-bash") {
                 permissionDecisionReason: reason,
             },
         }))
+        process.exit(0)
+    }
+
+    const publishCommandRefusal = ${publishCommandRefusal.toString()}
+    const published = publishCommandRefusal(command)
+    if (published) refuse(published)
+
+    let containment
+    try {
+        containment = JSON.parse(
+            readFileSync(join(here, "containment.json"), "utf8"),
+        )
+    } catch {
+        process.exit(0)
+    }
+    const worktreeRoot =
+        typeof containment.worktreeRoot === "string" && containment.worktreeRoot
+            ? containment.worktreeRoot
+            : typeof input.cwd === "string"
+              ? input.cwd
+              : ""
+    if (!worktreeRoot) process.exit(0)
+    let contained = null
+    try {
+        contained = shellContainmentRefusal(
+            worktreeRoot,
+            command,
+            hookShellAccessContext(
+                worktreeRoot,
+                typeof containment.collabCommand === "string"
+                    ? containment.collabCommand
+                    : null,
+            ),
+        )
+    } catch {
+        process.exit(0)
+    }
+    if (contained) {
+        const shellContainmentRemedyLine = ${shellContainmentRemedyLine.toString()}
+        refuse(
+            contained +
+                "\\n" +
+                shellContainmentRemedyLine(
+                    typeof containment.scratchDir === "string"
+                        ? containment.scratchDir
+                        : "${SHELL_SCRATCH_DIRNAME}",
+                ),
+        )
     }
     process.exit(0)
 }
@@ -131,6 +192,7 @@ export function materializeStoryHooks(
     dir: string,
     surface: StoryHookSurface | undefined,
     collab: { command: string; capability: string },
+    worktreeRoot?: string,
 ): string | null {
     if (!surface || surface.writes.length === 0) return null
     mkdirSync(dir, { recursive: true })
@@ -146,18 +208,46 @@ export function materializeStoryHooks(
             2,
         ),
     )
-    return writeHookSettings(dir, true)
+    return writeHookSettings(dir, true, {
+        ...(worktreeRoot === undefined ? {} : { worktreeRoot }),
+        collabCommand: collab.command,
+        collabCapability: collab.capability,
+    })
 }
 
-/** Publish-command denial alone, for a Claude story with no write surface. */
-export function materializePublishGuardHooks(dir: string): string {
+/** Publish and containment denial alone, for a story with no write surface. */
+export function materializePublishGuardHooks(
+    dir: string,
+    worktreeRoot?: string,
+): string {
     mkdirSync(dir, { recursive: true })
-    return writeHookSettings(dir, false)
+    return writeHookSettings(
+        dir,
+        false,
+        worktreeRoot === undefined ? {} : { worktreeRoot },
+    )
 }
 
-function writeHookSettings(dir: string, guardWrites: boolean): string {
+function writeHookSettings(
+    dir: string,
+    guardWrites: boolean,
+    containment: ContainmentSettings,
+): string {
     const hookPath = join(dir, "hook.mjs")
     writeFileSync(hookPath, HOOK_SCRIPT, { mode: 0o755 })
+    writeFileSync(
+        join(dir, "containment.json"),
+        JSON.stringify(
+            {
+                worktreeRoot: containment.worktreeRoot ?? null,
+                collabCommand: containment.collabCommand ?? null,
+                collabCapability: containment.collabCapability ?? null,
+                scratchDir: SHELL_SCRATCH_DIRNAME,
+            },
+            null,
+            2,
+        ),
+    )
     const settingsPath = join(dir, "settings.json")
     const hook = (mode: string) => ({
         hooks: [

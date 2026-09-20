@@ -23,7 +23,8 @@ import { execFileCli } from "../harness/exec-file-cli.js"
 import { activityIdleTimeoutMs } from "../harness/liveness.js"
 import { emit, type BaroEvent } from "../tui-protocol.js"
 import { cargoEnvFor } from "./cargo-env.js"
-import { defaultSleep, resolveCommandCwd, RETRY_BACKOFF_MS } from "./command-cwd.js"
+import { defaultSleep, resolveCommandCwd, RETRY_BACKOFF_MS, spawnRunCwd } from "./command-cwd.js"
+import type { VerifyCwdResolver } from "./command-cwd.js"
 import {
     ABSOLUTE_COMMAND_TIMEOUT_MS,
     createCeilingResolver,
@@ -31,6 +32,10 @@ import {
     recordTiming,
     type CommandCeiling,
 } from "./command-timing.js"
+import {
+    creditDeclaredRequirements,
+    declaredRequirementFiles,
+} from "./declared-credit.js"
 import {
     MAX_DECLARED_VERIFY_COMMANDS,
     MAX_NEGOTIATED_DECLARED_VERIFY_COMMANDS,
@@ -93,6 +98,9 @@ export interface VerifyCommandResult {
     retryable?: boolean
     /** Killed at its hard ceiling rather than failing on its own. */
     timedOut?: true
+    /** The harness, not the patch, broke: classification must bucket this as
+     *  environment instead of re-deriving a regression from the tail. */
+    environment?: true
 }
 
 export interface VerifyCommandSpec {
@@ -108,6 +116,8 @@ export interface VerifyCommandSpec {
     incompleteReason?: string
     /** Canonical identity for duplicate incomplete PRD requirements. */
     declaredRequirementKey?: string
+    /** The PRD requirement this evidence spec stands for; drives crediting. */
+    readonly declaredRequirement?: DeclaredTestRequirement
     /** Strict local-runner alias eligible for bounded path batching. */
     canonicalDeclaredFocus?: "rstest"
     /** Paths that must still resolve beneath command cwd immediately pre-spawn. */
@@ -182,6 +192,8 @@ export interface VerifyBuildOptions {
     storyExecutorsActive?: () => boolean
     /** Test seam: lowers the ABSOLUTE_COMMAND_TIMEOUT_MS ceiling floor. */
     ceilingFloorMs?: number
+    /** Overrides `cwd`, re-read per spawn; see command-cwd.ts `spawnRunCwd`. */
+    resolveRunCwd?: VerifyCwdResolver
 }
 
 /** Where declared ceilings and measured durations are looked up. */
@@ -802,7 +814,7 @@ function boundedDeclaredCommands(
             args: [],
             incompleteReason:
                 `${omitted} unique PRD test requirement(s) were not admitted; ` +
-                `the safe limit is ${budget.effectiveLimit} ` +
+                `the safe limit is ${budget.effectiveLimit} invocation(s) ` +
                 (budget.negotiatedBy === null
                     ? "(default; no story negotiated testBudget)"
                     : `(negotiated by story ${budget.negotiatedBy} testBudget)`),
@@ -856,10 +868,24 @@ export function createVerifyPlan(
             declaredRequirementKey: "<declared-translation-overflow>",
         })
     }
+    // Dedup precedes budgeting: declared files that collapse into one spawned
+    // invocation cost one budget unit, not one unit per file. Coalescing spans
+    // both lists because a declared focus file merges into the detected suite.
+    const coalesced = coalesceNodeTestScripts(
+        [
+            ...detected.commands,
+            ...declaredCommands.map((command) => ({
+                ...command,
+                origin: "declared" as const,
+            })),
+        ],
+        (commandCwd) => readPackageManifest(join(commandCwd ?? cwd, "package.json")),
+    )
     return freezeVerifyPlan(
-        coalesceNodeTestScripts(
-            boundedDeclaredCommands(detected.commands, declaredCommands, budget),
-            (commandCwd) => readPackageManifest(join(commandCwd ?? cwd, "package.json")),
+        boundedDeclaredCommands(
+            coalesced.filter((command) => command.origin !== "declared"),
+            coalesced.filter((command) => command.origin === "declared"),
+            budget,
         ),
         detected.javascriptPackageManagers,
         options.testBudgets !== undefined ? budget : undefined,
@@ -1217,6 +1243,7 @@ type CmdOutcome =
           output?: VerificationCommandOutput
           retryable?: boolean
           timedOut?: true
+          environment?: true
       }
     | { status: "skipped"; durationMs: number; tail: string }
 
@@ -1242,6 +1269,7 @@ async function runCmd(
     hostRepoRoot: string,
     ceiling: CommandCeiling,
     signal?: AbortSignal,
+    resolveRunCwd?: VerifyCwdResolver,
 ): Promise<CmdOutcome> {
     const startedAt = Date.now()
     if (c.incompleteReason) {
@@ -1258,13 +1286,16 @@ async function runCmd(
             tail: c.preflightFailure,
         }
     }
-    const commandCwd = resolveCommandCwd(cwd, c.cwd)
+    const commandCwd = resolveCommandCwd(spawnRunCwd(cwd, hostRepoRoot, resolveRunCwd), c.cwd)
     if (!existsSync(commandCwd)) {
+        // The tree vanished under us (a story worktree removed at merge, or the
+        // integration worktree torn down): the harness broke, not the patch.
         return {
             status: "failed",
             durationMs: 0,
-            tail: `verification working directory is missing: ${commandCwd}`,
+            tail: `verification cwd missing: ${commandCwd}`,
             retryable: false,
+            environment: true,
         }
     }
     throwIfAborted(signal)
@@ -1272,6 +1303,7 @@ async function runCmd(
         const containmentFailure = revalidateContainedPaths(
             commandCwd,
             c.containedPaths,
+            c.tool,
         )
         if (containmentFailure) {
             return {
@@ -1378,6 +1410,7 @@ export async function verifyBuild(
             hostRepoRoot,
             ceilingFor(install),
             options.signal,
+            options.resolveRunCwd,
         )
         commands.push({
             command: install.label,
@@ -1394,7 +1427,7 @@ export async function verifyBuild(
     for (const c of plan.commands) {
         throwIfAborted(options.signal)
         const ceiling = ceilingFor(c)
-        let outcome = await runCmd(cwd, c, hostRepoRoot, ceiling, options.signal)
+        let outcome = await runCmd(cwd, c, hostRepoRoot, ceiling, options.signal, options.resolveRunCwd)
         let firstFailureTail: string | undefined
         const warnTimeout = (): void =>
             emitActivity({
@@ -1440,7 +1473,7 @@ export async function verifyBuild(
             })
             await (options.sleep ?? defaultSleep)(RETRY_BACKOFF_MS)
             throwIfAborted(options.signal)
-            outcome = await runCmd(cwd, c, hostRepoRoot, ceiling, options.signal)
+            outcome = await runCmd(cwd, c, hostRepoRoot, ceiling, options.signal, options.resolveRunCwd)
             if (outcome.status === "failed" && outcome.timedOut) warnTimeout()
         }
         commands.push({
@@ -1455,6 +1488,7 @@ export async function verifyBuild(
                 ? { retryable: outcome.retryable }
                 : {}),
             ...("timedOut" in outcome && outcome.timedOut ? { timedOut: true as const } : {}),
+            ...("environment" in outcome && outcome.environment ? { environment: true as const } : {}),
             ...(firstFailureTail !== undefined
                 ? { retriedAfterFailure: true as const, firstFailureTail }
                 : {}),
@@ -1463,5 +1497,49 @@ export async function verifyBuild(
         ran = true
         if (outcome.status === "failed") failures.push({ cmd: c.label, tail: outcome.tail })
     }
+    creditSkippedDeclaredRequirements(plan.commands, commands)
     return { ran, ok: failures.length === 0, failures, commands }
+}
+
+/**
+ * Rewrites the evidence of every declared requirement a green command in this
+ * same verification already executed. `incompleteReason` survives only for a
+ * requirement nothing ran.
+ */
+function creditSkippedDeclaredRequirements(
+    specs: readonly VerifyCommandSpec[],
+    results: VerifyCommandResult[],
+): void {
+    const pending = specs.filter(
+        (spec) =>
+            spec.declaredRequirement !== undefined &&
+            spec.incompleteReason !== undefined,
+    )
+    if (pending.length === 0) return
+    const { credited, uncovered } = creditDeclaredRequirements(
+        pending.map((spec) => spec.declaredRequirement!),
+        results,
+    )
+    if (credited.length === 0) return
+    const stillUncovered = new Set(uncovered)
+    const creditedBy = new Map(credited.map(({ file, creditedBy: by }) => [file, by]))
+    for (const spec of pending) {
+        if (stillUncovered.has(spec.declaredRequirement!)) continue
+        const index = results.findIndex(
+            (result) => result.command === spec.label && result.status === "skipped",
+        )
+        if (index < 0) continue
+        const by = [
+            ...new Set(
+                declaredRequirementFiles(spec.declaredRequirement!)
+                    .map((file) => creditedBy.get(file))
+                    .filter((value): value is string => value !== undefined),
+            ),
+        ]
+        results[index] = {
+            ...results[index]!,
+            status: "passed",
+            tail: `credited: executed by ${by.join(", ")}`,
+        }
+    }
 }

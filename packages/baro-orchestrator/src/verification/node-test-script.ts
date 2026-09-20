@@ -9,7 +9,11 @@
 import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 
-import { javascriptCommandDetails, type VerifyCommandSpec } from "./verify.js"
+import {
+    javascriptCommandDetails,
+    type VerifyCommandSpec,
+    type VerifyContainedPath,
+} from "./verify.js"
 
 interface NodeTestPackageManifest {
     scripts?: Record<string, unknown>
@@ -79,6 +83,97 @@ interface NodeTestGroup {
     allDeclared: boolean
 }
 
+interface DirectNodeTest {
+    /** Flag/value tokens preceding `--test`, the group's identity. */
+    flags: readonly string[]
+    files: readonly string[]
+}
+
+function parseDirectNodeTest(command: VerifyCommandSpec): DirectNodeTest | null {
+    if (command.tool !== "node" || command.incompleteReason || command.preflightFailure) {
+        return null
+    }
+    const testIndex = command.args.indexOf("--test")
+    if (testIndex < 0) return null
+    const flags = command.args.slice(0, testIndex)
+    const files = command.args.slice(testIndex + 1)
+    if (files.length === 0 || files.some((file) => file.startsWith("-"))) return null
+    return { flags, files }
+}
+
+/**
+ * One runner invocation per (cwd, flag set): declared focus files spawn one
+ * `node --test` run, so the declared budget counts invocations rather than
+ * files. A lone member keeps its own spec so nothing is rewritten needlessly.
+ */
+function coalesceDirectNodeTests(
+    commands: readonly VerifyCommandSpec[],
+): VerifyCommandSpec[] {
+    const members = new Map<string, number[]>()
+    const parsed = commands.map(parseDirectNodeTest)
+    parsed.forEach((direct, index) => {
+        if (!direct) return
+        const command = commands[index]!
+        const key = JSON.stringify([command.cwd ?? null, direct.flags])
+        const group = members.get(key)
+        if (group) group.push(index)
+        else members.set(key, [index])
+    })
+
+    const merged = new Map<number, string>()
+    for (const [key, indexes] of members) {
+        if (indexes.length < 2) continue
+        for (const index of indexes) merged.set(index, key)
+    }
+    if (merged.size === 0) return [...commands]
+
+    const emitted = new Set<string>()
+    const result: VerifyCommandSpec[] = []
+    commands.forEach((command, index) => {
+        const key = merged.get(index)
+        if (key === undefined) {
+            result.push(command)
+            return
+        }
+        if (emitted.has(key)) return
+        emitted.add(key)
+        const indexes = members.get(key)!
+        const flags = parsed[index]!.flags
+        const files: string[] = []
+        const contained = new Map<string, VerifyContainedPath>()
+        const allDeclared = indexes.every(
+            (member) => commands[member]!.origin === "declared",
+        )
+        for (const member of indexes) {
+            for (const file of parsed[member]!.files) {
+                if (!files.includes(file)) files.push(file)
+            }
+            for (const path of commands[member]!.containedPaths ?? []) {
+                const existing = contained.get(path.path)
+                contained.set(path.path, {
+                    path: path.path,
+                    requireFile: (existing?.requireFile ?? false) || path.requireFile,
+                    ...(existing?.allowMissing || path.allowMissing
+                        ? { allowMissing: true as const }
+                        : {}),
+                })
+            }
+        }
+        files.sort()
+        result.push({
+            label: ["node", ...flags, "--test", ...files].join(" "),
+            tool: "node",
+            args: [...flags, "--test", ...files],
+            ...(command.cwd !== undefined ? { cwd: command.cwd } : {}),
+            ...(allDeclared ? { origin: "declared" as const } : {}),
+            ...(contained.size > 0
+                ? { containedPaths: [...contained.values()] }
+                : {}),
+        })
+    })
+    return result
+}
+
 /**
  * Replaces every `<manager> run <script>` command whose script is a
  * `node --test` invocation with one direct `node --import tsx --test`
@@ -88,9 +183,10 @@ interface NodeTestGroup {
  * returned unchanged.
  */
 export function coalesceNodeTestScripts(
-    commands: readonly VerifyCommandSpec[],
+    input: readonly VerifyCommandSpec[],
     readPackageJson: ReadPackageJson = defaultReadPackageJson,
 ): VerifyCommandSpec[] {
+    const commands = coalesceDirectNodeTests(input)
     const manifestCache = new Map<string, NodeTestPackageManifest | null>()
     const groups = new Map<string, NodeTestGroup>()
     const groupKeyByIndex = new Map<number, string>()
@@ -128,7 +224,7 @@ export function coalesceNodeTestScripts(
         groupKeyByIndex.set(index, key)
     })
 
-    if (groups.size === 0) return [...commands]
+    if (groups.size === 0) return commands
 
     const emitted = new Set<string>()
     const result: VerifyCommandSpec[] = []

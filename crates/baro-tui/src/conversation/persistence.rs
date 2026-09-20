@@ -5,7 +5,7 @@ use std::path::Path;
 use super::contract::{validate_goal_envelope, validate_id, validate_text};
 use super::{
     ConversationError, ConversationPhase, ConversationSession, CONVERSATION_SCHEMA_VERSION,
-    MAX_COMPLETED_REQUESTS, MAX_MESSAGE_CHARS, MAX_PERSISTED_BYTES, MAX_TRANSCRIPT_TURNS,
+    MAX_COMPLETED_REQUESTS, MAX_PERSISTED_BYTES, MAX_TRANSCRIPT_TURNS,
 };
 
 impl ConversationSession {
@@ -95,7 +95,7 @@ impl ConversationSession {
             )));
         }
         for turn in &self.transcript {
-            validate_text("transcript text", &turn.text, MAX_MESSAGE_CHARS)?;
+            validate_text("transcript text", &turn.text, turn.source.stored_max_chars())?;
             if let Some(request_id) = &turn.request_id {
                 validate_id("transcript requestId", request_id)?;
             }
@@ -173,7 +173,9 @@ impl ConversationSession {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{ApplyOutcome, ConversationKind, ConversationWireResponse, GoalEnvelope};
+    use super::super::{
+        ApplyOutcome, ConversationKind, ConversationWireResponse, GoalEnvelope, MessageSource,
+    };
     use super::*;
 
     fn envelope() -> GoalEnvelope {
@@ -196,6 +198,23 @@ mod tests {
             questions: vec![],
             goal_envelope: Some(envelope()),
         }
+    }
+
+    #[test]
+    fn a_goal_file_turn_survives_the_snapshot_that_would_refuse_a_prompt_line() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("conversation.json");
+        let goal = "a".repeat(12_000);
+        let mut session = ConversationSession::new("session-1").unwrap();
+        session
+            .begin_request_from(MessageSource::GoalFile, "request-1", goal.clone())
+            .unwrap();
+        session.save_to_path(&path).unwrap();
+
+        let loaded = ConversationSession::load_from_path(&path).unwrap();
+        assert_eq!(loaded, session);
+        assert_eq!(loaded.transcript()[0].text, goal);
+        assert_eq!(loaded.goal_source(), MessageSource::GoalFile);
     }
 
     #[test]

@@ -146,6 +146,13 @@ export class WorktreeManager {
     private createdWorktree = false
     private readonly createdPaths = new Set<string>()
     private retainedAfterCleanup = false
+    /** Stories a verification still has an open cwd in, by lease count. */
+    private readonly verificationLeases = new Map<string, number>()
+    /** Stories whose removal a lease postponed; release owes them a cleanup. */
+    private readonly deferredCleanup = new Set<string>()
+    /** Removals started by a lease release, so the final sweep can await them
+     *  instead of leaving git work running past the run. */
+    private pendingCleanup: Promise<void> = Promise.resolve()
 
     constructor(
         private readonly repoRoot: string,
@@ -989,6 +996,7 @@ export class WorktreeManager {
 
     /** Remove a story's worktree + branch (after merge-back, or on failure). */
     async cleanup(storyId: string): Promise<void> {
+        if (this.deferToVerificationLease(storyId, "cleanup")) return
         const path = this.paths.get(storyId)
         const branch = this.branchOf(storyId)
         const release = await this.gate.acquire()
@@ -1016,10 +1024,15 @@ export class WorktreeManager {
          * worktree path and branch must remain untouched for safety. */
         retainStoryIds?: ReadonlySet<string>
     } = {}): Promise<void> {
+        await this.pendingCleanup
         const release = await this.gate.acquire()
         let keptDirtyRecovery = false
         try {
             for (const [storyId, path] of this.paths) {
+                if (this.deferToVerificationLease(storyId, "cleanupAll")) {
+                    keptDirtyRecovery = true
+                    continue
+                }
                 if (options.retainStoryIds?.has(storyId)) {
                     keptDirtyRecovery = true
                     this.log(
@@ -1088,6 +1101,49 @@ export class WorktreeManager {
     /** Whether the last cleanupAll left a story worktree in place. */
     hasRetainedWorktrees(): boolean {
         return this.retainedAfterCleanup
+    }
+
+    /**
+     * Hold a story's worktree open for a verification that resolved its cwd
+     * inside it. Removing the tree mid-command is what makes a finished run
+     * report ENOENT, so cleanup defers to the release returned here. The
+     * release is idempotent and safe in a `finally`.
+     */
+    retainForVerification(agentId: string): () => void {
+        this.verificationLeases.set(
+            agentId,
+            (this.verificationLeases.get(agentId) ?? 0) + 1,
+        )
+        let released = false
+        return () => {
+            if (released) return
+            released = true
+            const remaining = (this.verificationLeases.get(agentId) ?? 1) - 1
+            if (remaining > 0) {
+                this.verificationLeases.set(agentId, remaining)
+                return
+            }
+            this.verificationLeases.delete(agentId)
+            if (!this.deferredCleanup.delete(agentId)) return
+            this.pendingCleanup = this.pendingCleanup.then(() =>
+                this.cleanup(agentId).catch((error: unknown) => {
+                    this.log(
+                        `deferred cleanup of story ${agentId} failed: ${errMsg(error)}`,
+                    )
+                }),
+            )
+        }
+    }
+
+    /** True once the removal has been recorded as owed to the lease release. */
+    private deferToVerificationLease(storyId: string, reason: string): boolean {
+        if ((this.verificationLeases.get(storyId) ?? 0) === 0) return false
+        this.deferredCleanup.add(storyId)
+        this.log(
+            `deferred ${reason} of story ${storyId}: a verification still ` +
+                `references its worktree; removal waits for the lease release`,
+        )
+        return true
     }
 
     /**

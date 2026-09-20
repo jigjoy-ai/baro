@@ -12,10 +12,12 @@ mod session;
 
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 pub use context::ConversationContextSnapshot;
 pub use contract::{
-    render_planning_prompt, ClarificationQuestion, ConversationKind, ConversationWireResponse,
-    GoalEnvelope,
+    render_planning_prompt, truncate_goal_for_intake, ClarificationQuestion, ConversationKind,
+    ConversationWireResponse, GoalEnvelope,
 };
 pub use session::{
     ApplyOutcome, ConversationPhase, ConversationSession, TranscriptRole, TranscriptTurn,
@@ -25,8 +27,52 @@ pub const CONVERSATION_SCHEMA_VERSION: u8 = 1;
 
 pub(super) const MAX_PERSISTED_BYTES: u64 = 2 * 1024 * 1024;
 pub(super) const MAX_MESSAGE_CHARS: usize = 8_000;
+/// The intake context ceiling for a goal read from `--goal-file`, in the same
+/// UTF-16 code units `MAX_MESSAGE_CHARS` counts.
+pub const MAX_GOAL_FILE_CHARS: usize = 120_000;
+/// The truncation note is prepended after the goal is cut, so a stored
+/// goal-file turn sits one note line above the intake ceiling.
+pub(super) const MAX_INTAKE_NOTE_CHARS: usize = 256;
 pub(super) const MAX_TRANSCRIPT_TURNS: usize = 256;
 pub(super) const MAX_COMPLETED_REQUESTS: usize = 4_096;
+
+/// Where an intake turn's text came from. The 8 000-character ceiling is a
+/// property of the interactive prompt line, not of every goal, so provenance
+/// travels with the text instead of being inferred from its length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MessageSource {
+    #[default]
+    InteractivePrompt,
+    GoalFile,
+}
+
+impl MessageSource {
+    /// Intake ceiling for this source, in UTF-16 code units.
+    pub(super) const fn max_chars(self) -> usize {
+        match self {
+            Self::InteractivePrompt => MAX_MESSAGE_CHARS,
+            Self::GoalFile => MAX_GOAL_FILE_CHARS,
+        }
+    }
+
+    /// Ceiling a persisted turn from this source may reach.
+    pub(super) const fn stored_max_chars(self) -> usize {
+        match self {
+            Self::InteractivePrompt => MAX_MESSAGE_CHARS,
+            Self::GoalFile => MAX_GOAL_FILE_CHARS + MAX_INTAKE_NOTE_CHARS,
+        }
+    }
+
+    /// Over its ceiling the prompt line is refused; a goal file is truncated.
+    pub(super) const fn truncates_over_ceiling(self) -> bool {
+        matches!(self, Self::GoalFile)
+    }
+
+    pub(super) fn is_interactive_prompt(&self) -> bool {
+        matches!(self, Self::InteractivePrompt)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConversationError {

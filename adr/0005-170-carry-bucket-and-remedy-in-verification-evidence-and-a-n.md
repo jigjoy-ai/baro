@@ -1,0 +1,10 @@
+# ADR-0005: #170: carry bucket and remedy in verification evidence and a new semantic event, not on the TUI wire
+
+**Status:** Accepted
+**Context:** VerificationCommandEvidence (events/verification.ts:23-35) already carries retriedAfterFailure and firstFailureTail, and verify.ts:84-96 keeps a near-duplicate shape. The wire BaroEvent union (tui-protocol.ts:83-226) must mirror the Rust serde enum in crates/baro-tui/src/events.rs, so adding a wire event would force a cross-stack change that this goal does not ask for.
+**Decision:** Extend both shapes with the same optional fields: in src/events/verification.ts add to VerificationCommandEvidence `failureBucket?: FailureBucket` and `remedy?: FailureRemedy` (types imported from ../verification/failure-signals.js), and add the identical two fields to VerifyCommandResult at verify.ts:84-96. Populate them in the result assembly at verify.ts:1446-1461 for every command that failed at least once, including one that later passed on retry.
+Add one semantic event in src/events/verification.ts, barrel-exported from src/semantic-events.ts:
+  export interface RunVerificationRetryClassifiedData { runId: string; verificationId: string; command: string; bucket: FailureBucket; remedy: FailureRemedy; signalId: string | null; retried: boolean; tail: string }
+  export const RunVerificationRetryClassified = defineSemanticEvent<RunVerificationRetryClassifiedData>("run_verification_retry_classified")
+Emit it once per classified failure from the same place that emits run_verification_completed (run-verifier.ts emit path, :198-202). Do NOT add a variant to BaroEvent in src/tui-protocol.ts and do NOT touch crates/baro-tui/src/events.rs.
+**Consequences:** Both fields are optional, so every existing construction of VerificationCommandEvidence still typechecks. The wire protocol and the Rust mirror stay untouched, keeping cargo build/cargo test out of STORY-170's blast radius. The `tail` on the event is the already-bounded firstFailureTail, not raw output.
