@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
-use crate::conversation::GoalEnvelope;
+use crate::conversation::{truncate_goal_for_intake, GoalEnvelope, MessageSource};
 use crate::executor::PrdFile;
 
 pub(crate) const PROGRESSIVE_PLANNING_ENV: &str = "BARO_PROGRESSIVE_PLANNING";
@@ -146,8 +146,9 @@ pub(crate) struct ProgressiveBootstrapMetadata {
 pub(crate) fn deterministic_bootstrap_metadata(
     cwd: &Path,
     goal: &str,
+    goal_source: MessageSource,
 ) -> Result<ProgressiveBootstrapMetadata, ProgressivePlanningBootstrapError> {
-    let description = normalize_goal(goal)?;
+    let description = normalize_goal(goal, goal_source)?;
     let project = cwd
         .file_name()
         .map(|name| normalized_display(name.to_string_lossy().as_ref()))
@@ -204,12 +205,21 @@ fn planning_objective(goal: &str) -> &str {
     goal
 }
 
-fn normalize_goal(goal: &str) -> Result<String, ProgressivePlanningBootstrapError> {
+/// `MAX_GOAL_CHARS` is the interactive prompt line's ceiling. A goal read from
+/// a file is held to the intake ceiling instead, and is truncated with the
+/// unread range named rather than refused.
+fn normalize_goal(
+    goal: &str,
+    source: MessageSource,
+) -> Result<String, ProgressivePlanningBootstrapError> {
     let normalized = goal.split_whitespace().collect::<Vec<_>>().join(" ");
     if normalized.is_empty() {
         return Err(ProgressivePlanningBootstrapError::InvalidGoal(
             "goal must be non-empty".to_string(),
         ));
+    }
+    if source == MessageSource::GoalFile {
+        return Ok(truncate_goal_for_intake(&normalized).unwrap_or(normalized));
     }
     if normalized.chars().count() > MAX_GOAL_CHARS {
         return Err(ProgressivePlanningBootstrapError::InvalidGoal(format!(
@@ -271,6 +281,7 @@ fn stable_hash64(bytes: &[u8]) -> u64 {
 pub(crate) struct ProgressiveBootstrapInput<'a> {
     pub cwd: &'a Path,
     pub goal: &'a str,
+    pub goal_source: MessageSource,
     pub ids: &'a ProgressivePlanningIds,
     pub decision_document: Option<&'a str>,
     pub execution_mode: Option<&'a Value>,
@@ -295,7 +306,7 @@ pub(crate) fn build_progressive_bootstrap_prd(
             });
         }
     }
-    let metadata = deterministic_bootstrap_metadata(input.cwd, input.goal)?;
+    let metadata = deterministic_bootstrap_metadata(input.cwd, input.goal, input.goal_source)?;
     let runtime_graph = json!({
         "runId": input.ids.run_id(),
         "version": 1,
@@ -411,7 +422,9 @@ mod tests {
         progressive_planning_enabled_with_env, PrivateProgressiveBootstrapFile,
         ProgressiveBootstrapInput, ProgressivePlanningIds,
     };
-    use crate::conversation::{render_planning_prompt, GoalEnvelope};
+    use crate::conversation::{
+        render_planning_prompt, GoalEnvelope, MessageSource, MAX_GOAL_FILE_CHARS,
+    };
     use crate::executor::PrdFile;
 
     #[test]
@@ -466,11 +479,13 @@ mod tests {
         let first = deterministic_bootstrap_metadata(
             cwd,
             "  Add progressive planning while keeping legacy safe.  ",
+            MessageSource::InteractivePrompt,
         )
         .unwrap();
         let second = deterministic_bootstrap_metadata(
             cwd,
             "Add progressive planning while keeping legacy safe.",
+            MessageSource::InteractivePrompt,
         )
         .unwrap();
         assert_eq!(first, second);
@@ -488,10 +503,35 @@ mod tests {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-')));
         assert_ne!(
             first.branch_name,
-            deterministic_bootstrap_metadata(cwd, "A different goal")
+            deterministic_bootstrap_metadata(cwd, "A different goal", MessageSource::InteractivePrompt)
                 .unwrap()
                 .branch_name
         );
+    }
+
+    #[test]
+    fn the_goal_length_ceiling_follows_the_goal_source() {
+        let cwd = Path::new("/tmp/My Repository");
+        let long = "word ".repeat(3_000);
+        assert_eq!(long.trim_end().chars().count(), 14_999);
+
+        assert!(deterministic_bootstrap_metadata(
+            cwd,
+            &long,
+            MessageSource::InteractivePrompt
+        )
+        .is_err());
+
+        let from_file =
+            deterministic_bootstrap_metadata(cwd, &long, MessageSource::GoalFile).unwrap();
+        assert_eq!(from_file.description.chars().count(), 14_999);
+
+        let over_ceiling = "x ".repeat(MAX_GOAL_FILE_CHARS);
+        let truncated =
+            deterministic_bootstrap_metadata(cwd, &over_ceiling, MessageSource::GoalFile).unwrap();
+        assert!(truncated
+            .description
+            .starts_with("note: goal truncated for intake; read characters 1-"));
     }
 
     #[test]
@@ -506,7 +546,12 @@ mod tests {
         let rendered = render_planning_prompt(&envelope).unwrap();
 
         let metadata =
-            deterministic_bootstrap_metadata(Path::new("/tmp/My Repository"), &rendered).unwrap();
+            deterministic_bootstrap_metadata(
+                Path::new("/tmp/My Repository"),
+                &rendered,
+                MessageSource::InteractivePrompt,
+            )
+            .unwrap();
 
         assert!(
             metadata
@@ -538,6 +583,7 @@ mod tests {
         let prd = build_progressive_bootstrap_prd(ProgressiveBootstrapInput {
             cwd: Path::new("/work/baro"),
             goal: "Implement progressive planning",
+            goal_source: MessageSource::InteractivePrompt,
             ids: &ids,
             decision_document: Some("# Decisions\n- Preserve event authority"),
             execution_mode: Some(&mode),
@@ -589,6 +635,7 @@ mod tests {
         let prd = build_progressive_bootstrap_prd(ProgressiveBootstrapInput {
             cwd: Path::new("/work/baro"),
             goal: "Persist story status mid-run",
+            goal_source: MessageSource::InteractivePrompt,
             ids: &ids,
             decision_document: None,
             execution_mode: None,
@@ -623,6 +670,7 @@ mod tests {
         let prd = build_progressive_bootstrap_prd(ProgressiveBootstrapInput {
             cwd: Path::new("/work/baro"),
             goal: "Stream a plan",
+            goal_source: MessageSource::InteractivePrompt,
             ids: &ids,
             decision_document: None,
             execution_mode: None,

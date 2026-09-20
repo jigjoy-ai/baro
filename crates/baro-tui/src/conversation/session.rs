@@ -2,10 +2,11 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use super::contract::{normalized_text, validate_id, validate_response};
+use super::contract::{normalized_source_text, normalized_text, validate_id, validate_response};
 use super::{
     render_planning_prompt, ConversationError, ConversationKind, ConversationWireResponse,
-    GoalEnvelope, CONVERSATION_SCHEMA_VERSION, MAX_MESSAGE_CHARS, MAX_TRANSCRIPT_TURNS,
+    GoalEnvelope, MessageSource, CONVERSATION_SCHEMA_VERSION, MAX_MESSAGE_CHARS,
+    MAX_TRANSCRIPT_TURNS,
 };
 
 /// The caller-visible lifecycle of one conversation-backed goal.
@@ -43,6 +44,11 @@ pub struct TranscriptTurn {
     pub request_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<ConversationKind>,
+    /// Decides which intake ceiling this turn was admitted under, so a
+    /// reloaded snapshot revalidates it the way it was accepted. Omitted for
+    /// the default source, which keeps pre-existing snapshots byte-identical.
+    #[serde(default, skip_serializing_if = "MessageSource::is_interactive_prompt")]
+    pub source: MessageSource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,14 +117,35 @@ impl ConversationSession {
         self.goal_envelope.as_ref()
     }
 
+    /// Where this conversation's goal came in from — the provenance of its
+    /// first user turn, which downstream length rules must honour too.
+    pub fn goal_source(&self) -> MessageSource {
+        self.transcript
+            .iter()
+            .find(|turn| turn.role == TranscriptRole::User)
+            .map(|turn| turn.source)
+            .unwrap_or_default()
+    }
+
     /// Record a caller-correlated user turn and open exactly one response slot.
     pub fn begin_request(
         &mut self,
         request_id: impl Into<String>,
         text: impl Into<String>,
     ) -> Result<(), ConversationError> {
+        self.begin_request_from(MessageSource::InteractivePrompt, request_id, text)
+    }
+
+    /// `begin_request` for a caller that knows where the text came from: the
+    /// ceiling and the over-ceiling behaviour follow the source, not the turn.
+    pub fn begin_request_from(
+        &mut self,
+        source: MessageSource,
+        request_id: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Result<(), ConversationError> {
         let request_id = request_id.into();
-        let text = normalized_text("user message", text.into(), MAX_MESSAGE_CHARS)?;
+        let text = normalized_source_text("user message", text.into(), source)?;
         validate_id("requestId", &request_id)?;
         if let Some(active) = &self.pending_request_id {
             return Err(ConversationError::RequestInFlight(active.clone()));
@@ -134,6 +161,7 @@ impl ConversationSession {
             text,
             request_id: Some(request_id.clone()),
             kind: None,
+            source,
         });
         self.pending_request_id = Some(request_id);
         Ok(())
@@ -184,6 +212,7 @@ impl ConversationSession {
             text: assistant_text,
             request_id: Some(request_id.clone()),
             kind: Some(kind),
+            source: MessageSource::InteractivePrompt,
         });
 
         match kind {
@@ -264,6 +293,7 @@ impl ConversationSession {
             text: format!("{PREFIX}{reason}"),
             request_id: Some(request_id.clone()),
             kind: None,
+            source: MessageSource::InteractivePrompt,
         });
         self.pending_request_id = None;
         self.completed_request_ids.insert(request_id);
@@ -310,6 +340,7 @@ impl ConversationSession {
             text,
             request_id: Some(request_id.clone()),
             kind: Some(ConversationKind::Answer),
+            source: MessageSource::InteractivePrompt,
         });
         self.pending_request_id = None;
         self.completed_request_ids.insert(request_id);
@@ -377,6 +408,7 @@ impl ConversationSession {
             text: format!("Conversation turn failed: {error}"),
             request_id: Some(request_id.clone()),
             kind: None,
+            source: MessageSource::InteractivePrompt,
         });
         self.pending_request_id = None;
         self.completed_request_ids.insert(request_id);
@@ -451,6 +483,7 @@ impl ConversationSession {
             text,
             request_id: None,
             kind: None,
+            source: MessageSource::InteractivePrompt,
         });
         Ok(())
     }
@@ -463,6 +496,7 @@ impl ConversationSession {
             text,
             request_id: None,
             kind: None,
+            source: MessageSource::InteractivePrompt,
         });
         Ok(())
     }
@@ -475,6 +509,7 @@ impl ConversationSession {
             text,
             request_id: None,
             kind: None,
+            source: MessageSource::InteractivePrompt,
         });
         Ok(())
     }

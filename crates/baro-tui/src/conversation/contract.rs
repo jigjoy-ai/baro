@@ -2,7 +2,9 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use super::{ConversationError, ConversationPhase, MAX_MESSAGE_CHARS};
+use super::{
+    ConversationError, ConversationPhase, MessageSource, MAX_GOAL_FILE_CHARS, MAX_MESSAGE_CHARS,
+};
 
 const MAX_WIRE_BYTES: usize = 128 * 1024;
 const MAX_ID_CHARS: usize = 128;
@@ -342,12 +344,65 @@ pub(super) fn normalized_text(
     value: String,
     max_chars: usize,
 ) -> Result<String, ConversationError> {
-    // Match JavaScript's `value.replace(/\r\n?/g, "\n").trim()` exactly at
-    // the Rust/TypeScript GoalEnvelope boundary.
-    let normalized = value.replace("\r\n", "\n").replace('\r', "\n");
-    let normalized = normalized.trim().to_string();
+    let normalized = normalize_line_endings(value);
     validate_text(field, &normalized, max_chars)?;
     Ok(normalized)
+}
+
+/// Intake text whose ceiling is decided by where it came from. Over that
+/// ceiling the interactive prompt line is refused, while a goal file is cut to
+/// the ceiling and prefixed with the range it did not read.
+pub(super) fn normalized_source_text(
+    field: &'static str,
+    value: String,
+    source: MessageSource,
+) -> Result<String, ConversationError> {
+    let normalized = normalize_line_endings(value);
+    if source.truncates_over_ceiling() {
+        if let Some(noted) = truncate_goal_for_intake(&normalized) {
+            // Length is bounded by construction; the character rules are the
+            // ones every other intake turn passes.
+            validate_characters(field, noted.trim())?;
+            return Ok(noted);
+        }
+    }
+    validate_text(field, &normalized, source.max_chars())?;
+    Ok(normalized)
+}
+
+// Match JavaScript's `value.replace(/\r\n?/g, "\n").trim()` exactly at the
+// Rust/TypeScript GoalEnvelope boundary.
+fn normalize_line_endings(value: String) -> String {
+    value
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .trim()
+        .to_string()
+}
+
+/// Keep the first `MAX_GOAL_FILE_CHARS` UTF-16 code units and name the range
+/// the intake model never saw. `None` when nothing was dropped.
+pub fn truncate_goal_for_intake(value: &str) -> Option<String> {
+    let total = value.encode_utf16().count();
+    if total <= MAX_GOAL_FILE_CHARS {
+        return None;
+    }
+    // A surrogate pair straddling the ceiling is dropped whole rather than
+    // split, so `kept` can land one unit under it.
+    let mut kept = String::new();
+    let mut units = 0usize;
+    for character in value.chars() {
+        let width = character.len_utf16();
+        if units + width > MAX_GOAL_FILE_CHARS {
+            break;
+        }
+        units += width;
+        kept.push(character);
+    }
+    Some(format!(
+        "note: goal truncated for intake; read characters 1-{units} of {total}; characters {}-{total} were not read\n{kept}",
+        units + 1
+    ))
 }
 
 pub(super) fn validate_text(
@@ -369,6 +424,13 @@ pub(super) fn validate_text(
             actual: chars,
             limit: max_chars,
         });
+    }
+    validate_characters(field, trimmed)
+}
+
+fn validate_characters(field: &'static str, trimmed: &str) -> Result<(), ConversationError> {
+    if trimmed.is_empty() {
+        return Err(ConversationError::MissingRequired(field));
     }
     if trimmed.chars().any(|character| {
         (character.is_control() && character != '\n' && character != '\t')
@@ -486,6 +548,50 @@ mod tests {
         let mut no_acceptance = envelope();
         no_acceptance.acceptance_criteria.clear();
         assert!(render_planning_prompt(&no_acceptance).is_err());
+    }
+
+    #[test]
+    fn the_intake_ceiling_follows_the_source_but_the_character_rules_do_not() {
+        // Both ceilings count UTF-16 code units, so 60 001 emoji are 120 002.
+        let emoji = "\u{1f600}".repeat(MAX_GOAL_FILE_CHARS / 2 + 1);
+        let noted =
+            normalized_source_text("user message", emoji.clone(), MessageSource::GoalFile).unwrap();
+        assert_eq!(
+            noted.lines().next().unwrap(),
+            "note: goal truncated for intake; read characters 1-120000 of 120002; \
+             characters 120001-120002 were not read"
+        );
+        // The same text is refused outright on the prompt line.
+        assert!(matches!(
+            normalized_source_text("user message", emoji, MessageSource::InteractivePrompt),
+            Err(ConversationError::TextTooLong {
+                limit: MAX_MESSAGE_CHARS,
+                ..
+            })
+        ));
+
+        for source in [MessageSource::InteractivePrompt, MessageSource::GoalFile] {
+            assert!(matches!(
+                normalized_source_text("message", "safe\u{202e}unsafe".to_string(), source),
+                Err(ConversationError::UnsafeControlCharacter("message"))
+            ));
+            assert!(matches!(
+                normalized_source_text("message", "bad\0message".to_string(), source),
+                Err(ConversationError::UnsafeControlCharacter("message"))
+            ));
+            assert!(matches!(
+                normalized_source_text("message", "   ".to_string(), source),
+                Err(ConversationError::MissingRequired("message"))
+            ));
+        }
+
+        // Truncation does not smuggle a bidi override past the character rules.
+        let mut smuggled = "\u{202e}".to_string();
+        smuggled.push_str(&"a".repeat(MAX_GOAL_FILE_CHARS + 10));
+        assert!(matches!(
+            normalized_source_text("message", smuggled, MessageSource::GoalFile),
+            Err(ConversationError::UnsafeControlCharacter("message"))
+        ));
     }
 
     #[test]

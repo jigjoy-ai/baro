@@ -18,7 +18,16 @@ use crate::cli::{launch, run_registry};
 /// The parent's argv minus `--detach` and `--goal-file`, forced headless. The
 /// child has no TTY, and `resolve_goal` has already read the goal file into
 /// `cli.goal`, so the file need not exist (or be readable) for the child.
-pub fn detached_child_args(raw_args: &[String], resolved_goal: Option<&str>) -> Vec<String> {
+///
+/// Stripping `--goal-file` would also strip the goal's provenance, and the
+/// child revalidates the text it is given: `--goal-from-file` carries that
+/// provenance across, so the child applies the goal-file ceiling rather than
+/// the interactive prompt line's.
+pub fn detached_child_args(
+    raw_args: &[String],
+    resolved_goal: Option<&str>,
+    goal_from_file: bool,
+) -> Vec<String> {
     let mut out: Vec<String> = Vec::with_capacity(raw_args.len());
     let mut skip_next_value = false;
     for arg in raw_args.iter().skip(1) {
@@ -50,6 +59,10 @@ pub fn detached_child_args(raw_args: &[String], resolved_goal: Option<&str>) -> 
         if !out.iter().any(|a| a == goal) {
             out.push(goal.to_string());
         }
+    }
+
+    if goal_from_file && !out.iter().any(|a| a == "--goal-from-file") {
+        out.push("--goal-from-file".to_string());
     }
     out
 }
@@ -90,7 +103,11 @@ pub fn run_detached(cli: &crate::cli::cli::Cli, raw_args: &[String]) -> io::Resu
 
     let mut command = Command::new(std::env::current_exe()?);
     command
-        .args(detached_child_args(raw_args, cli.goal.as_deref()))
+        .args(detached_child_args(
+            raw_args,
+            cli.goal.as_deref(),
+            crate::cli::cli::goal_came_from_file(cli.goal_file.as_deref(), cli.goal_from_file),
+        ))
         .current_dir(&cli.cwd)
         .stdin(Stdio::null())
         .stdout(out)
@@ -149,14 +166,12 @@ mod tests {
     fn the_child_argv_drops_detach_and_goal_file_and_forces_headless() {
         let separate = detached_child_args(
             &argv(&["baro", "--detach", "--resume", "--goal-file", "./goal.md", "--shell-budget", "45"]),
-            Some("ship it"),
-        );
+            Some("ship it"), false);
         assert_eq!(separate, argv(&["--resume", "--shell-budget", "45", "--headless", "ship it"]));
 
         let inline = detached_child_args(
             &argv(&["baro", "--detach", "--continue", "--goal-file=./goal.md"]),
-            Some("ship it"),
-        );
+            Some("ship it"), false);
         assert_eq!(inline, argv(&["--continue", "--headless", "ship it"]));
     }
 
@@ -164,36 +179,59 @@ mod tests {
     fn an_already_headless_argv_is_not_given_a_second_headless_flag() {
         let already = detached_child_args(
             &argv(&["baro", "--detach", "--resume", "--headless", "--shell-budget", "45"]),
-            None,
-        );
+            None, false);
         assert_eq!(already, argv(&["--resume", "--headless", "--shell-budget", "45"]));
         assert_eq!(already.iter().filter(|a| *a == "--headless").count(), 1);
 
         let with_goal =
-            detached_child_args(&argv(&["baro", "--detach", "--headless", "ship it"]), Some("ship it"));
+            detached_child_args(&argv(&["baro", "--detach", "--headless", "ship it"]), Some("ship it"), false);
         assert_eq!(with_goal, argv(&["--headless", "ship it"]));
     }
 
     #[test]
     fn the_resolved_goal_is_appended_only_when_no_positional_survives() {
-        let positional = detached_child_args(&argv(&["baro", "ship it", "--detach"]), Some("ship it"));
+        let positional = detached_child_args(&argv(&["baro", "ship it", "--detach"]), Some("ship it"), false);
         assert_eq!(positional, argv(&["ship it", "--headless"]));
 
         // From --goal-file the goal is file text no surviving token can equal.
         let from_file = detached_child_args(
             &argv(&["baro", "--detach", "--goal-file", "./goal.md"]),
-            Some("read from the file"),
-        );
+            Some("read from the file"), false);
         assert_eq!(from_file, argv(&["--headless", "read from the file"]));
 
         // A flag value is not a positional, so the goal still has to be added.
         let value_only = detached_child_args(
             &argv(&["baro", "--detach", "--shell-budget", "45"]),
-            Some("ship it"),
-        );
+            Some("ship it"), false);
         assert_eq!(value_only, argv(&["--shell-budget", "45", "--headless", "ship it"]));
 
-        assert_eq!(detached_child_args(&argv(&["baro", "--detach"]), None), argv(&["--headless"]));
+        assert_eq!(detached_child_args(&argv(&["baro", "--detach"]), None, false), argv(&["--headless"]));
+    }
+
+    #[test]
+    fn the_child_argv_records_goal_file_provenance_rather_than_a_bare_positional() {
+        let from_file = detached_child_args(
+            &argv(&["baro", "--detach", "--goal-file", "./goal.md"]),
+            Some("read from the file"),
+            true,
+        );
+        assert_eq!(
+            from_file,
+            argv(&["--headless", "read from the file", "--goal-from-file"])
+        );
+
+        // A typed positional goal keeps the prompt line's provenance.
+        let positional =
+            detached_child_args(&argv(&["baro", "ship it", "--detach"]), Some("ship it"), false);
+        assert!(!positional.iter().any(|a| a == "--goal-from-file"));
+
+        // A child that is itself re-execed must not accumulate markers.
+        let already = detached_child_args(
+            &argv(&["baro", "--detach", "--goal-from-file", "ship it"]),
+            Some("ship it"),
+            true,
+        );
+        assert_eq!(already.iter().filter(|a| *a == "--goal-from-file").count(), 1);
     }
 
     #[test]
