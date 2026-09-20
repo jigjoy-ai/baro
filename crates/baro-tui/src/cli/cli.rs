@@ -19,6 +19,10 @@ pub struct Cli {
     #[arg(long = "goal-file", value_name = "PATH")]
     pub goal_file: Option<String>,
 
+    /// Mark the goal as goal-file text so a detached child keeps the goal-file length ceiling
+    #[arg(long = "goal-from-file", hide = true)]
+    pub goal_from_file: bool,
+
     /// Run in the background and print the run id immediately
     #[arg(long)]
     pub detach: bool,
@@ -267,6 +271,13 @@ fn parse_shell_budget(raw: &str) -> Result<u64, String> {
 
 /// Resolve the goal text from the positional argument or --goal-file.
 /// `read` is injected so the rules stay testable without touching the filesystem.
+/// True when the goal text is goal-file provenance rather than a typed prompt
+/// line: either this process read the file, or a detaching parent did and
+/// marked the child's argv.
+pub fn goal_came_from_file(goal_file: Option<&str>, marker: bool) -> bool {
+    goal_file.is_some() || marker
+}
+
 pub fn resolve_goal(
     positional: Option<&str>,
     goal_file: Option<&str>,
