@@ -19,6 +19,7 @@ import {
     createVerifyPlan,
     mergeVerifyPlans,
     verifyBuild,
+    type VerifyBuildOptions,
     type VerifyCommandResult,
     type VerifyPlan,
     type VerifyResult,
@@ -57,6 +58,13 @@ export class RunVerifier extends SerializedObserver {
     private readonly runningStories = new Set<string>()
     private readonly verify: (cwd: string, signal: AbortSignal) => Promise<VerifyResult>
     private requestAuthority: Participant | null = null
+    /**
+     * What verifyBuild actually decided, per command label, for the
+     * verification in flight. The gate is the only place that knows which
+     * signal fired and which remedy ran, so its verdict outranks anything
+     * re-derived here; an injected verify() simply leaves it empty.
+     */
+    private retryDecisions = new Map<string, RetryDecisionInfo>()
 
     constructor(private readonly opts: RunVerifierOptions) {
         super()
@@ -75,6 +83,8 @@ export class RunVerifier extends SerializedObserver {
                     hostRepoRoot: opts.hostRepoRoot,
                     signal,
                     storyExecutorsActive,
+                    onRetryDecision: (info) =>
+                        void this.retryDecisions.set(info.command, info),
                 }))
     }
 
@@ -148,6 +158,7 @@ export class RunVerifier extends SerializedObserver {
         controller: AbortController,
     ): Promise<void> {
         const startedAt = Date.now()
+        this.retryDecisions = new Map()
         try {
             const result = await this.verify(this.opts.cwd, controller.signal)
             if (controller.signal.aborted) return
@@ -160,7 +171,10 @@ export class RunVerifier extends SerializedObserver {
             const hasPassedCommand = result.commands.some(
                 (command) => command.status === "passed",
             )
-            const { commands, classified } = classifyCommands(result.commands)
+            const { commands, classified } = classifyCommands(
+                result.commands,
+                this.retryDecisions,
+            )
             this.complete(
                 {
                     runId: this.opts.runId,
@@ -178,14 +192,17 @@ export class RunVerifier extends SerializedObserver {
             )
         } catch (error) {
             if (controller.signal.aborted) return
-            const { commands, classified } = classifyCommands([
-                {
-                    command: "baro run verifier",
-                    status: "failed",
-                    durationMs: Date.now() - startedAt,
-                    tail: messageOf(error),
-                },
-            ])
+            const { commands, classified } = classifyCommands(
+                [
+                    {
+                        command: "baro run verifier",
+                        status: "failed",
+                        durationMs: Date.now() - startedAt,
+                        tail: messageOf(error),
+                    },
+                ],
+                this.retryDecisions,
+            )
             this.complete(
                 {
                     runId: this.opts.runId,
@@ -239,14 +256,23 @@ type ClassifiedFailure = Omit<
     "runId" | "verificationId"
 >
 
+type RetryDecisionInfo = Parameters<
+    NonNullable<VerifyBuildOptions["onRetryDecision"]>
+>[0]
+
 /**
  * Stamps bucket + remedy on every command that failed at least once — a
  * command that passed on retry included, since its first failure is what the
  * classification explains. The judged tail is that first failure's, and the
  * runner's own observations (a vanished cwd, a kill at the ceiling) outrank
- * anything re-derived from the text.
+ * anything re-derived from the text. Re-derivation is the fallback: a result
+ * the gate already classified keeps the gate's verdict, so the evidence and
+ * the event say exactly what verifyBuild did.
  */
-function classifyCommands(results: readonly VerifyCommandResult[]): {
+function classifyCommands(
+    results: readonly VerifyCommandResult[],
+    decisions: ReadonlyMap<string, RetryDecisionInfo> = new Map(),
+): {
     commands: VerificationCommandEvidence[]
     classified: ClassifiedFailure[]
 } {
@@ -259,19 +285,18 @@ function classifyCommands(results: readonly VerifyCommandResult[]): {
             timedOut: result.timedOut,
             environment: result.environment,
         })
+        const bucket = result.failureBucket ?? classification.bucket
+        const remedy = result.remedy ?? classification.remedy
         classified.push({
             command: result.command,
-            bucket: classification.bucket,
-            remedy: classification.remedy,
-            signalId: classification.signalId,
+            bucket,
+            remedy,
+            signalId:
+                decisions.get(result.command)?.signalId ?? classification.signalId,
             retried,
             tail,
         })
-        return {
-            ...result,
-            failureBucket: classification.bucket,
-            remedy: classification.remedy,
-        }
+        return { ...result, failureBucket: bucket, remedy }
     })
     return { commands, classified }
 }

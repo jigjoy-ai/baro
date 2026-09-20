@@ -126,14 +126,18 @@ function cwdProbe(log: string): string[] {
     ]
 }
 
-/** Appends one line per attempt and fails on the first, so retries are countable. */
+/**
+ * Appends one line per attempt and fails on the first, so retries are
+ * countable. The tail names an environment failure because only an
+ * environment or time-ceiling classification earns the single retry.
+ */
 function flakyProbe(log: string): string[] {
     return [
         "-e",
         `const fs = require('fs');` +
             `fs.appendFileSync(${JSON.stringify(log)}, process.cwd() + '\\n');` +
             `const n = fs.readFileSync(${JSON.stringify(log)}, 'utf8').trim().split('\\n').length;` +
-            `if (n === 1) { console.error('attempt 1 fails'); process.exit(1); }`,
+            `if (n === 1) { console.error("Error: Cannot find module 'flake' - attempt 1 fails"); process.exit(1); }`,
     ]
 }
 
@@ -251,9 +255,9 @@ describe("verifyBuild working-directory resolution", () => {
     })
 })
 
-describe("verifyBuild retry backoff", () => {
-    it("waits RETRY_BACKOFF_MS once before the single retry", async () => {
-        await withTempDir("baro-verify-backoff-", async (dir) => {
+describe("verifyBuild retry checkpoint", () => {
+    it("reaches the checkpoint once, and waits out no fixed backoff there", async () => {
+        await withTempDir("baro-verify-checkpoint-", async (dir) => {
             const { runCwd } = worktreeLayout(dir)
             const log = join(dir, "cwd.log")
             const waits: number[] = []
@@ -270,13 +274,16 @@ describe("verifyBuild retry backoff", () => {
 
             assert.equal(result.ok, true)
             assert.equal(result.commands[0]?.retriedAfterFailure, true)
-            assert.deepEqual(waits, [RETRY_BACKOFF_MS])
+            // The remedy, not elapsed time, is what earns the retry: the
+            // checkpoint is reached exactly once and asks for no delay.
+            assert.deepEqual(waits, [0])
+            assert.notEqual(RETRY_BACKOFF_MS, 0, "the budget still charges one")
             assert.equal(lines(log).length, 2)
         })
     })
 
-    it("honours an abort raised during the backoff, before attempt 2 spawns", async () => {
-        await withTempDir("baro-verify-backoff-abort-", async (dir) => {
+    it("honours an abort raised at the checkpoint, before attempt 2 spawns", async () => {
+        await withTempDir("baro-verify-checkpoint-abort-", async (dir) => {
             const { runCwd } = worktreeLayout(dir)
             const log = join(dir, "cwd.log")
             const controller = new AbortController()

@@ -48,14 +48,18 @@ function cwdProbe(log: string): string[] {
     ]
 }
 
-/** Appends one line per attempt and fails on the first, so retries are countable. */
+/**
+ * Appends one line per attempt and fails on the first, so retries are
+ * countable. The tail names an environment failure because only an
+ * environment or time-ceiling classification earns the single retry.
+ */
 function flakyProbe(log: string): string[] {
     return [
         "-e",
         `const fs = require('fs');` +
             `fs.appendFileSync(${JSON.stringify(log)}, process.cwd() + '\\n');` +
             `const n = fs.readFileSync(${JSON.stringify(log)}, 'utf8').trim().split('\\n').length;` +
-            `if (n === 1) { console.error('attempt 1 fails'); process.exit(1); }`,
+            `if (n === 1) { console.error("Error: Cannot find module 'flake' - attempt 1 fails"); process.exit(1); }`,
     ]
 }
 
