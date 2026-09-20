@@ -32,6 +32,10 @@ import {
     type CommandCeiling,
 } from "./command-timing.js"
 import {
+    creditDeclaredRequirements,
+    declaredRequirementFiles,
+} from "./declared-credit.js"
+import {
     MAX_DECLARED_VERIFY_COMMANDS,
     MAX_NEGOTIATED_DECLARED_VERIFY_COMMANDS,
     resolveDeclaredBudget,
@@ -108,6 +112,8 @@ export interface VerifyCommandSpec {
     incompleteReason?: string
     /** Canonical identity for duplicate incomplete PRD requirements. */
     declaredRequirementKey?: string
+    /** The PRD requirement this evidence spec stands for; drives crediting. */
+    readonly declaredRequirement?: DeclaredTestRequirement
     /** Strict local-runner alias eligible for bounded path batching. */
     canonicalDeclaredFocus?: "rstest"
     /** Paths that must still resolve beneath command cwd immediately pre-spawn. */
@@ -802,7 +808,7 @@ function boundedDeclaredCommands(
             args: [],
             incompleteReason:
                 `${omitted} unique PRD test requirement(s) were not admitted; ` +
-                `the safe limit is ${budget.effectiveLimit} ` +
+                `the safe limit is ${budget.effectiveLimit} invocation(s) ` +
                 (budget.negotiatedBy === null
                     ? "(default; no story negotiated testBudget)"
                     : `(negotiated by story ${budget.negotiatedBy} testBudget)`),
@@ -856,10 +862,24 @@ export function createVerifyPlan(
             declaredRequirementKey: "<declared-translation-overflow>",
         })
     }
+    // Dedup precedes budgeting: declared files that collapse into one spawned
+    // invocation cost one budget unit, not one unit per file. Coalescing spans
+    // both lists because a declared focus file merges into the detected suite.
+    const coalesced = coalesceNodeTestScripts(
+        [
+            ...detected.commands,
+            ...declaredCommands.map((command) => ({
+                ...command,
+                origin: "declared" as const,
+            })),
+        ],
+        (commandCwd) => readPackageManifest(join(commandCwd ?? cwd, "package.json")),
+    )
     return freezeVerifyPlan(
-        coalesceNodeTestScripts(
-            boundedDeclaredCommands(detected.commands, declaredCommands, budget),
-            (commandCwd) => readPackageManifest(join(commandCwd ?? cwd, "package.json")),
+        boundedDeclaredCommands(
+            coalesced.filter((command) => command.origin !== "declared"),
+            coalesced.filter((command) => command.origin === "declared"),
+            budget,
         ),
         detected.javascriptPackageManagers,
         options.testBudgets !== undefined ? budget : undefined,
@@ -1272,6 +1292,7 @@ async function runCmd(
         const containmentFailure = revalidateContainedPaths(
             commandCwd,
             c.containedPaths,
+            c.tool,
         )
         if (containmentFailure) {
             return {
@@ -1463,5 +1484,49 @@ export async function verifyBuild(
         ran = true
         if (outcome.status === "failed") failures.push({ cmd: c.label, tail: outcome.tail })
     }
+    creditSkippedDeclaredRequirements(plan.commands, commands)
     return { ran, ok: failures.length === 0, failures, commands }
+}
+
+/**
+ * Rewrites the evidence of every declared requirement a green command in this
+ * same verification already executed. `incompleteReason` survives only for a
+ * requirement nothing ran.
+ */
+function creditSkippedDeclaredRequirements(
+    specs: readonly VerifyCommandSpec[],
+    results: VerifyCommandResult[],
+): void {
+    const pending = specs.filter(
+        (spec) =>
+            spec.declaredRequirement !== undefined &&
+            spec.incompleteReason !== undefined,
+    )
+    if (pending.length === 0) return
+    const { credited, uncovered } = creditDeclaredRequirements(
+        pending.map((spec) => spec.declaredRequirement!),
+        results,
+    )
+    if (credited.length === 0) return
+    const stillUncovered = new Set(uncovered)
+    const creditedBy = new Map(credited.map(({ file, creditedBy: by }) => [file, by]))
+    for (const spec of pending) {
+        if (stillUncovered.has(spec.declaredRequirement!)) continue
+        const index = results.findIndex(
+            (result) => result.command === spec.label && result.status === "skipped",
+        )
+        if (index < 0) continue
+        const by = [
+            ...new Set(
+                declaredRequirementFiles(spec.declaredRequirement!)
+                    .map((file) => creditedBy.get(file))
+                    .filter((value): value is string => value !== undefined),
+            ),
+        ]
+        results[index] = {
+            ...results[index]!,
+            status: "passed",
+            tail: `credited: executed by ${by.join(", ")}`,
+        }
+    }
 }

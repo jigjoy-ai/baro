@@ -19,6 +19,7 @@ export interface DeclaredBudgetDecision {
     readonly detail: string
 }
 
+/** Every limit here counts spawned verification invocations, not declared files. */
 export interface DeclaredBudgetEvidence {
     readonly defaultLimit: number
     readonly ceiling: number
@@ -133,7 +134,7 @@ export function formatDeclaredBudgetEvidence(
 ): string[] {
     return evidence.decisions.map((decision) =>
         decision.status === "accepted"
-            ? `testBudget accepted for story ${decision.storyId}: ${decision.commands} commands (${decision.detail}); effective limit ${evidence.effectiveLimit}`
-            : `testBudget rejected for story ${decision.storyId}: ${decision.detail}; effective limit ${evidence.effectiveLimit}`,
+            ? `testBudget accepted for story ${decision.storyId}: ${decision.commands} invocations (${decision.detail}); effective limit ${evidence.effectiveLimit} invocations`
+            : `testBudget rejected for story ${decision.storyId}: ${decision.detail}; effective limit ${evidence.effectiveLimit} invocations`,
     )
 }

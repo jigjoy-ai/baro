@@ -1273,7 +1273,7 @@ describe("declared verification policy", () => {
             )
             assert.match(
                 rejectedQuoted?.incompleteReason ?? "",
-                /node declarations are limited to/,
+                /unsupported value 'other' for node flag '--import'/,
             )
         })
     })
@@ -1352,29 +1352,53 @@ describe("declared verification policy", () => {
                 "node declarations are limited to '--check <file>' or " +
                 "'--test <contained paths>' (bare 'node <file>' only in " +
                 "repositories without package.json)"
-            const specs = translateDeclaredTests(
-                dir,
-                [
-                    { storyId: "S1", command: "node --import other --test x" },
-                    {
-                        storyId: "S1",
-                        command: "node --import ./evil.mjs --test x",
-                    },
-                    { storyId: "S1", command: "node --import=tsx --test x" },
-                    { storyId: "S1", command: "node --loader tsx --test x" },
-                    { storyId: "S1", command: "node --require tsx --test x" },
-                    {
-                        storyId: "S1",
-                        command: `node --import tsx --import tsx --test ${path}`,
-                    },
-                ],
-                ["npm"],
-            )
+            const [value, escaping, inline, loader, required] =
+                translateDeclaredTests(
+                    dir,
+                    [
+                        { storyId: "S1", command: "node --import other --test x" },
+                        {
+                            storyId: "S1",
+                            command: "node --import ./evil.mjs --test x",
+                        },
+                        {
+                            storyId: "S1",
+                            command: `node --import=tsx --test ${path}`,
+                        },
+                        { storyId: "S1", command: "node --loader tsx --test x" },
+                        { storyId: "S1", command: "node --require tsx --test x" },
+                    ],
+                    ["npm"],
+                )
 
-            for (const spec of specs) {
-                assert.equal(spec.incompleteReason, modeGate)
-                assert.deepEqual(spec.args, [])
+            // The loader value stays pinned to the literal `tsx`.
+            for (const spec of [value, escaping]) {
+                assert.match(
+                    spec?.incompleteReason ?? "",
+                    /for node flag '--import'/,
+                )
+                assert.deepEqual(spec?.args, [])
             }
+            // A loader spelling outside the runner allowlist is still a path.
+            for (const spec of [loader, required]) {
+                assert.match(
+                    spec?.incompleteReason ?? "",
+                    /unsafe or escaping path '--(loader|require)'/,
+                )
+                assert.deepEqual(spec?.args, [])
+            }
+            // `<flag>=<value>` is the same admitted loader, not a path.
+            assert.equal(inline?.incompleteReason, undefined)
+            assert.deepEqual(inline?.args, ["--import", "tsx", "--test", path])
+            // Still the message for a declaration with no mode selector.
+            assert.match(
+                translateDeclaredTests(
+                    dir,
+                    [{ storyId: "S1", command: `node --import tsx ${path}` }],
+                    ["npm"],
+                )[0]?.incompleteReason ?? "",
+                new RegExp(modeGate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+            )
         })
     })
 
@@ -2447,8 +2471,8 @@ describe("declared test budget negotiation", () => {
             },
         ])
         assert.deepEqual(formatDeclaredBudgetEvidence(rejected), [
-            "testBudget rejected for story S1: testBudget.commands must be at most 24; effective limit 8",
-            `testBudget rejected for story S2: ${OBJECT_SHAPE}; effective limit 8`,
+            "testBudget rejected for story S1: testBudget.commands must be at most 24; effective limit 8 invocations",
+            `testBudget rejected for story S2: ${OBJECT_SHAPE}; effective limit 8 invocations`,
         ])
     })
 
@@ -2471,10 +2495,10 @@ describe("declared test budget negotiation", () => {
             ],
         )
         assert.deepEqual(formatDeclaredBudgetEvidence(evidence), [
-            "testBudget accepted for story S0: 10 commands (a); effective limit 12",
-            "testBudget accepted for story S1: 12 commands (b); effective limit 12",
-            "testBudget accepted for story S2: 12 commands (c); effective limit 12",
-            "testBudget rejected for story S3: testBudget.commands must be at most 24; effective limit 12",
+            "testBudget accepted for story S0: 10 invocations (a); effective limit 12 invocations",
+            "testBudget accepted for story S1: 12 invocations (b); effective limit 12 invocations",
+            "testBudget accepted for story S2: 12 invocations (c); effective limit 12 invocations",
+            "testBudget rejected for story S3: testBudget.commands must be at most 24; effective limit 12 invocations",
         ])
     })
 
@@ -2537,7 +2561,7 @@ describe("negotiated declared test admission", () => {
             assert.equal(incompleteReasons(plan).length, 1)
             assert.match(
                 incompleteReasons(plan)[0] ?? "",
-                /safe limit is 8 \(default; no story negotiated testBudget\)/,
+                /safe limit is 8 invocation\(s\) \(default; no story negotiated testBudget\)/,
             )
             assert.equal(Object.hasOwn(plan, "declaredBudget"), false)
         })
@@ -2568,7 +2592,7 @@ describe("negotiated declared test admission", () => {
 
             assert.equal(declaredExecutables(plan).length, 12)
             assert.deepEqual(incompleteReasons(plan), [
-                "1 unique PRD test requirement(s) were not admitted; the safe limit is 12 (negotiated by story S1 testBudget)",
+                "1 unique PRD test requirement(s) were not admitted; the safe limit is 12 invocation(s) (negotiated by story S1 testBudget)",
             ])
         })
     })
