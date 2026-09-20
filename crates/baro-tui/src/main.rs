@@ -4437,28 +4437,35 @@ fn confirm_and_execute(
     );
     attach_conversation_metadata(&mut prd, app);
     stamp_goal_fingerprint(&mut prd, launch_goal);
-    if let Err(message) = prd_write_guard::guard_fresh_plan_write(app.is_resume) {
-        let _ = tx.try_send(AppEvent::BranchError(message));
-        return;
-    }
-    if let Err(e) = write_run_prd(&prd, cwd) {
-        let _ = tx.try_send(AppEvent::BranchError(format!(
-            "Failed to write prd.json: {}",
-            e
-        )));
-        return;
+    // A resumed run already has its plan on disk; writing it again here is
+    // exactly the fresh-plan overwrite the guard exists to refuse (#177). The
+    // branch step below persists the same plan once the branch is verified.
+    if !app.is_resume {
+        if let Err(message) = prd_write_guard::guard_fresh_plan_write(app.is_resume) {
+            let _ = tx.try_send(AppEvent::BranchError(message));
+            return;
+        }
+        if let Err(e) = write_run_prd(&prd, cwd) {
+            let _ = tx.try_send(AppEvent::BranchError(format!(
+                "Failed to write prd.json: {}",
+                e
+            )));
+            return;
+        }
     }
     let planned_full_branch = if app.branch_name.starts_with("baro/") {
         app.branch_name.clone()
     } else {
         format!("baro/{}", app.branch_name)
     };
-    let continuation_branch = if app.is_followup {
+    // Follow-ups and resumes continue the branch they established; only a
+    // fresh run mints a new suffixed one.
+    let continuation_branch = if app.is_followup || app.is_resume {
         match app.continuation_branch.clone() {
             Some(branch) => Some(branch),
             None => {
                 let _ = tx.try_send(AppEvent::BranchError(
-                    "Follow-up has no established branch authority; refusing to execute on the current checkout."
+                    "Follow-up or resume has no established branch authority; refusing to execute on the current checkout."
                         .to_string(),
                 ));
                 return;
