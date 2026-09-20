@@ -1,0 +1,17 @@
+# ADR-0004: #170: classify the first failure tail in a dedicated module driven by a shipped signal table
+
+**Status:** Accepted
+**Context:** The retry today is unconditional for run-level commands (verify.ts:1419-1424) with a fixed backoff, and firstFailureTail is captured but never interpreted. The envelope assumed the signal list could be a JSON file beside the verification code, but this repo's build precludes it: tsc emits only .js/.d.ts from src and tsup bundles each baro-app entry self-contained with no asset copy or publicDir, and published files are bin/, dist/, scripts/postinstall.js only. The repo's own convention for static text data is a frozen TS constant (architect-prompts.ts, planner-prompts.ts).
+**Decision:** New file src/verification/failure-signals.ts is the single owner of the signal data, exporting a frozen table and a loader:
+  export type FailureBucket = "environment" | "time-ceiling" | "regression"
+  export type FailureRemedy = "rematerialize-worktree" | "install-dependencies" | "lift-ceiling" | "none"
+  export interface FailureSignal { id: string; bucket: FailureBucket; remedy: FailureRemedy; match: string }  // `match` is a literal substring, case-insensitive; no regex, so the table stays data
+  export const FAILURE_SIGNALS: readonly FailureSignal[]
+  export function loadFailureSignals(): readonly FailureSignal[]
+FAILURE_SIGNALS must include, as environment: "ENOENT", "verification cwd missing", "could not find Cargo.toml", "Cannot find module", "@types/node", "command not found", "ERR_MODULE_NOT_FOUND", "ModuleNotFoundError", "cannot find package", "Class not found"; as time-ceiling: "exceeded the absolute command ceiling"; as regression: "AssertionError", "error TS", "warning: unused", "warnings are denied". loadFailureSignals() returns FAILURE_SIGNALS concatenated with entries parsed from the JSON file named by process.env.BARO_FAILURE_SIGNALS_FILE when that variable is set and the file is a readable regular file of at most 64 KiB parsing to an array of FailureSignal; any failure is swallowed and the built-in table returned. Env-supplied entries win on first match.
+New file src/verification/failure-classifier.ts owns the policy:
+  export interface FailureClassification { bucket: FailureBucket; remedy: FailureRemedy; signalId: string | null }
+  export function classifyFailureTail(tail: string, hints: { timedOut?: boolean; environment?: boolean }): FailureClassification
+Order: hints.environment (from #168) wins, then hints.timedOut maps to time-ceiling, then the first matching signal, then the default { bucket: "regression", remedy: "none", signalId: null }.
+verify.ts's retry loop calls classifyFailureTail on the first failure tail before deciding: environment applies the remedy once (rematerialize the worktree, or run the plan's dependencyRefreshCommand for install-dependencies) then retries exactly once; time-ceiling retries exactly once with the ceiling lifted for that command only and never a second time; regression does not retry and keeps the tail for the story agent. The existing retryable/origin guards still gate whether retry is considered at all.
+**Consequences:** New languages are added by editing one TS array or by pointing BARO_FAILURE_SIGNALS_FILE at a JSON file, and the table ships through tsc and tsup because it is code. Substring-only matching keeps the table declarative; a signal needing a regex is a deliberate future decision, not an agent's call. At most one retry per command remains invariant.
