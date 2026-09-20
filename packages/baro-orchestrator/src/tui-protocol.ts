@@ -51,6 +51,8 @@ export interface VerificationEvidenceInfo {
         tail?: string
         retried_after_failure?: true
         first_failure_tail?: string
+        failure_bucket?: string
+        remedy?: string
     }>
 }
 
@@ -76,6 +78,8 @@ export function toVerificationEvidenceInfo(
             ...(command.firstFailureTail !== undefined
                 ? { first_failure_tail: command.firstFailureTail }
                 : {}),
+            ...(command.failureBucket ? { failure_bucket: command.failureBucket } : {}),
+            ...(command.remedy ? { remedy: command.remedy } : {}),
         })),
     }
 }

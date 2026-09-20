@@ -73,11 +73,14 @@ async function waitForProcessExit(pid: number, timeoutMs = 2_000): Promise<void>
 describe("verifyBuild", () => {
     it("retries a failed run-level command once and lets the retry decide", async () => {
         await withTempDir("baro-verify-flake-retry-", async (dir) => {
+            // An environment tail: only that bucket and time-ceiling earn the
+            // single retry now, so a bare "first attempt fails" would be a
+            // regression and correctly refused one.
             const flakeScript =
                 "const fs = require('fs');" +
                 "if (!fs.existsSync('flake-marker')) {" +
                 "  fs.writeFileSync('flake-marker', '');" +
-                "  console.error('first attempt fails');" +
+                "  console.error(\"Error: Cannot find module 'fixture' - first attempt fails\");" +
                 "  process.exit(1);" +
                 "}" +
                 "process.exit(0);"

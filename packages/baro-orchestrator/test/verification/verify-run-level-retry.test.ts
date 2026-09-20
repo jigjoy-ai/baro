@@ -20,8 +20,15 @@ import { withTempDir } from "../execution/helpers.js"
 
 const ATTEMPT_BUDGET_MS = 10 * 60_000 + 5_000 + 3_000
 
+/** An environment tail, since only that bucket and time-ceiling earn a retry. */
+const RETRYABLE_TAIL = "Error: Cannot find module 'fixture'"
+
 /** Appends one line per attempt, so "exactly N attempts" is directly countable. */
-function attemptScript(log: string, failWhile: "always" | "first" | "never"): string {
+function attemptScript(
+    log: string,
+    failWhile: "always" | "first" | "never",
+    tail: string = RETRYABLE_TAIL,
+): string {
     const gate =
         failWhile === "always"
             ? "true"
@@ -32,7 +39,7 @@ function attemptScript(log: string, failWhile: "always" | "first" | "never"): st
         "const fs = require('fs');" +
         `fs.appendFileSync(${JSON.stringify(log)}, 'x\\n');` +
         `const attempts = fs.readFileSync(${JSON.stringify(log)}, 'utf8').trim().split('\\n').length;` +
-        `if (${gate}) { console.error('attempt ' + attempts + ' fails'); process.exit(1); }` +
+        `if (${gate}) { console.error(${JSON.stringify(tail)} + ' - attempt ' + attempts + ' fails'); process.exit(1); }` +
         "process.exit(0);"
     )
 }

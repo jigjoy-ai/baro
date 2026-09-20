@@ -23,7 +23,7 @@ import { execFileCli } from "../harness/exec-file-cli.js"
 import { activityIdleTimeoutMs } from "../harness/liveness.js"
 import { emit, type BaroEvent } from "../tui-protocol.js"
 import { cargoEnvFor } from "./cargo-env.js"
-import { defaultSleep, resolveCommandCwd, RETRY_BACKOFF_MS, spawnRunCwd } from "./command-cwd.js"
+import { resolveCommandCwd, RETRY_BACKOFF_MS, spawnRunCwd } from "./command-cwd.js"
 import type { VerifyCwdResolver } from "./command-cwd.js"
 import {
     ABSOLUTE_COMMAND_TIMEOUT_MS,
@@ -48,6 +48,12 @@ import {
     translateDeclaredTests,
 } from "./declared-verification.js"
 import { coalesceNodeTestScripts } from "./node-test-script.js"
+import {
+    decideRetry,
+    type FailureBucket,
+    type FailureRemedy,
+    type RetryDecision,
+} from "./retry-decision.js"
 
 export {
     MAX_DECLARED_VERIFY_COMMANDS,
@@ -71,6 +77,9 @@ const OUTPUT_CAPTURE_CHARS = 2000
 /** Includes conventional commands added at runtime as well as PRD declarations. */
 export const MAX_FINAL_ADDED_VERIFY_COMMANDS = 8
 const MAX_COMPACTED_RSTEST_PATHS = 64
+/** The one lifted retry a time-ceiling kill earns, and its hard stop. */
+const LIFTED_CEILING_MULTIPLIER = 4
+const LIFTED_CEILING_MAX_MS = 30 * 60_000
 const MAX_COMPACTED_DECLARED_COMMAND_CHARS = 1_000
 
 export function maxDeclaredTranslationInputs(effectiveLimit: number): number {
@@ -94,6 +103,10 @@ export interface VerifyCommandResult {
     retriedAfterFailure?: true
     /** Evidence of the first attempt when a retry decided the status. */
     firstFailureTail?: string
+    /** Set for every run-level command that failed at least once, refusals
+     *  included; `remedy` is what was applied, so a refusal records "none". */
+    failureBucket?: FailureBucket
+    remedy?: FailureRemedy
     /** False forbids the single retry: re-running cannot change the verdict. */
     retryable?: boolean
     /** Killed at its hard ceiling rather than failing on its own. */
@@ -186,7 +199,7 @@ export interface VerifyBuildOptions {
     readonly emitActivity?: (event: BaroEvent) => void
     /** The host checkout, not the run cwd; defaults to cwd. */
     hostRepoRoot?: string
-    /** Waits out the retry backoff; injected by tests to skip the real wait. */
+    /** Awaited at the retry checkpoint; the gate itself never waits there. */
     sleep?: (ms: number) => Promise<void>
     /** A timeout under story load is retried only once this reports false. */
     storyExecutorsActive?: () => boolean
@@ -194,6 +207,13 @@ export interface VerifyBuildOptions {
     ceilingFloorMs?: number
     /** Overrides `cwd`, re-read per spawn; see command-cwd.ts `spawnRunCwd`. */
     resolveRunCwd?: VerifyCwdResolver
+    /** Announced once per command, only when a retry was actually decided. */
+    readonly onRetryDecision?: (info: {
+        command: string
+        failureBucket: FailureBucket
+        remedy: FailureRemedy
+        signalId: string | null
+    }) => void
 }
 
 /** Where declared ceilings and measured durations are looked up. */
@@ -1367,6 +1387,78 @@ async function runCmd(
     }
 }
 
+/** Applies to one retry spawn only; `createCeilingResolver` is untouched. */
+export function liftedCeiling(ceiling: CommandCeiling): CommandCeiling {
+    return {
+        ...ceiling,
+        ceilingMs: Math.min(
+            ceiling.ceilingMs * LIFTED_CEILING_MULTIPLIER,
+            LIFTED_CEILING_MAX_MS,
+        ),
+    }
+}
+
+/** A subscriber that throws must not cost the gate its remaining commands. */
+function announceRetryDecision(
+    announce: VerifyBuildOptions["onRetryDecision"],
+    command: string,
+    decision: RetryDecision,
+): void {
+    if (!announce) return
+    try {
+        announce({
+            command,
+            failureBucket: decision.bucket,
+            remedy: decision.remedy,
+            signalId: decision.signalId,
+        })
+    } catch {
+        // Reporting why a retry happens is never worth aborting the retry.
+    }
+}
+
+/**
+ * Repairs the environment once, before the single retry. verify.ts owns no
+ * worktree lifecycle, so "re-materialise" degrades to re-reading the spawn
+ * cwd — a tree recreated under us is picked up there — plus the install;
+ * creating or git-mutating a directory from the gate is out of bounds. The
+ * install's own outcome is ignored and stays out of `commands`: a failed
+ * repair still lets the retry speak for itself.
+ */
+async function applyRemedy(
+    remedy: FailureRemedy,
+    ctx: {
+        cwd: string
+        hostRepoRoot: string
+        reason: string
+        ceilingFor: (command: VerifyCommandSpec) => CommandCeiling
+        options: VerifyBuildOptions
+    },
+): Promise<void> {
+    if (remedy !== "install-dependencies" && remedy !== "rematerialize-worktree") {
+        return
+    }
+    const cwd =
+        remedy === "rematerialize-worktree"
+            ? resolveCommandCwd(
+                  spawnRunCwd(ctx.cwd, ctx.hostRepoRoot, ctx.options.resolveRunCwd),
+                  undefined,
+              )
+            : ctx.cwd
+    // Without a manifest there is nothing to install, and `npm install` in a
+    // manifest-less tree would write one.
+    if (!existsSync(join(cwd, "package.json"))) return
+    const install = dependencyRefreshCommand(cwd, [`retry remedy: ${ctx.reason}`])
+    await runCmd(
+        cwd,
+        install,
+        ctx.hostRepoRoot,
+        ctx.ceilingFor(install),
+        ctx.options.signal,
+        ctx.options.resolveRunCwd,
+    )
+}
+
 function throwIfAborted(signal?: AbortSignal): void {
     if (!signal?.aborted) return
     throw signal.reason instanceof Error
@@ -1429,6 +1521,8 @@ export async function verifyBuild(
         const ceiling = ceilingFor(c)
         let outcome = await runCmd(cwd, c, hostRepoRoot, ceiling, options.signal, options.resolveRunCwd)
         let firstFailureTail: string | undefined
+        let decision: RetryDecision | undefined
+        let retried = false
         const warnTimeout = (): void =>
             emitActivity({
                 type: "activity",
@@ -1439,42 +1533,56 @@ export async function verifyBuild(
                     `${Math.round(ceiling.ceilingMs / 1000)}s (last measured ` +
                     `${ceiling.lastMs !== undefined ? `${Math.round(ceiling.lastMs / 1000)}s` : "none"})`,
             })
-        if (outcome.status === "failed" && outcome.timedOut) {
-            warnTimeout()
-            // Re-running a timeout while stories still load the machine only
-            // doubles the wait; an unknown load counts as busy.
-            if (options.storyExecutorsActive?.() !== false) {
-                outcome = { ...outcome, retryable: false }
-            }
-        }
+        if (outcome.status === "failed" && outcome.timedOut) warnTimeout()
         // A preflight failure never spawned anything and cannot flake, so it
         // is excluded here exactly as it is from the two-attempt budget above.
-        if (
-            outcome.status === "failed" &&
-            outcome.retryable !== false &&
-            !c.preflightFailure &&
-            isRunLevelCommand(c)
-        ) {
-            // The stories' rule, applied to the gate itself: a load failure
-            // is retried once and the retry decides. The first live gate
-            // pass failed a finished, green run on one timing test its
-            // stories never touched — a gate that cannot tell a flake from
-            // a regression mislabels finished work. Both attempts stay in
-            // the evidence, and the retry is announced rather than silent.
-            throwIfAborted(options.signal)
-            firstFailureTail = outcome.tail
-            emitActivity({
-                type: "activity",
-                id: "_verify",
-                kind: "warn",
-                text:
-                    `verification command retried once: ${c.label} — ` +
-                    `first attempt failed: ${firstFailureTail.replace(/[\r\n]+/gu, " ")}`,
+        if (outcome.status === "failed" && !c.preflightFailure && isRunLevelCommand(c)) {
+            // The one retry decision for run-level commands. It stays a single
+            // `if` with no attempt counter, so a second retry is structurally
+            // impossible whatever the tail turns out to be, and the tail of the
+            // first attempt is kept whether or not the retry is taken — a
+            // refused regression is exactly what the story agent needs.
+            decision = decideRetry(outcome.tail, {
+                timedOut: outcome.timedOut,
+                environment: outcome.environment,
+                retryable: outcome.retryable,
+                storyExecutorsActive: options.storyExecutorsActive?.(),
             })
-            await (options.sleep ?? defaultSleep)(RETRY_BACKOFF_MS)
-            throwIfAborted(options.signal)
-            outcome = await runCmd(cwd, c, hostRepoRoot, ceiling, options.signal, options.resolveRunCwd)
-            if (outcome.status === "failed" && outcome.timedOut) warnTimeout()
+            firstFailureTail = outcome.tail
+            if (decision.retry) {
+                throwIfAborted(options.signal)
+                emitActivity({
+                    type: "activity",
+                    id: "_verify",
+                    kind: "warn",
+                    text:
+                        `verification command retried once: ${c.label} — ` +
+                        `first attempt failed: ${firstFailureTail.replace(/[\r\n]+/gu, " ")}`,
+                })
+                await applyRemedy(decision.remedy, {
+                    cwd,
+                    hostRepoRoot,
+                    reason: decision.signalId ?? decision.bucket,
+                    ceilingFor,
+                    options,
+                })
+                announceRetryDecision(options.onRetryDecision, c.label, decision)
+                // The last cancellation checkpoint before the re-spawn. No
+                // backoff survives here: the remedy, not elapsed time, is what
+                // makes the retry worth taking, so nothing waits by default.
+                await options.sleep?.(0)
+                throwIfAborted(options.signal)
+                outcome = await runCmd(
+                    cwd,
+                    c,
+                    hostRepoRoot,
+                    decision.remedy === "lift-ceiling" ? liftedCeiling(ceiling) : ceiling,
+                    options.signal,
+                    options.resolveRunCwd,
+                )
+                retried = true
+                if (outcome.status === "failed" && outcome.timedOut) warnTimeout()
+            }
         }
         commands.push({
             command: c.label,
@@ -1489,8 +1597,10 @@ export async function verifyBuild(
                 : {}),
             ...("timedOut" in outcome && outcome.timedOut ? { timedOut: true as const } : {}),
             ...("environment" in outcome && outcome.environment ? { environment: true as const } : {}),
-            ...(firstFailureTail !== undefined
-                ? { retriedAfterFailure: true as const, firstFailureTail }
+            ...(firstFailureTail !== undefined ? { firstFailureTail } : {}),
+            ...(retried ? { retriedAfterFailure: true as const } : {}),
+            ...(decision
+                ? { failureBucket: decision.bucket, remedy: decision.remedy }
                 : {}),
         })
         if (outcome.status === "skipped") continue
