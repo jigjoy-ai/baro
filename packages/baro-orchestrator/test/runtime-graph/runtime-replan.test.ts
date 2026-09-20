@@ -476,6 +476,87 @@ describe("validateRuntimeReplanMutation", () => {
         )
     })
 
+    describe("withdrawing a replacement-free story", () => {
+        // S7 mirrors a story added at runtime on a premise that later proved
+        // wrong: a pending leaf whose invariant S2 still owns. Before this was
+        // admissible a proposer could never retract its own mistaken addition,
+        // because every removal had to invent replacement work to be accepted.
+        function withdrawable(): PrdFile {
+            return governedPrd([
+                story("S1", {
+                    passes: true,
+                    completedAt: "2026-09-20T00:00:00.000Z",
+                    goalInvariantIds: ["G-A1"],
+                }),
+                story("S2", {
+                    dependsOn: ["S1"],
+                    goalInvariantIds: ["G-A2"],
+                }),
+                story("S7", {
+                    dependsOn: ["S2"],
+                    goalInvariantIds: ["G-A2"],
+                }),
+            ])
+        }
+
+        it("withdraws a pending leaf whose invariants another story still owns", () => {
+            const result = validate(
+                withdrawable(),
+                mutation({ removedStoryIds: ["S7"] }),
+            )
+            assert.equal(result.ok, true)
+            if (!result.ok) return
+            assert.deepEqual(
+                result.prd.userStories.map((entry) => entry.id),
+                ["S1", "S2"],
+            )
+            assert.deepEqual(result.removedStoryIds, ["S7"])
+            assert.deepEqual(result.addedStoryIds, [])
+        })
+
+        it("refuses to withdraw the last owner of a GoalContract invariant", () => {
+            const soleOwner = governedPrd([
+                story("S1", {
+                    passes: true,
+                    completedAt: "2026-09-20T00:00:00.000Z",
+                    goalInvariantIds: ["G-A1"],
+                }),
+                story("S2", {
+                    dependsOn: ["S1"],
+                    goalInvariantIds: ["G-A2"],
+                }),
+            ])
+            expectCode(
+                validate(soleOwner, mutation({ removedStoryIds: ["S2"] })),
+                "invalid_proposal",
+            )
+        })
+
+        it("refuses to drop a story out of a chain by rewiring its dependents", () => {
+            expectCode(
+                validate(
+                    withdrawable(),
+                    mutation({
+                        removedStoryIds: ["S2"],
+                        modifiedDeps: { S7: ["S1"] },
+                    }),
+                ),
+                "destructive_removal",
+            )
+        })
+
+        it("refuses to withdraw a started or failed story", () => {
+            expectCode(
+                validate(
+                    withdrawable(),
+                    mutation({ removedStoryIds: ["S7"] }),
+                    new Set(["S7"]),
+                ),
+                "immutable_story",
+            )
+        })
+    })
+
     it("rejects additions beyond the supplied remaining budget", () => {
         expectCode(
             validate(

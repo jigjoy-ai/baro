@@ -196,15 +196,6 @@ export function validateRuntimeReplanMutation(
         )
     }
 
-    // Removing work without adding a replacement is intentionally fail-closed.
-    // A dependency-only rewire does not replace the deleted acceptance scope.
-    if (removedStoryIds.length > 0 && addedStoryIds.length === 0) {
-        return reject(
-            "destructive_removal",
-            "runtime replan cannot remove stories without adding replacement work",
-        )
-    }
-
     for (const storyId of modifiedStoryIds) {
         const before = currentById.get(storyId)!.dependsOn
         const after = snapshot.modifiedDeps[storyId]
@@ -231,6 +222,11 @@ export function validateRuntimeReplanMutation(
 
     const graphFailure = validateCandidateGraph(prd, candidate, addedStoryIds)
     if (graphFailure) return graphFailure
+
+    if (removedStoryIds.length > 0 && addedStoryIds.length === 0) {
+        const refusal = withdrawalRefusal(prd, removedStoryIds)
+        if (refusal) return reject("destructive_removal", refusal)
+    }
 
     return {
         ok: true,
@@ -311,6 +307,44 @@ function validateInputs(
                 "invalid_proposal",
                 "modified dependencies must map a valid story id to valid story ids",
             )
+        }
+    }
+    return null
+}
+
+/**
+ * Why a replacement-free removal may not be treated as a withdrawal, or null
+ * when it may. Removing work stays fail-closed by default; a proposer may only
+ * withdraw a story whose scope is provably already accounted for.
+ *
+ * Coverage is deliberately not re-checked here. `validateCandidateGraph` runs
+ * first and has already refused any candidate where a GoalContract invariant
+ * or architecture obligation loses its last owner, so reaching this point means
+ * the contract-level scope survives the removal. Completed, failed, running and
+ * leased stories never reach here either: `runtimeImmutableStoryIds` feeds them
+ * in as immutable, so they are refused earlier as `immutable_story`. That is
+ * what keeps the "silently skip my failed story" case closed.
+ */
+function withdrawalRefusal(
+    prd: PrdFile,
+    removedStoryIds: readonly string[],
+): string | null {
+    // An ungoverned PRD derives an empty contract, which makes the coverage
+    // proof above vacuous rather than passing. Without it there is nothing to
+    // prove the scope survives, so keep the original blanket refusal.
+    if (!prd.goalEnvelope) {
+        return "runtime replan cannot remove stories without adding replacement work"
+    }
+    const removed = new Set(removedStoryIds)
+    for (const storyId of removedStoryIds) {
+        // Only leaves may be withdrawn. Rewiring dependents around a removed
+        // story is how work gets dropped out of the middle of a chain.
+        const dependent = prd.userStories.find(
+            (story) =>
+                !removed.has(story.id) && story.dependsOn.includes(storyId),
+        )
+        if (dependent) {
+            return `cannot withdraw story '${storyId}' while story '${dependent.id}' depends on it`
         }
     }
     return null
