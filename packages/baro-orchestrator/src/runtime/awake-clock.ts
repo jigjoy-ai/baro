@@ -96,10 +96,12 @@ function createClock(time: TimeSource, timers: TimerBackend): AwakeClock {
         // Both signals describe the same sleep; the wall time since the last
         // sample bounds it so two hops firing on the same wake cannot count
         // the gap twice.
-        const gapMs = Math.round(Math.min(unaccounted, Math.max(byDrift, byLag)))
+        // Date.now() truncates and performance.now() is fractional, so a
+        // suspend of S ms measures anywhere in (S-1, S+1). Round up: naming a
+        // sleep one millisecond short made the absorbed gap flake below the
+        // suspend it came from, and an extra millisecond only defers a deadline.
+        const gapMs = Math.min(unaccounted, Math.ceil(Math.max(byDrift, byLag)))
         if (gapMs <= 0) return null
-        // performance.now() is fractional; keep the absorbed total an integer
-        // so awake timestamps stay in the same shape as Date.now().
         return absorb(gapMs, wallMs)
     }
     const sample = (): SuspensionGap | null => take(0)
