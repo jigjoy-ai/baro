@@ -153,7 +153,11 @@ describe("verification timeout retry policy", () => {
         const command = result.commands[0]!
         assert.equal(command.status, "failed")
         assert.equal(command.timedOut, true)
-        assert.equal(command.retryable, false)
+        // The refusal is decideRetry's ("story-executors-active"), not a
+        // `retryable: false` rewritten onto the outcome before the decision.
+        assert.equal(command.retryable, undefined)
+        assert.equal(command.failureBucket, "time-ceiling")
+        assert.equal(command.remedy, "none")
         assert.equal(command.retriedAfterFailure, undefined)
         assert.deepEqual(timeoutWarnings(events), [
             "verification timeout: slow gate hit ceiling 1s (last measured 1s)",

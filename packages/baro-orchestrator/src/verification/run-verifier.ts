@@ -4,9 +4,13 @@ import { StoryResult, StorySpawned } from "../events/execution.js"
 import {
     RunVerificationCompleted,
     RunVerificationRequested,
+    RunVerificationRetryClassified,
     RunVerificationTimedOut,
     type RunVerificationCompletedData,
+    type RunVerificationRetryClassifiedData,
+    type VerificationCommandEvidence,
 } from "../semantic-events.js"
+import { classifyFailureTail } from "./failure-classifier.js"
 import {
     SerializedObserver,
     type SerializedEventContext,
@@ -15,6 +19,8 @@ import {
     createVerifyPlan,
     mergeVerifyPlans,
     verifyBuild,
+    type VerifyBuildOptions,
+    type VerifyCommandResult,
     type VerifyPlan,
     type VerifyResult,
 } from "./verify.js"
@@ -52,6 +58,13 @@ export class RunVerifier extends SerializedObserver {
     private readonly runningStories = new Set<string>()
     private readonly verify: (cwd: string, signal: AbortSignal) => Promise<VerifyResult>
     private requestAuthority: Participant | null = null
+    /**
+     * What verifyBuild actually decided, per command label, for the
+     * verification in flight. The gate is the only place that knows which
+     * signal fired and which remedy ran, so its verdict outranks anything
+     * re-derived here; an injected verify() simply leaves it empty.
+     */
+    private retryDecisions = new Map<string, RetryDecisionInfo>()
 
     constructor(private readonly opts: RunVerifierOptions) {
         super()
@@ -70,6 +83,8 @@ export class RunVerifier extends SerializedObserver {
                     hostRepoRoot: opts.hostRepoRoot,
                     signal,
                     storyExecutorsActive,
+                    onRetryDecision: (info) =>
+                        void this.retryDecisions.set(info.command, info),
                 }))
     }
 
@@ -143,6 +158,7 @@ export class RunVerifier extends SerializedObserver {
         controller: AbortController,
     ): Promise<void> {
         const startedAt = Date.now()
+        this.retryDecisions = new Map()
         try {
             const result = await this.verify(this.opts.cwd, controller.signal)
             if (controller.signal.aborted) return
@@ -155,25 +171,29 @@ export class RunVerifier extends SerializedObserver {
             const hasPassedCommand = result.commands.some(
                 (command) => command.status === "passed",
             )
-            this.complete({
-                runId: this.opts.runId,
-                verificationId,
-                status:
-                    !result.ok || hasFailedCommand
-                        ? "failed"
-                        : !result.ran || hasSkippedCommand || !hasPassedCommand
-                          ? "skipped"
-                          : "passed",
-                commands: result.commands,
-                durationMs: Date.now() - startedAt,
-            })
+            const { commands, classified } = classifyCommands(
+                result.commands,
+                this.retryDecisions,
+            )
+            this.complete(
+                {
+                    runId: this.opts.runId,
+                    verificationId,
+                    status:
+                        !result.ok || hasFailedCommand
+                            ? "failed"
+                            : !result.ran || hasSkippedCommand || !hasPassedCommand
+                              ? "skipped"
+                              : "passed",
+                    commands,
+                    durationMs: Date.now() - startedAt,
+                },
+                classified,
+            )
         } catch (error) {
             if (controller.signal.aborted) return
-            this.complete({
-                runId: this.opts.runId,
-                verificationId,
-                status: "failed",
-                commands: [
+            const { commands, classified } = classifyCommands(
+                [
                     {
                         command: "baro run verifier",
                         status: "failed",
@@ -181,8 +201,18 @@ export class RunVerifier extends SerializedObserver {
                         tail: messageOf(error),
                     },
                 ],
-                durationMs: Date.now() - startedAt,
-            })
+                this.retryDecisions,
+            )
+            this.complete(
+                {
+                    runId: this.opts.runId,
+                    verificationId,
+                    status: "failed",
+                    commands,
+                    durationMs: Date.now() - startedAt,
+                },
+                classified,
+            )
         } finally {
             if (this.active.get(verificationId) === controller) {
                 this.active.delete(verificationId)
@@ -190,8 +220,23 @@ export class RunVerifier extends SerializedObserver {
         }
     }
 
-    private complete(data: RunVerificationCompletedData): void {
+    private complete(
+        data: RunVerificationCompletedData,
+        classified: readonly ClassifiedFailure[] = [],
+    ): void {
         this.completed.set(data.verificationId, data)
+        // Classifications precede the verdict so a subscriber reacting to the
+        // verdict has already seen why each command failed. Replayed requests
+        // re-emit only the cached verdict, keeping this exactly-once.
+        for (const failure of classified) {
+            this.emit(
+                RunVerificationRetryClassified.create({
+                    runId: data.runId,
+                    verificationId: data.verificationId,
+                    ...failure,
+                }),
+            )
+        }
         this.emit(RunVerificationCompleted.create(data))
     }
 
@@ -204,4 +249,54 @@ export class RunVerifier extends SerializedObserver {
 
 function messageOf(error: unknown): string {
     return (error as Error)?.message ?? String(error)
+}
+
+type ClassifiedFailure = Omit<
+    RunVerificationRetryClassifiedData,
+    "runId" | "verificationId"
+>
+
+type RetryDecisionInfo = Parameters<
+    NonNullable<VerifyBuildOptions["onRetryDecision"]>
+>[0]
+
+/**
+ * Stamps bucket + remedy on every command that failed at least once — a
+ * command that passed on retry included, since its first failure is what the
+ * classification explains. The judged tail is that first failure's, and the
+ * runner's own observations (a vanished cwd, a kill at the ceiling) outrank
+ * anything re-derived from the text. Re-derivation is the fallback: a result
+ * the gate already classified keeps the gate's verdict, so the evidence and
+ * the event say exactly what verifyBuild did.
+ */
+function classifyCommands(
+    results: readonly VerifyCommandResult[],
+    decisions: ReadonlyMap<string, RetryDecisionInfo> = new Map(),
+): {
+    commands: VerificationCommandEvidence[]
+    classified: ClassifiedFailure[]
+} {
+    const classified: ClassifiedFailure[] = []
+    const commands = results.map((result): VerificationCommandEvidence => {
+        const retried = result.retriedAfterFailure === true
+        if (result.status !== "failed" && !retried) return result
+        const tail = result.firstFailureTail ?? result.tail ?? ""
+        const classification = classifyFailureTail(tail, {
+            timedOut: result.timedOut,
+            environment: result.environment,
+        })
+        const bucket = result.failureBucket ?? classification.bucket
+        const remedy = result.remedy ?? classification.remedy
+        classified.push({
+            command: result.command,
+            bucket,
+            remedy,
+            signalId:
+                decisions.get(result.command)?.signalId ?? classification.signalId,
+            retried,
+            tail,
+        })
+        return { ...result, failureBucket: bucket, remedy }
+    })
+    return { commands, classified }
 }

@@ -1,5 +1,9 @@
 /** Final run verification requests and evidence. Wire `type` strings are frozen (see ../semantic-events.ts). */
 
+import type {
+    FailureBucket,
+    FailureRemedy,
+} from "../verification/failure-signals.js"
 import { defineSemanticEvent } from "./define.js"
 
 export type RunVerificationStatus = "passed" | "failed" | "skipped"
@@ -32,6 +36,9 @@ export interface VerificationCommandEvidence {
     retriedAfterFailure?: true
     /** Evidence of the first attempt when a retry decided the status. */
     firstFailureTail?: string
+    /** Set for every command that failed at least once, retry winners included. */
+    failureBucket?: FailureBucket
+    remedy?: FailureRemedy
 }
 
 /** The coordinator has integrated all candidate work and requests an objective gate. */
@@ -67,3 +74,24 @@ export interface RunVerificationCompletedData extends RunVerificationEvidence {
 
 export const RunVerificationCompleted =
     defineSemanticEvent<RunVerificationCompletedData>("run_verification_completed")
+
+/**
+ * One classified failure. Emitted beside run_verification_completed so a
+ * reader can tell a broken harness from a broken patch without re-parsing
+ * tails. `tail` is the already-bounded firstFailureTail, never raw output.
+ */
+export interface RunVerificationRetryClassifiedData {
+    runId: string
+    verificationId: string
+    command: string
+    bucket: FailureBucket
+    remedy: FailureRemedy
+    signalId: string | null
+    retried: boolean
+    tail: string
+}
+
+export const RunVerificationRetryClassified =
+    defineSemanticEvent<RunVerificationRetryClassifiedData>(
+        "run_verification_retry_classified",
+    )
