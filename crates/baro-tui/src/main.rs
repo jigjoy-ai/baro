@@ -808,11 +808,20 @@ async fn run_connect(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     if install {
         let exe =
             std::env::current_exe().map_err(|e| format!("cannot resolve baro binary: {e}"))?;
-        let token = token.ok_or(
-            "--install-service needs a token: pass --token <rt_…> once (get one from the dashboard) or set BARO_RUNNER_TOKEN",
-        )?;
-        cli::runner_token::write_token_file(&token)
-            .map_err(|e| format!("failed to save runner token: {e}"))?;
+        // README and dashboard both say `baro login`, then `baro connect
+        // --install-service`. The service's runner pairs itself with the login
+        // credential, so a token is only needed by someone who never logged in.
+        match token {
+            Some(token) => cli::runner_token::write_token_file(&token)
+                .map_err(|e| format!("failed to save runner token: {e}"))?,
+            None if cli::runner_token::logged_in() => {}
+            None => {
+                return Err(
+                    "--install-service needs an identity: run `baro login` first, or pass --token <rt_…> once (from the dashboard) / set BARO_RUNNER_TOKEN"
+                        .into(),
+                )
+            }
+        }
         return service::install(&service::ServiceConfig {
             exe,
             workspace: cwd,

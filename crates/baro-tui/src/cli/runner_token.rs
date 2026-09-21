@@ -11,6 +11,23 @@ pub fn token_file() -> PathBuf {
     baro_home().join("runner-token")
 }
 
+/// `baro login` leaves a CLI credential here; a runner without a pairing token
+/// registers itself with it (runner.ts), so a service needs no token at all.
+pub fn login_credentials_file() -> PathBuf {
+    baro_home().join("credentials.json")
+}
+
+pub fn logged_in() -> bool {
+    credentials_hold_a_token(&std::fs::read_to_string(login_credentials_file()).unwrap_or_default())
+}
+
+fn credentials_hold_a_token(raw: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|v| v.get("token").and_then(|t| t.as_str()).map(|t| !t.trim().is_empty()))
+        .unwrap_or(false)
+}
+
 pub fn resolve_runner_token(flag: Option<String>) -> Option<String> {
     let non_empty = |v: Option<String>| v.filter(|s| !s.trim().is_empty());
     non_empty(flag)
@@ -58,6 +75,15 @@ pub fn scrub_token_args(args: &[String]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_login_credential_counts_only_when_it_carries_a_token() {
+        assert!(super::credentials_hold_a_token(r#"{"token":"cli_abc","controlUrl":"https://api.baro.jigjoy.ai"}"#));
+        assert!(!super::credentials_hold_a_token(r#"{"token":"  "}"#));
+        assert!(!super::credentials_hold_a_token(r#"{"controlUrl":"x"}"#));
+        assert!(!super::credentials_hold_a_token(""));
+        assert!(!super::credentials_hold_a_token("not json"));
+    }
+
     use super::*;
 
     /// Rust tests share one process, so every env-mutating test in this module
