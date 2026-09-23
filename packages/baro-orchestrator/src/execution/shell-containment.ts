@@ -162,6 +162,20 @@ function gitSandboxPaths(cwd: string): {
     }
 }
 
+/**
+ * When a rejected operand reaches into a linked dependency dir, name the
+ * spelling that works — the cheapest lanes burn a model round per refusal, and
+ * `npx`/`npm run` reach the same tools without touching the link directly. The
+ * dep-dir set is inlined, not a module const, because this runs serialized into
+ * the hook source (see the file header).
+ */
+function withDependencyToolHint(rejection: string, word: string): string {
+    const depDirNames = new Set(["node_modules", ".venv", "vendor"])
+    const segments = word.split(/[\\/]/u)
+    if (!segments.some((segment) => depDirNames.has(segment))) return rejection
+    return `${rejection}; run the project's installed tools with \`npx <tool>\` or \`npm run <script> -- <args>\` rather than reaching into the dependency dir directly`
+}
+
 function dependencySymlinkTargets(cwd: string, commonRoot: string | null): string[] {
     if (!commonRoot) return []
     const allowedNames = new Set(["node_modules", ".venv", "vendor"])
@@ -469,7 +483,7 @@ function containmentRejection(
             false,
             canSandboxOpaqueCode,
         )
-        if (rejected) return rejected
+        if (rejected) return withDependencyToolHint(rejected, word)
     }
 
     if (expectRedirectTarget) return "redirection is missing its target"
@@ -951,6 +965,7 @@ const HOOK_SOURCE_GRAPH: ReadonlyArray<(...args: never[]) => unknown> = [
     isGitMessageFlag,
     isEnvironmentAssignment,
     isSedAwkScriptOperand,
+    withDependencyToolHint,
     hasMacosWriteSandbox,
     classifyNodeInlineCodeFlag,
     classifyPythonInlineCodeFlag,
