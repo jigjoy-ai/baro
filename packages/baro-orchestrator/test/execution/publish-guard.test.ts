@@ -318,4 +318,30 @@ describe("obligation admission rejects delivery", () => {
             ),
         )
     })
+
+    it("admits an obligation asserting nothing is pushed, tagged, or published (#183)", () => {
+        // The architect encodes the no-delivery rule as its own obligation; the
+        // negation is "nothing", which the guard must read as a constraint, not
+        // a delivery requirement.
+        const noDelivery = (): ArchitectureObligationContractV1 => ({
+            schemaVersion: 1,
+            obligations: [
+                {
+                    id: "O-001",
+                    invariantIds: ["G-A1"],
+                    subject: "the worktree after the change",
+                    scenario: "the change is committed",
+                    expectedOutcome:
+                        "The change exists as at least one commit in the worktree, the working tree is clean, and nothing is pushed, tagged, or published",
+                    evidence: ["git status --porcelain is empty and git log shows the commit"],
+                },
+            ],
+        })
+        assert.doesNotThrow(() =>
+            bindArchitectureObligationContract(noDelivery(), negatedGoal),
+        )
+        assert.doesNotThrow(() =>
+            validateArchitectureObligationCoverage(noDelivery(), [], "partial"),
+        )
+    })
 })
