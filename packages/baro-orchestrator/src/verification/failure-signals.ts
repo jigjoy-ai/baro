@@ -105,6 +105,57 @@ export const FAILURE_SIGNALS: readonly FailureSignal[] = Object.freeze([
         remedy: "install-dependencies",
         match: "Class not found",
     },
+    // Network: the machine lost DNS or a registry mid-verification (a laptop
+    // waking behind the awake clock is the common cause). No local repair helps;
+    // remedy "none" still earns the one environment retry once the link is back.
+    {
+        id: "dns-resolve-host",
+        bucket: "environment",
+        remedy: "none",
+        match: "could not resolve host",
+    },
+    {
+        id: "dns-resolve-host-name",
+        bucket: "environment",
+        remedy: "none",
+        match: "couldn't resolve host name",
+    },
+    {
+        id: "dns-getaddrinfo",
+        bucket: "environment",
+        remedy: "none",
+        match: "getaddrinfo",
+    },
+    {
+        id: "dns-enotfound",
+        bucket: "environment",
+        remedy: "none",
+        match: "ENOTFOUND",
+    },
+    {
+        id: "dns-eai-again",
+        bucket: "environment",
+        remedy: "none",
+        match: "EAI_AGAIN",
+    },
+    {
+        id: "cargo-spurious-network",
+        bucket: "environment",
+        remedy: "none",
+        match: "spurious network error",
+    },
+    {
+        id: "socket-timed-out",
+        bucket: "environment",
+        remedy: "none",
+        match: "ETIMEDOUT",
+    },
+    {
+        id: "socket-reset",
+        bucket: "environment",
+        remedy: "none",
+        match: "ECONNRESET",
+    },
 
     {
         id: "absolute-command-ceiling",

@@ -186,6 +186,23 @@ describe("classifyFailureTail", () => {
             "regression",
         )
     })
+
+    it("treats an offline machine as environment, not a regression (#186)", () => {
+        // Real tails from a run whose network dropped mid-verification: git,
+        // cargo/libcurl and Node all phrase a lost host differently.
+        for (const tail of [
+            "fatal: unable to access 'https://github.com/x/y.git/': Could not resolve host: github.com",
+            "warning: spurious network error (2 tries remaining): [6] Couldn't resolve host name (Could not resolve host: index.crates.io)",
+            "Error: getaddrinfo EAI_AGAIN registry.npmjs.org",
+            "request to https://registry.npmjs.org failed, reason: getaddrinfo ENOTFOUND registry.npmjs.org",
+            "Error: connect ETIMEDOUT 140.82.112.3:443",
+            "Error: read ECONNRESET",
+        ]) {
+            const verdict = classifyFailureTail(tail, {})
+            assert.equal(verdict.bucket, "environment", tail)
+            assert.equal(verdict.remedy, "none", tail)
+        }
+    })
 })
 
 describe("decideRetry", () => {
@@ -231,6 +248,18 @@ describe("decideRetry", () => {
         })
         assert.equal(verdict.retry, true)
         assert.equal(verdict.remedy, "rematerialize-worktree")
+    })
+
+    it("retries a network blip once with no repair, then hands it back (#186)", () => {
+        const tail = "error: failed to download from index.crates.io: Could not resolve host: index.crates.io"
+        const first = decideRetry(tail, {})
+        assert.equal(first.retry, true)
+        assert.equal(first.remedy, "none")
+        assert.equal(first.liftCeiling, false)
+        assert.equal(first.classification.bucket, "environment")
+
+        const second = decideRetry(tail, { alreadyRetried: true })
+        assert.equal(second.retry, false)
     })
 })
 
