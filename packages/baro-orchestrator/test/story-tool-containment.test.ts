@@ -543,6 +543,23 @@ setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_0
         })
     })
 
+    it("names npx/npm run when a rejected path reaches into a dependency dir (#182)", async () => {
+        await withManagerDependencyLink(async ({ origin, story }) => {
+            // A .git symlink named `vendor`: rejected on every platform, and its
+            // spelling carries a dependency-dir segment, so the refusal should
+            // point at the spelling that works instead of just saying "escape".
+            mkdirSync(join(story, "untrusted"))
+            symlinkSync(join(origin, ".git"), join(story, "untrusted", "vendor"), "dir")
+
+            const bash = namedTool(createStoryTools(story), "bash")
+            const rejected = await invoke(bash, {
+                command: "cat untrusted/vendor/config",
+            })
+            assert.match(rejected, /rejected by project containment guard/)
+            assert.match(rejected, /npx <tool>|npm run <script>/)
+        })
+    })
+
     it("rejects explicit writes through a manager-owned dependency link on every platform", async () => {
         await withManagerDependencyLink(async ({ story, dependencyRoot }) => {
             const dependencyFile = join(dependencyRoot, "fixture", "index.js")
