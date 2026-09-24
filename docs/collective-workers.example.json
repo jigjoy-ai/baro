@@ -2,7 +2,7 @@
   {
     "workerId": "deepseek-flash-worker",
     "routeId": "baro-cloud-deepseek-flash",
-    "route": "openai:deepseek-v4-flash",
+    "route": "openai:deepseek-flash",
     "tiers": ["default", "light", "standard"],
     "maxConcurrent": 4,
     "estimate": {
@@ -15,7 +15,7 @@
   {
     "workerId": "deepseek-flash-heavy-worker",
     "routeId": "baro-cloud-deepseek-flash-heavy",
-    "route": "openai:deepseek-v4-flash",
+    "route": "openai:deepseek-flash",
     "tiers": ["heavy"],
     "maxConcurrent": 2,
     "estimate": {
