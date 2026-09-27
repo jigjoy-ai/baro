@@ -17,6 +17,7 @@ import {
 import { PROGRESSIVE_PLANNER_MCP_MODE } from "../../../src/planning/adapters/planner-harness-progressive.js"
 import {
     goalTextFromEnvelope,
+    plannerBusModel,
     runPlannerBusSession,
 } from "../../../src/planning/adapters/planner-bus-session.js"
 import type {
@@ -539,6 +540,48 @@ describe("planner bus session", () => {
                 "planning-rust-seeded-1",
             )
         })
+    })
+
+    for (const backend of ["codex", "opencode", "pi"]) {
+        it(`refuses a ${backend} planner instead of falling through to the OpenAI API (#193)`, async () => {
+            const env = new AgenticEnvironment(`planner-bus-${backend}`)
+            const feed = new StubFeed()
+            feed.join(env)
+
+            const result = await runPlannerBusSession({
+                runId: `run-bus-${backend}`,
+                cwd: process.cwd(),
+                env,
+                feed,
+                goalEnvelope: ENVELOPE,
+                prdMetadata: {
+                    project: "baro",
+                    branchName: "bootstrap-branch",
+                    description: "Host-owned metadata.",
+                },
+                backend,
+            })
+
+            assert.equal(result.status, "failed")
+            assert.equal(feed.fragments.length, 0)
+            assert.equal(feed.failures.length, 1)
+            assert.match(feed.failures[0]!.reason, new RegExp(`'${backend}' has no bus lane`))
+            assert.doesNotMatch(feed.failures[0]!.reason, /OPENAI_API_KEY/)
+        })
+    }
+
+    it("never hands a Claude model name to a direct-model lane", () => {
+        const previous = process.env.BARO_PLANNER_FOCUSED_MODEL
+        delete process.env.BARO_PLANNER_FOCUSED_MODEL
+        try {
+            assert.equal(plannerBusModel("claude", undefined, "focused"), "opus")
+            assert.equal(plannerBusModel("claude", "sonnet", "parallel"), "sonnet")
+            assert.equal(plannerBusModel("openai", undefined, "parallel"), "gpt-5.5")
+            assert.equal(plannerBusModel("openai", "glm-5.3", "focused"), "glm-5.3")
+            assert.notEqual(plannerBusModel("openai", undefined, "focused"), "opus")
+        } finally {
+            if (previous !== undefined) process.env.BARO_PLANNER_FOCUSED_MODEL = previous
+        }
     })
 
     it("renders the trusted envelope as the planner goal", () => {

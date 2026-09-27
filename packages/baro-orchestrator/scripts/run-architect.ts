@@ -31,6 +31,7 @@ import { createDialogueResponder } from "../src/conversation/dialogue-responder.
 import { withTransientRetry } from "../src/harness/transient-retry.js"
 import { runArchitectClaude } from "../src/planning/adapters/architect-claude.js"
 import { runArchitectBusSession } from "../src/planning/adapters/architect-bus-session.js"
+import { ONE_SHOT_ONLY_BACKENDS } from "../src/harness/lane-registry.js"
 import {
     ARCHITECT_DECISION_OUTCOME_SYSTEM_PROMPT,
     ARCHITECT_OUTCOME_SYSTEM_PROMPT,
@@ -555,14 +556,6 @@ async function main(): Promise<void> {
  * for a capability now — read this repository — which every lane can grant, so
  * the backend no longer decides whether the phase gets to be a conversation.
  */
-/**
- * External CLIs with no interactive lane adapter yet: for these the bus falls
- * through to the native (OpenAI-API) lane with no model and no credentials
- * (#121). They keep the one-shot Architect until each grows a lane that can
- * hold a conversation.
- */
-const ONE_SHOT_ONLY_BACKENDS = new Set(["codex", "opencode", "pi"])
-
 function architectBusEnabled(args: Args): boolean {
     // Default on: a lane that misses this reads the repository alone, never
     // reaches a scout, and loses the whole exploration to one dropped

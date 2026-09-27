@@ -183,6 +183,14 @@ impl LlmProvider {
         }
     }
 
+    /// Whether an orchestrator bus lane can hold this backend's planner.
+    /// Codex/OpenCode/Pi have none: the bus would fall through to the native
+    /// OpenAI-API lane (#121, #193), so they plan in their own CLI subprocess.
+    /// Mirrors `ONE_SHOT_ONLY_BACKENDS` in the orchestrator's lane registry.
+    pub fn has_bus_lane(self) -> bool {
+        matches!(self, Self::Claude | Self::OpenAI)
+    }
+
     pub fn parse(raw: &str) -> Option<Self> {
         match raw {
             "claude" => Some(Self::Claude),
@@ -2235,6 +2243,24 @@ mod tests {
         assert_eq!(app.model_for_phase("architect").as_deref(), Some("opus"));
         assert_eq!(app.model_for_phase("planning").as_deref(), Some("gpt-5.5"));
         assert_eq!(app.model_for_phase("story"), None);
+    }
+
+    #[test]
+    fn only_claude_and_openai_planners_have_a_bus_lane() {
+        assert!(LlmProvider::Claude.has_bus_lane());
+        assert!(LlmProvider::OpenAI.has_bus_lane());
+        assert!(!LlmProvider::Codex.has_bus_lane());
+        assert!(!LlmProvider::OpenCode.has_bus_lane());
+        assert!(!LlmProvider::Pi.has_bus_lane());
+    }
+
+    #[test]
+    fn codex_planner_gets_no_claude_model_name() {
+        let mut app = App::new();
+        app.llm = LlmProvider::Codex;
+        app.planner_llm = LlmProvider::Codex;
+        app.quick = true;
+        assert_eq!(app.model_for_phase("planning"), None);
     }
 
     #[test]

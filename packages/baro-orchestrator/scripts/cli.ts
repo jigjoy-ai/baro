@@ -16,6 +16,7 @@ import {
 } from "../src/orchestrate.js"
 import { resolveGatewayBillingForRoutes } from "../src/telemetry/billing/index.js"
 import { signalAllProcessTrees } from "../src/harness/process-tree.js"
+import { ONE_SHOT_ONLY_BACKENDS } from "../src/harness/lane-registry.js"
 import { configureProviderOwnershipManifest } from "../src/provider-ownership-manifest.js"
 import type { Operator } from "../src/execution/operator.js"
 import type { PlanningFeed } from "../src/execution/planning-feed.js"
@@ -91,6 +92,9 @@ interface CliArgs {
     storyLlm?: "claude" | "openai" | "codex" | "opencode" | "pi"
     criticLlm?: "claude" | "openai" | "codex" | "opencode" | "pi"
     surgeonLlm?: "claude" | "openai" | "codex" | "opencode" | "pi"
+    /** Route for the bus-hosted progressive planner; the host resolves it per phase. */
+    plannerLlm?: "claude" | "openai" | "codex" | "opencode" | "pi"
+    plannerModel?: string
     help: boolean
 }
 
@@ -308,9 +312,13 @@ function parseArgs(argv: string[]): CliArgs {
                 args.llm = v
                 break
             }
+            case "--planner-model":
+                args.plannerModel = required(argv, ++i, "--planner-model")
+                break
             case "--story-llm":
             case "--critic-llm":
-            case "--surgeon-llm": {
+            case "--surgeon-llm":
+            case "--planner-llm": {
                 const v = required(argv, ++i, a)
                 if (v !== "claude" && v !== "openai" && v !== "codex" && v !== "opencode" && v !== "pi") {
                     process.stderr.write(
@@ -320,6 +328,7 @@ function parseArgs(argv: string[]): CliArgs {
                 }
                 if (a === "--story-llm") args.storyLlm = v
                 else if (a === "--critic-llm") args.criticLlm = v
+                else if (a === "--planner-llm") args.plannerLlm = v
                 else args.surgeonLlm = v
                 break
             }
@@ -760,6 +769,7 @@ async function main(): Promise<void> {
         })
     })
 
+    const plannerBackend = args.plannerLlm ?? args.llm
     const config: OrchestrateConfig = {
         prdPath,
         cwd,
@@ -773,11 +783,17 @@ async function main(): Promise<void> {
         progressivePlanningId,
         busPlanner:
             // Default on, like the Architect's: planning is a conversation on
-            // every lane. `0` remains for bisecting against the MCP-relay shape.
+            // every lane that has one. `0` remains for bisecting against the
+            // MCP-relay shape; the host sets it when it runs the planner itself.
             process.env.BARO_PLANNER_BUS !== "0" &&
-            coordinationMode === "collective"
+            coordinationMode === "collective" &&
+            !ONE_SHOT_ONLY_BACKENDS.has(plannerBackend)
                 ? {
-                      model: process.env.BARO_PLANNER_BUS_MODEL || undefined,
+                      backend: plannerBackend,
+                      model:
+                          process.env.BARO_PLANNER_BUS_MODEL ||
+                          args.plannerModel ||
+                          undefined,
                       effort:
                           process.env.BARO_PLANNER_BUS_EFFORT ||
                           args.effort ||

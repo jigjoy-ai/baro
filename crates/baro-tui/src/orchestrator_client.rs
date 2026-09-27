@@ -12,6 +12,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::app::LlmProvider;
 use crate::conversation::ConversationContextSnapshot;
 use crate::discovery::{self, ScriptEntry};
 use crate::events::BaroEvent;
@@ -68,6 +69,9 @@ pub struct OrchestratorConfig {
     pub story_llm: String,
     pub critic_llm: String,
     pub surgeon_llm: String,
+    /// Planner route, used only with `progressive_planning_id`.
+    pub planner_llm: LlmProvider,
+    pub planner_model: Option<String>,
     /// Injected as `OPENAI_API_KEY` when a phase uses openai; never
     /// written to disk. `None` = inherit whatever is in the parent env.
     pub openai_api_key: Option<String>,
@@ -433,6 +437,13 @@ impl EphemeralConversationContextFile {
     }
 }
 
+/// Whether the orchestrator hosts the progressive planner on its bus. When
+/// false the host runs the planner subprocess on the planner's own CLI, and
+/// the child is told so explicitly — both hosting it would plan twice.
+pub(crate) fn planner_on_bus(planner: LlmProvider) -> bool {
+    crate::env_flag::env_flag_enabled("BARO_PLANNER_BUS") && planner.has_bus_lane()
+}
+
 fn build_command(
     entry: &ScriptEntry,
     cfg: &OrchestratorConfig,
@@ -460,6 +471,13 @@ fn build_command(
     }
     if let Some(planning_id) = &cfg.progressive_planning_id {
         cmd.arg("--progressive-planning").arg(planning_id);
+        cmd.arg("--planner-llm").arg(cfg.planner_llm.as_str());
+        if let Some(model) = &cfg.planner_model {
+            cmd.arg("--planner-model").arg(model);
+        }
+        if !planner_on_bus(cfg.planner_llm) {
+            cmd.env("BARO_PLANNER_BUS", "0");
+        }
     }
     if let Some(path) = conversation_context_path {
         debug_assert!(path.is_absolute());
@@ -565,10 +583,11 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        build_command, orchestrator_exit_error, wait_for_child_or_shutdown,
+        build_command, orchestrator_exit_error, planner_on_bus, wait_for_child_or_shutdown,
         wait_for_child_or_shutdown_with_grace, EphemeralConversationContextFile,
         OrchestratorConfig,
     };
+    use crate::app::LlmProvider;
     use crate::conversation::{
         ConversationKind, ConversationPhase, ConversationSession, ConversationWireResponse,
         GoalEnvelope,
@@ -603,6 +622,8 @@ mod tests {
             story_llm: "claude".to_string(),
             critic_llm: "claude".to_string(),
             surgeon_llm: "claude".to_string(),
+            planner_llm: LlmProvider::Claude,
+            planner_model: None,
             openai_api_key: None,
             openai_base_url: None,
             effort: "high".to_string(),
@@ -700,6 +721,59 @@ mod tests {
         cfg.is_resume = false;
         let args = command_args(&cfg);
         assert_eq!(count(&args, "--resume"), 0);
+    }
+
+    fn child_env(cfg: &OrchestratorConfig, name: &str) -> Option<String> {
+        let command = build_command(&ScriptEntry::NodeJs("/tmp/cli.mjs".into()), cfg, None);
+        command
+            .as_std()
+            .get_envs()
+            .find(|(key, _)| *key == OsStr::new(name))
+            .and_then(|(_, value)| value.map(|v| v.to_string_lossy().into_owned()))
+    }
+
+    fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+        let position = args.iter().position(|arg| arg == flag)?;
+        args.get(position + 1).map(String::as_str)
+    }
+
+    #[test]
+    fn a_codex_planner_is_kept_off_the_orchestrator_bus() {
+        // #193: the bus has no Codex lane and fell through to the OpenAI API
+        // with the Claude default "opus".
+        let mut cfg = config(true, true);
+        cfg.llm = "codex".to_string();
+        cfg.planner_llm = LlmProvider::Codex;
+        cfg.progressive_planning_id = Some("planning-test-1".to_string());
+        let args = command_args(&cfg);
+        assert_eq!(flag_value(&args, "--planner-llm"), Some("codex"));
+        assert_eq!(count(&args, "--planner-model"), 0);
+        assert_eq!(child_env(&cfg, "BARO_PLANNER_BUS").as_deref(), Some("0"));
+        assert!(!planner_on_bus(LlmProvider::Codex));
+        assert!(!planner_on_bus(LlmProvider::OpenCode));
+        assert!(!planner_on_bus(LlmProvider::Pi));
+    }
+
+    #[test]
+    fn a_bus_held_planner_gets_its_own_route() {
+        let mut cfg = config(true, true);
+        cfg.llm = "codex".to_string();
+        cfg.planner_llm = LlmProvider::OpenAI;
+        cfg.planner_model = Some("gpt-5.5".to_string());
+        cfg.progressive_planning_id = Some("planning-test-1".to_string());
+        let args = command_args(&cfg);
+        assert_eq!(flag_value(&args, "--planner-llm"), Some("openai"));
+        assert_eq!(flag_value(&args, "--planner-model"), Some("gpt-5.5"));
+        assert_eq!(child_env(&cfg, "BARO_PLANNER_BUS"), None);
+    }
+
+    #[test]
+    fn a_complete_plan_launch_carries_no_planner_route() {
+        let mut cfg = config(true, true);
+        cfg.planner_llm = LlmProvider::Codex;
+        let args = command_args(&cfg);
+        assert_eq!(count(&args, "--planner-llm"), 0);
+        assert_eq!(child_env(&cfg, "BARO_PLANNER_BUS"), None);
     }
 
     fn context_snapshot() -> crate::conversation::ConversationContextSnapshot {

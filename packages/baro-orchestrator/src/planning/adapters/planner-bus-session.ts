@@ -33,7 +33,11 @@ import {
     normalizeClaudeRunnerObservation,
     normalizeOpenAIRunnerObservation,
 } from "../../conversation/dialogue-responder.js"
-import { isNativeLane, laneAdapterFor } from "../../harness/lane-registry.js"
+import {
+    ONE_SHOT_ONLY_BACKENDS,
+    isNativeLane,
+    laneAdapterFor,
+} from "../../harness/lane-registry.js"
 import type { CliHostFunctionBridge } from "../../harness/claude/lane-adapter.js"
 import type { OpenAIConnection } from "../../harness/openai/runtime.js"
 import { IdleWatchdog, llmIdleTimeoutMs } from "../../harness/liveness.js"
@@ -45,8 +49,10 @@ import {
     buildWriteSurfaceOverlapRemedySection,
     buildPlannerUserMessage,
     heuristicModeContract,
+    type ExecutionMode,
     type ModeContract,
 } from "../domain/planner-prompts.js"
+import { resolvePlannerModelName } from "./planner-openai.js"
 import { missingObligationIdsFromError } from "../domain/architecture-obligation-contract.js"
 import type { WriteSurfaceOverlapFacts } from "../../events/runtime-graph.js"
 import { formatObligationIdList } from "../domain/obligation-coverage-report.js"
@@ -284,6 +290,20 @@ class PlannerTelemetryObserver extends BaseObserver {
     }
 }
 
+/**
+ * Deterministic default: without it the Claude CLI silently picks the user's
+ * account default. A Claude name must never reach a direct-model lane (#193),
+ * which routes the same way the subprocess OpenAI planner does.
+ */
+export function plannerBusModel(
+    backend: string,
+    model: string | undefined,
+    mode: ExecutionMode,
+): string {
+    if (backend === "claude") return model ?? "opus"
+    return resolvePlannerModelName(mode, model)
+}
+
 /** Render the trusted envelope as the planner's goal statement. */
 export function goalTextFromEnvelope(envelope: GoalEnvelope): string {
     const section = (title: string, items: readonly string[]): string =>
@@ -339,6 +359,14 @@ export async function runPlannerBusSession(
             reason,
         })
         return { status: "failed", reason: `${code}: ${reason}` }
+    }
+
+    const backend = opts.backend ?? "claude"
+    if (ONE_SHOT_ONLY_BACKENDS.has(backend)) {
+        return fail(
+            "planner_failed",
+            `backend '${backend}' has no bus lane; its planner runs in its own CLI`,
+        )
     }
 
     const receipts = new ReceiptObserver(planningId)
@@ -443,11 +471,9 @@ export async function runPlannerBusSession(
         },
     }
 
-    // Deterministic default: without it the CLI silently picks the user's
-    // account default and the run's planner model varies per machine.
-    const requestedModel = opts.model ?? "opus"
+    const requestedModel = plannerBusModel(backend, opts.model, modeContract.mode)
     const lane = laneAdapterFor({
-        backend: opts.backend ?? "claude",
+        backend,
         ...(opts.connection ? { connection: opts.connection } : {}),
         ...(opts.claudeBin ? { claudeBin: opts.claudeBin } : {}),
         hostFunctionBridge: bridge,
@@ -504,7 +530,7 @@ export async function runPlannerBusSession(
         opts.runId,
         agentId,
         requestedModel,
-        opts.backend ?? "claude",
+        backend,
         opts.publishMeasurement,
     )
     let watchdog: IdleWatchdog | null = null
