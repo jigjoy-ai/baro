@@ -46,7 +46,9 @@ export function parseDoneSuccess(value: unknown): boolean | null {
 // every later push from the clone and its worktrees (they share its config).
 export function gitCredentialHelper(tokenFile: string): string {
     if (tokenFile.includes("'")) throw new Error(`unsupported token path: ${tokenFile}`)
-    return `!f() { if [ "$1" = get ]; then printf 'username=x-access-token\\npassword=%s\\n' "$(cat '${tokenFile}')"; fi; }; f`
+    // Git for Windows runs `!` helpers under its bundled sh, which takes forward slashes.
+    const path = tokenFile.replaceAll("\\", "/")
+    return `!f() { if [ "$1" = get ]; then printf 'username=x-access-token\\npassword=%s\\n' "$(cat '${path}')"; fi; }; f`
 }
 
 // gh re-reads GH_CONFIG_DIR on every call, while a GH_TOKEN env var would pin the
