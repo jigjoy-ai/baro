@@ -56,6 +56,17 @@ export function laneAdapterFor(
     })
 }
 
+/**
+ * External CLIs with no interactive lane yet: on the bus they would fall through
+ * to the native OpenAI-API lane with no credentials (#121, #193), so their
+ * phases stay one-shot. Mirrors `LlmProvider::has_bus_lane` on the Rust host.
+ */
+export const ONE_SHOT_ONLY_BACKENDS: ReadonlySet<string> = new Set([
+    "codex",
+    "opencode",
+    "pi",
+])
+
 /** True when this backend is held by a model we call inside our own loop. */
 export function isNativeLane(backend: string): boolean {
     return !LANES.has(backend)

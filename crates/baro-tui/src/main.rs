@@ -71,7 +71,6 @@ use conversation_host::{
     finish_conversation_run, persist_conversation, restore_conversation_from_prd,
     restore_pre_prd_conversation,
 };
-use env_flag::env_flag_enabled;
 use events::BaroEvent;
 use headless_transport::StdinHub;
 pub(crate) use planner_host::PrdOutput;
@@ -220,6 +219,8 @@ fn executor_config_from_app(app: &App) -> Result<executor::ExecutorConfig, Strin
         story_llm: app.story_llm,
         critic_llm: app.critic_llm,
         surgeon_llm: app.surgeon_llm,
+        planner_llm: app.planner_llm,
+        planner_model: app.model_for_phase("planning"),
         openai_api_key: app.openai_api_key.clone(),
         openai_base_url: app.openai_base_url.clone(),
         effort: app.effort.clone(),
@@ -4660,7 +4661,7 @@ async fn begin_progressive_execution(
     // stdout wire lane, no host-issued planning_open — the bus session opens
     // and closes its own planning stream. Read the same way the TS side reads
     // it, or the two disagree and both plan.
-    if env_flag_enabled("BARO_PLANNER_BUS") {
+    if orchestrator_client::planner_on_bus(spec.planner_llm) {
         let _ = spec;
         return Ok(());
     }
@@ -4804,6 +4805,8 @@ fn spawn_executor(
         story_llm: config.story_llm.as_str().to_string(),
         critic_llm: config.critic_llm.as_str().to_string(),
         surgeon_llm: config.surgeon_llm.as_str().to_string(),
+        planner_llm: config.planner_llm,
+        planner_model: config.planner_model,
         openai_api_key: config.openai_api_key,
         openai_base_url: config.openai_base_url,
         effort: config.effort,

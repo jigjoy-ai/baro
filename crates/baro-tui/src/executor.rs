@@ -155,6 +155,9 @@ pub struct ExecutorConfig {
     pub story_llm: crate::app::LlmProvider,
     pub critic_llm: crate::app::LlmProvider,
     pub surgeon_llm: crate::app::LlmProvider,
+    /// Route for the orchestrator-hosted progressive planner.
+    pub planner_llm: crate::app::LlmProvider,
+    pub planner_model: Option<String>,
     /// From `OPENAI_API_KEY` or the ApiKeyInput screen; passed to the
     /// subprocess env when `llm = OpenAI`.
     pub openai_api_key: Option<String>,
