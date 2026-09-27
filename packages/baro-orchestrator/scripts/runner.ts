@@ -10,7 +10,7 @@ import { join } from "node:path"
 import { createInterface } from "node:readline/promises"
 import { WebSocket } from "ws"
 import { canonicalControlHttpOrigin } from "../src/gateway-credentials.js"
-import { buildInstallServiceArgs, buildReexec, parseDoneSuccess, semverLt } from "./runner-helpers.js"
+import { buildInstallServiceArgs, buildReexec, gitCredentialHelper, parseDoneSuccess, semverLt, unpublishedWorkDiff, writeGithubCredentials } from "./runner-helpers.js"
 
 interface WireEvent {
     type: string
@@ -52,6 +52,7 @@ type ToRunner =
     | { t: "agent_message"; storyId: string; text: string; runId?: string; messageId?: string }
     | { t: "conversation_message"; runId: string; messageId: string; text: string; sessionId?: string; afterRequestId?: string }
     | { t: "confirm_mode"; mode: string; runId?: string; commandId?: string }
+    | { t: "github_token"; runId: string; token: string }
     | { t: "ping"; ts: number }
     | { t: "rejected"; reason: string }
     | { t: string }
@@ -199,17 +200,32 @@ interface RunOutcome {
     storiesPassed?: number
     storiesTotal?: number
     error: string | null
-    // Set in diffOnly mode: the unified patch of everything baro changed (no PR opened).
+    // The unified patch of baro's changes: diffOnly previews, and repo runs whose work never reached GitHub.
     diff?: string
 }
 
-// With a token, authenticated clone (private repos + push); without, public clone (diffOnly preview).
-function cloneRepo(fullName: string, token: string | undefined, emit: (e: WireEvent) => void): Promise<string> {
+// runId → the directory holding that run's GitHub token, rewritten on each github_token refresh.
+const githubCredentialDirs = new Map<string, string>()
+
+function refreshGithubToken(m: { runId?: string; token?: string }): void {
+    const dir = m.runId ? githubCredentialDirs.get(m.runId) : undefined
+    if (!dir || typeof m.token !== "string" || !m.token) return
+    try {
+        writeGithubCredentials(dir, m.token)
+    } catch (e) {
+        console.error(`[baro] couldn't store the refreshed GitHub token: ${(e as Error).message}`)
+    }
+}
+
+// With credentials, authenticated clone (private repos + push); without, public clone (diffOnly preview).
+function cloneRepo(fullName: string, credentialDir: string | undefined, emit: (e: WireEvent) => void): Promise<string> {
     return new Promise((resolve, reject) => {
         const dir = mkdtempSync(join(tmpdir(), "baro-clone-"))
-        const url = token ? `https://x-access-token:${token}@github.com/${fullName}.git` : `https://github.com/${fullName}.git`
+        const url = `https://github.com/${fullName}.git`
+        // The empty helper drops any inherited ones (e.g. a keychain) before ours.
+        const auth = credentialDir ? ["--config", "credential.helper=", "--config", `credential.helper=${gitCredentialHelper(join(credentialDir, "token"))}`] : []
         emit({ type: "story_log", agentId: "_git", data: { type: "story_log", id: "_git", line: `cloning ${fullName}…` } })
-        const ch = spawn("git", ["clone", "--quiet", url, dir], { stdio: "ignore" })
+        const ch = spawn("git", ["clone", "--quiet", ...auth, url, dir], { stdio: "ignore", env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } })
         ch.on("close", (code) => (code === 0 ? resolve(dir) : reject(new Error(`git clone exit ${code}`))))
         ch.on("error", reject)
     })
@@ -428,6 +444,25 @@ async function runGoal(
     signal: AbortSignal,
     bindCommandSink: BindCommandSink,
 ): Promise<RunOutcome> {
+    try {
+        return await runGoalInClone(d, emit, signal, bindCommandSink)
+    } finally {
+        const dir = githubCredentialDirs.get(d.runId)
+        githubCredentialDirs.delete(d.runId)
+        try {
+            if (dir) rmSync(dir, { recursive: true, force: true })
+        } catch {
+            // best-effort
+        }
+    }
+}
+
+async function runGoalInClone(
+    d: RunDispatchMsg,
+    emit: (e: WireEvent) => void,
+    signal: AbortSignal,
+    bindCommandSink: BindCommandSink,
+): Promise<RunOutcome> {
     if (signal.aborted) return { success: false, durationSecs: 1, error: "cancelled" }
     // Point the shared dep caches at process.env BEFORE the child snapshot below, so
     // agents' later builds reuse whatever preinstallDeps downloads.
@@ -449,7 +484,17 @@ async function runGoal(
     if (d.repo && (d.githubToken || d.diffOnly)) {
         try {
             // diffOnly → public clone (no token); otherwise authenticated (private + push).
-            cwd = await cloneRepo(d.repo.fullName, d.githubToken, emit)
+            let credentialDir: string | undefined
+            if (d.githubToken) {
+                credentialDir = mkdtempSync(join(tmpdir(), "baro-github-"))
+                githubCredentialDirs.set(d.runId, credentialDir)
+                writeGithubCredentials(credentialDir, d.githubToken)
+                env.GH_CONFIG_DIR = join(credentialDir, "gh")
+                delete env.GH_TOKEN
+                delete env.GITHUB_TOKEN
+                env.GIT_TERMINAL_PROMPT = "0"
+            }
+            cwd = await cloneRepo(d.repo.fullName, credentialDir, emit)
         } catch (e) {
             return { success: false, durationSecs: 1, error: `clone failed: ${(e as Error).message}` }
         }
@@ -471,21 +516,13 @@ async function runGoal(
         if (d.diffOnly) {
             // Drop the origin remote so baro skips ALL push/PR steps cleanly ("no remote,
             // skipping push") instead of failing them noisily without a token — we return
-            // the patch instead. Record the base first to diff baro's work against it.
-            try {
-                diffBase = execFileSync("git", ["rev-parse", "HEAD"], { cwd }).toString().trim()
-            } catch {
-                diffBase = undefined
-            }
+            // the patch instead.
             try {
                 execFileSync("git", ["remote", "remove", "origin"], { cwd })
             } catch {
                 /* best-effort — diff still works; push would just warn */
             }
         } else {
-            // Let baro's git push + `gh pr create` authenticate as the user.
-            env.GH_TOKEN = d.githubToken
-            env.GITHUB_TOKEN = d.githubToken
             // Follow-up: check out the prior run's PR branch so its work is the starting
             // point. baro runs with --continue (below) → commits here → the existing PR
             // updates. If checkout fails (PR closed/merged), fall through to a normal run.
@@ -498,6 +535,11 @@ async function runGoal(
                     d.followUp = undefined // don't pass --continue; let baro open a new PR
                 }
             }
+        }
+        try {
+            diffBase = execFileSync("git", ["rev-parse", "HEAD"], { cwd }).toString().trim()
+        } catch {
+            diffBase = undefined
         }
         cleanup = () => {
             try {
@@ -634,6 +676,9 @@ async function runGoal(
     // diffOnly (or repo-less scratch) runs return baro's changes as a patch, not a PR.
     if ((d.diffOnly || scratch) && diffBase) {
         outcome.diff = captureDiff(cwd, diffBase)
+    } else if (d.repo && !outcome.success && !prUrl && diffBase) {
+        const diff = unpublishedWorkDiff(cwd, diffBase)
+        if (diff) outcome.diff = diff
     }
     // PR doctor (opt-in, read-only for now): once the PR is open, watch its CI and
     // report the result back so the user sees green/red in the dashboard. The auto-fix
@@ -1169,6 +1214,8 @@ function handleMessage(m: ToRunner): void {
         currentWs?.close()
     } else if (m.t === "ping") {
         send({ t: "pong", ts: (m as { ts: number }).ts })
+    } else if (m.t === "github_token") {
+        refreshGithubToken(m as { runId?: string; token?: string })
     } else controller.handle(m)
 }
 
