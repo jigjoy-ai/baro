@@ -258,7 +258,6 @@ function createCodexResponder(
         try {
             const text = await runCodexOneShot({
                 prompt: `${input.systemPrompt}\n\n${input.userPrompt}`,
-                promptViaStdin: true,
                 cwd: opts.cwd,
                 model: opts.model,
                 reasoningEffort: opts.effort,

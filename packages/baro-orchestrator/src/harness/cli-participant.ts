@@ -44,6 +44,8 @@ export interface CliParticipantSpec {
     cwd: string
     /** Claude keeps a live stdin session; one-shot harnesses take none. */
     stdinMode: "ignore" | "pipe"
+    /** Written to a piped stdin, which is then closed. Keeps prompts off argv. */
+    stdinPayload?: string
     /** Bound inherited-stdio drain after the direct CLI root exits. */
     closeDrainTimeoutMs: number
     /** Retain a bounded stderr tail for terminal failure classification. */
@@ -262,6 +264,15 @@ export abstract class CliParticipant<
         })
         CliParticipant.active.add(this as unknown as CliParticipant<never>)
         this.transition("starting")
+
+        if (this.spec.stdinPayload !== undefined) {
+            proc.stdin?.on("error", (err: NodeJS.ErrnoException) => {
+                // EPIPE: the CLI exited without reading; its exit status decides.
+                if (err.code === "EPIPE" || this.doneSettled) return
+                this.spawnError ??= err
+            })
+            proc.stdin?.end(this.spec.stdinPayload)
+        }
 
         proc.stdout!.setEncoding("utf8")
         proc.stderr!.setEncoding("utf8")

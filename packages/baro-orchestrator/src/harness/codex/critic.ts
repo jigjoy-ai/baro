@@ -44,7 +44,6 @@ export class CriticCodex extends OneShotCritic {
     ): Promise<string> {
         return runCodexOneShot({
             prompt: `${VERDICT_SYSTEM_PROMPT}\n\n${prompt}`,
-            promptViaStdin: true,
             cwd: context.cwd,
             model: this.model,
             codexBin: this.codexBin,

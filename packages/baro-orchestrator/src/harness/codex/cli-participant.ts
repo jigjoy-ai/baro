@@ -68,7 +68,8 @@ export class CodexCliParticipant extends CliParticipant<CodexRunSummary> {
             // Nullish-coalesce so an explicit `undefined` can't clobber a default.
             binary: opts.codexBin ?? "codex",
             cwd: opts.cwd,
-            stdinMode: "ignore",
+            stdinMode: "pipe",
+            stdinPayload: opts.prompt,
             closeDrainTimeoutMs: opts.closeDrainTimeoutMs ?? 7_500,
             captureStderrTail: true,
         })
@@ -93,7 +94,7 @@ export class CodexCliParticipant extends CliParticipant<CodexRunSummary> {
         }
         if (this.options.model) args.push("--model", this.options.model)
         if (this.options.extraArgs?.length) args.push(...this.options.extraArgs)
-        args.push(this.options.prompt)
+        args.push("-")
         return args
     }
 
@@ -143,8 +144,8 @@ export class CodexCliParticipant extends CliParticipant<CodexRunSummary> {
         source: Participant,
         event: SemanticEvent<unknown>,
     ): Promise<void> {
-        // Codex exec is one-shot — no stdin channel; targeted messages are
-        // logged and dropped.
+        // Codex exec is one-shot — stdin carries only the initial prompt;
+        // targeted messages are logged and dropped.
         if (
             AgentTargetedMessage.is(event) &&
             acceptsTargetedMessage(

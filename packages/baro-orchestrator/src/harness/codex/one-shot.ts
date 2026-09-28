@@ -34,10 +34,9 @@ import {
 } from "../runner-invocation.js"
 
 export interface RunCodexOneShotOptions {
-    /** Combined system+user prompt. */
+    /** Combined system+user prompt. Always piped over stdin (`-` positional):
+     *  Windows caps a command line at 32K chars, 8191 through a `.cmd` shim. */
     prompt: string
-    /** Pipe the prompt over stdin with a `-` positional marker. */
-    promptViaStdin?: boolean
     /** Working directory. Must be a git repo (Codex enforces) unless
      *  skipGitRepoCheck=true. */
     cwd: string
@@ -223,7 +222,7 @@ export async function runCodexOneShot(
         )
     }
     if (opts.model) args.push("--model", opts.model)
-    args.push(opts.promptViaStdin ? "-" : opts.prompt)
+    args.push("-")
 
     const timeoutMs = opts.timeoutMs ?? 600_000
     const terminationGraceMs = opts.terminationGraceMs ?? 5_000
@@ -246,7 +245,7 @@ export async function runCodexOneShot(
                     ...harnessChildEnvironment(),
                     ...additionalEnvironment,
                 },
-                stdio: [opts.promptViaStdin ? "pipe" : "ignore", "pipe", "pipe"],
+                stdio: ["pipe", "pipe", "pipe"],
                 detached: POSIX_PROCESS_GROUPS_SUPPORTED,
             })
         } catch (e) {
@@ -612,18 +611,16 @@ export async function runCodexOneShot(
                 finalizeExit(terminal.code, terminal.signal),
             )
         })
-        if (opts.promptViaStdin) {
-            if (!proc.stdin) {
-                stdinError = new Error("runCodexOneShot: codex stdin is unavailable")
+        if (!proc.stdin) {
+            stdinError = new Error("runCodexOneShot: codex stdin is unavailable")
+            terminate()
+        } else {
+            proc.stdin.on("error", (error) => {
+                if (timedOut || aborted) return
+                stdinError = error
                 terminate()
-            } else {
-                proc.stdin.on("error", (error) => {
-                    if (timedOut || aborted) return
-                    stdinError = error
-                    terminate()
-                })
-                proc.stdin.end(opts.prompt)
-            }
+            })
+            proc.stdin.end(opts.prompt)
         }
     })
 }

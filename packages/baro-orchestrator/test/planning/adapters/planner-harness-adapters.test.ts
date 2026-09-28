@@ -221,8 +221,10 @@ describe("subscription planner progressive harness adapters", () => {
                             'shell_environment_policy.exclude=["BARO_PROGRESSIVE_PLANNER_RELAY_TOKEN"]',
                         ),
                     )
-                    const prompt = argv.at(-1)
-                    assert.equal(typeof prompt, "string")
+                    assert.equal(argv.at(-1), "-")
+                    // A cmd.exe `.cmd` shim caps the whole command line at 8191 chars.
+                    assert.ok(argv.join(" ").length < 4_096, `planner argv too long: ${argv.join(" ").length}`)
+                    const prompt = readFileSync(`${argvFile}.stdin`, "utf8")
                     assert.ok(
                         prompt!.endsWith(PROGRESSIVE_PLANNING_INSTRUCTION),
                         "Codex progressive reminder must be the final prompt block",
@@ -283,6 +285,11 @@ describe("subscription planner progressive harness adapters", () => {
                     assert.ok(argv.includes('default_permissions="baro_dialogue"'))
                     assert.ok(argv.includes("project_doc_max_bytes=0"))
                     assert.ok(argv.includes("hooks"))
+                    assert.equal(argv.at(-1), "-")
+                    assert.match(
+                        readFileSync(`${argvFile}.stdin`, "utf8"),
+                        /Classify this task without touching the checkout\./,
+                    )
                 }
             })
         })
@@ -448,6 +455,11 @@ const finalPrd = ${JSON.stringify(FINAL_PRD)};
 const publishedStory = ${JSON.stringify(PUBLISHED_STORY)};
 const { writeFileSync } = await import("node:fs");
 writeFileSync(argvFile, JSON.stringify(process.argv.slice(2)));
+if (harness === "codex") {
+    let stdin = "";
+    for await (const chunk of process.stdin) stdin += chunk;
+    writeFileSync(argvFile + ".stdin", stdin);
+}
 
 const server = harness === "claude"
     ? claudeMcpServer(process.argv.slice(2))

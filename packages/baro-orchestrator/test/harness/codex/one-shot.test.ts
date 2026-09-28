@@ -165,7 +165,7 @@ console.log(JSON.stringify({
         await withTempDir("baro-codex-stdin-", async (dir) => {
             const argvFile = join(dir, "argv.json")
             const stdinFile = join(dir, "stdin.txt")
-            const prompt = `large:${"x".repeat(40_000)}`
+            const prompt = `large:${"x".repeat(40_000)}\n\u00e9 "quoted" & | < > ^ %PATH%`
             const bin = writeFakeCodex(dir, {
                 texts: ["design doc"],
                 argvFile,
@@ -174,15 +174,29 @@ console.log(JSON.stringify({
 
             const result = await runCodexOneShot({
                 prompt,
-                promptViaStdin: true,
                 cwd: dir,
                 codexBin: bin,
+                model: "gpt-test",
+                reasoningEffort: "high",
+                bypassSandbox: false,
+                sandboxMode: "read-only",
+                ephemeral: true,
+                ignoreUserConfig: true,
+                ignoreRules: true,
+                disableHooks: true,
+                neverApprove: true,
+                disableWebSearch: true,
+                disableProjectDocs: true,
+                untrustedProjectPath: dir,
+                outputSchemaFile: join(dir, "schema.json"),
             })
 
             assert.equal(result, "design doc")
             const argv = JSON.parse(readFileSync(argvFile, "utf8")) as string[]
             assert.equal(argv.at(-1), "-")
-            assert.equal(argv.includes(prompt), false)
+            assert.ok(argv.every((arg) => !arg.includes("xxxx")))
+            // A cmd.exe `.cmd` shim caps the whole command line at 8191 chars.
+            assert.ok(argv.join(" ").length < 2_048, `codex argv too long: ${argv.join(" ").length}`)
             assert.equal(readFileSync(stdinFile, "utf8"), prompt)
         })
     })

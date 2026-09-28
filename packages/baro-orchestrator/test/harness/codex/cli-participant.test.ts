@@ -46,21 +46,25 @@ function writeFakeCodex(dir: string): string {
 
 function writeFakeCodexArgCapture(
     dir: string,
-): { bin: string; argsPath: string } {
+): { bin: string; argsPath: string; stdinPath: string } {
     const bin = join(dir, "fake-codex-args.mjs")
     const argsPath = join(dir, "args.json")
+    const stdinPath = join(dir, "stdin.txt")
 
     writeFileSync(
         bin,
         `#!/usr/bin/env node
 import { writeFileSync } from "node:fs";
+let stdin = "";
+for await (const chunk of process.stdin) stdin += chunk;
 writeFileSync(${JSON.stringify(argsPath)}, JSON.stringify(process.argv.slice(2)));
+writeFileSync(${JSON.stringify(stdinPath)}, stdin);
 console.log(JSON.stringify({ type: "thread.started", thread_id: "codex-thread-args" }));
 console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 2, output_tokens: 3 } }));
 `,
     )
     chmodSync(bin, 0o755)
-    return { bin, argsPath }
+    return { bin, argsPath, stdinPath }
 }
 
 function writeFakeCodexWithPostExitStdio(dir: string): string {
@@ -179,7 +183,7 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, o
 
     it("passes configured command arguments to the fake Codex process", async () => {
         await withTempDir("baro-codex-cli-args-", async (dir) => {
-            const { bin, argsPath } = writeFakeCodexArgCapture(dir)
+            const { bin, argsPath, stdinPath } = writeFakeCodexArgCapture(dir)
             const env = captureEnv()
             const participant = new CodexCliParticipant("codex-agent", {
                 cwd: dir,
@@ -206,8 +210,32 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, o
                 "gpt-test",
                 "--profile",
                 "baro-test",
-                "do the configured work",
+                "-",
             ])
+            assert.equal(readFileSync(stdinPath, "utf8"), "do the configured work")
+        })
+    })
+
+    it("pipes a large story prompt over stdin so argv stays under Windows limits", async () => {
+        await withTempDir("baro-codex-cli-stdin-", async (dir) => {
+            const { bin, argsPath, stdinPath } = writeFakeCodexArgCapture(dir)
+            const prompt = `story:${"x".repeat(200_000)}`
+            const participant = new CodexCliParticipant("codex-agent", {
+                cwd: dir,
+                prompt,
+                codexBin: bin,
+                skipGitRepoCheck: true,
+                bypassSandbox: true,
+            })
+
+            participant.start(captureEnv())
+            await participant.ready
+            assert.equal((await participant.done).exitCode, 0)
+
+            const argv = JSON.parse(readFileSync(argsPath, "utf8")) as string[]
+            assert.equal(argv.at(-1), "-")
+            assert.ok(argv.join(" ").length < 1_024)
+            assert.equal(readFileSync(stdinPath, "utf8"), prompt)
         })
     })
 

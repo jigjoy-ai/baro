@@ -72,10 +72,12 @@ describe("Architect CLI backend outcome contract modes", () => {
             const decisionBin = writeFakeCodex(dir, "decision-codex.mjs", decisionCapture)
             const completeBin = writeFakeCodex(dir, "complete-codex.mjs", completeCapture)
 
+            const repositoryEvidence = `repository evidence ${"e".repeat(40_000)}`
             await runArchitectCodex({
                 goal: "Keep the fixture stable",
                 cwd: dir,
                 codexBin: decisionBin,
+                projectContext: repositoryEvidence,
                 outcomeMode: true,
                 outcomeContractMode: "decision",
                 readOnly: true,
@@ -88,10 +90,17 @@ describe("Architect CLI backend outcome contract modes", () => {
                 readOnly: true,
             })
 
-            const decision = readJson<{ argv: string[]; schema: unknown }>(decisionCapture)
-            const complete = readJson<{ argv: string[]; schema: unknown }>(completeCapture)
-            assertDecisionPrompt(decision.argv.at(-1) ?? "")
-            assertCompletePrompt(complete.argv.at(-1) ?? "")
+            type Capture = { argv: string[]; stdin: string; schema: unknown }
+            const decision = readJson<Capture>(decisionCapture)
+            const complete = readJson<Capture>(completeCapture)
+            assertDecisionPrompt(decision.stdin)
+            assert.ok(decision.stdin.includes(repositoryEvidence))
+            assertCompletePrompt(complete.stdin)
+            for (const { argv } of [decision, complete]) {
+                assert.equal(argv.at(-1), "-")
+                // A cmd.exe `.cmd` shim caps the whole command line at 8191 chars.
+                assert.ok(argv.join(" ").length < 2_048, `architect argv too long: ${argv.join(" ").length}`)
+            }
             assertDecisionSchema(decision.schema)
             assertCompleteSchema(complete.schema)
         })
@@ -426,10 +435,12 @@ console.log(JSON.stringify({ type: "result", result: JSON.stringify(payload), st
 function writeFakeCodex(dir: string, name: string, capture: string): string {
     return executable(dir, name, `
 import { readFileSync, writeFileSync } from "node:fs";
+let stdin = "";
+for await (const chunk of process.stdin) stdin += chunk;
 const argv = process.argv.slice(2);
 const schemaIndex = argv.indexOf("--output-schema");
 const schema = JSON.parse(readFileSync(argv[schemaIndex + 1], "utf8"));
-writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ argv, schema }));
+writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ argv, stdin, schema }));
 console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: JSON.stringify(${JSON.stringify(DECISION_OUTCOME)}) } }));
 console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 5 } }));
 `)
