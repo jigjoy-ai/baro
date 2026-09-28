@@ -50,14 +50,27 @@ const failure = StoryResult.create({
     error: "implementation failed",
 })
 
+interface SpawnedCodex {
+    args: readonly string[]
+    stdin: string
+}
+
 async function withSpawnOutput(
     stdoutLines: string[],
     exitCode: number,
-    fn: () => Promise<void>,
+    fn: (spawned: SpawnedCodex[]) => Promise<void>,
 ): Promise<void> {
     const originalSpawn = childProcess.spawn
-    childProcess.spawn = (() => {
+    const spawned: SpawnedCodex[] = []
+    childProcess.spawn = ((_command: string, args: readonly string[]) => {
         const proc = new EventEmitter() as ChildProcess
+        const call: SpawnedCodex = { args: [...args], stdin: "" }
+        spawned.push(call)
+        const stdin = new PassThrough()
+        stdin.setEncoding("utf8")
+        stdin.on("data", (chunk: string) => {
+            call.stdin += chunk
+        })
         const stdout = new PassThrough()
         const stderr = new PassThrough()
         let terminalEmitted = false
@@ -74,6 +87,7 @@ async function withSpawnOutput(
             queueMicrotask(() => proc.emit("close", code, signal))
         }
         Object.assign(proc, {
+            stdin,
             stdout,
             stderr,
             kill: () => {
@@ -91,7 +105,7 @@ async function withSpawnOutput(
     }) as typeof childProcess.spawn
     syncBuiltinESMExports()
     try {
-        await fn()
+        await fn(spawned)
     } finally {
         childProcess.spawn = originalSpawn
         syncBuiltinESMExports()
@@ -163,7 +177,7 @@ describe("SurgeonCodex", () => {
                 }),
             ],
             0,
-            async () => {
+            async (spawned) => {
                 const surgeon = new SurgeonCodex({
                     snapshot,
                     timeoutMs: 10_000,
@@ -203,6 +217,15 @@ describe("SurgeonCodex", () => {
                 assert.ok(
                     env.events.findIndex(ModelInvocationMeasured.is) <
                         env.events.findIndex(Replan.is),
+                )
+
+                assert.equal(spawned.length, 1)
+                const [call] = spawned
+                assert.equal(call!.args.at(-1), "-")
+                assert.match(call!.stdin, /This story fails terminally\./)
+                assert.ok(
+                    call!.args.every((arg) => !arg.includes("This story fails terminally")),
+                    "surgeon prompt must not reach Codex argv",
                 )
             },
         )

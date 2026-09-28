@@ -495,13 +495,14 @@ setTimeout(() => process.exit(0), 500)
             writeFileSync(
                 codexBin,
                 `#!/usr/bin/env node
-const { appendFileSync, existsSync, writeFileSync } = require("node:fs")
+const { appendFileSync, existsSync, readFileSync, writeFileSync } = require("node:fs")
 const { join } = require("node:path")
 const marker = join(process.cwd(), "candidate.txt")
 const inheritedCandidate = existsSync(marker)
 if (!inheritedCandidate) writeFileSync(marker, "candidate from first process")
 appendFileSync(${JSON.stringify(promptLog)}, JSON.stringify({
-  prompt: process.argv[process.argv.length - 1],
+  prompt: readFileSync(0, "utf8"),
+  promptArg: process.argv[process.argv.length - 1],
   inheritedCandidate
 }) + "\\n")
 console.log(JSON.stringify({ type: "thread.started", thread_id: "codex-thread" }))
@@ -604,6 +605,7 @@ process.exit(0)
                 .split("\n")
                 .map((line) => JSON.parse(line) as {
                     prompt: string
+                    promptArg: string
                     inheritedCandidate: boolean
                 })
             assert.equal(outcome.success, true)
@@ -613,6 +615,7 @@ process.exit(0)
                 prompts.map((entry) => entry.inheritedCandidate),
                 [false, true],
             )
+            assert.deepEqual(prompts.map((entry) => entry.promptArg), ["-", "-"])
             assert.equal(prompts[0]?.prompt, originalPrompt)
             assert.match(prompts[1]?.prompt ?? "", /Original story contract/)
             assert.match(prompts[1]?.prompt ?? "", /AbortSignal is not forwarded/)
