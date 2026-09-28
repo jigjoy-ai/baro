@@ -69,14 +69,24 @@ export function writeGithubCredentials(dir: string, token: string): void {
 
 const MAX_RECOVERY_DIFF_CHARS = 200_000
 
-// The run's goal branch (from prd.json) against where the run started: the work a
-// failed push left only in this clone, which is deleted when the run ends.
-export function unpublishedWorkDiff(cwd: string, base: string): string | undefined {
+export function goalBranch(cwd: string): string | undefined {
     try {
         const named = (JSON.parse(readFileSync(join(cwd, "prd.json"), "utf8")) as { branchName?: unknown }).branchName
         if (typeof named !== "string" || !named) return undefined
         let branch = named
         while (branch.startsWith("baro/baro/")) branch = branch.slice("baro/".length)
+        return branch
+    } catch {
+        return undefined
+    }
+}
+
+// The run's goal branch against where the run started: the work a failed push left
+// only in this clone, which is deleted when the run ends.
+export function unpublishedWorkDiff(cwd: string, base: string): string | undefined {
+    try {
+        const branch = goalBranch(cwd)
+        if (!branch) return undefined
         const head = execFileSync("git", ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}^{commit}`], { cwd }).toString().trim()
         const out = execFileSync("git", ["diff", "--binary", base, head], { cwd, maxBuffer: 16 * 1024 * 1024 }).toString()
         if (!out.trim()) return undefined
@@ -84,4 +94,10 @@ export function unpublishedWorkDiff(cwd: string, base: string): string | undefin
     } catch {
         return undefined
     }
+}
+
+// Old control planes ignore the extra fields; new ones publish the patch onto diffBase.
+export function unpublishedWork(cwd: string, base: string): { diff: string; diffBase: string; goalBranch?: string } | undefined {
+    const diff = unpublishedWorkDiff(cwd, base)
+    return diff ? { diff, diffBase: base, goalBranch: goalBranch(cwd) } : undefined
 }

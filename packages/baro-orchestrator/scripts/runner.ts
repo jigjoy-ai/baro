@@ -10,7 +10,7 @@ import { join } from "node:path"
 import { createInterface } from "node:readline/promises"
 import { WebSocket } from "ws"
 import { canonicalControlHttpOrigin } from "../src/gateway-credentials.js"
-import { buildInstallServiceArgs, buildReexec, gitCredentialHelper, parseDoneSuccess, semverLt, unpublishedWorkDiff, writeGithubCredentials } from "./runner-helpers.js"
+import { buildInstallServiceArgs, buildReexec, gitCredentialHelper, parseDoneSuccess, semverLt, unpublishedWork, writeGithubCredentials } from "./runner-helpers.js"
 
 interface WireEvent {
     type: string
@@ -202,6 +202,9 @@ interface RunOutcome {
     error: string | null
     // The unified patch of baro's changes: diffOnly previews, and repo runs whose work never reached GitHub.
     diff?: string
+    // A failed repo run's patch applies onto diffBase; the control plane can publish it from there.
+    diffBase?: string
+    goalBranch?: string
 }
 
 // runId → the directory holding that run's GitHub token, rewritten on each github_token refresh.
@@ -677,8 +680,8 @@ async function runGoalInClone(
     if ((d.diffOnly || scratch) && diffBase) {
         outcome.diff = captureDiff(cwd, diffBase)
     } else if (d.repo && !outcome.success && !prUrl && diffBase) {
-        const diff = unpublishedWorkDiff(cwd, diffBase)
-        if (diff) outcome.diff = diff
+        const work = unpublishedWork(cwd, diffBase)
+        if (work) Object.assign(outcome, work)
     }
     // PR doctor (opt-in, read-only for now): once the PR is open, watch its CI and
     // report the result back so the user sees green/red in the dashboard. The auto-fix
