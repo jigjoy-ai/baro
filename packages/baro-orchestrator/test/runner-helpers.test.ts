@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process"
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { buildInstallServiceArgs, buildReexec, gitCredentialHelper, parseDoneSuccess, semverLt, unpublishedWorkDiff, writeGithubCredentials } from "../scripts/runner-helpers.js"
+import { buildInstallServiceArgs, buildReexec, gitCredentialHelper, goalBranch, parseDoneSuccess, semverLt, unpublishedWork, unpublishedWorkDiff, writeGithubCredentials } from "../scripts/runner-helpers.js"
 
 describe("semverLt", () => {
     it("orders plain semvers", () => {
@@ -100,5 +100,31 @@ describe("unpublishedWorkDiff (#191)", () => {
 
         writeFileSync(join(repo, "prd.json"), JSON.stringify({ branchName: "baro/gone" }))
         assert.equal(unpublishedWorkDiff(repo, base), undefined)
+    })
+})
+
+describe("unpublishedWork carries what the control plane needs to publish it", () => {
+    it("returns the patch, the commit it applies onto, and the normalized goal branch", () => {
+        const repo = mkdtempSync(join(tmpdir(), "baro-repo-test-"))
+        git(repo, ["init", "-q", "-b", "main"])
+        writeFileSync(join(repo, "a.txt"), "a\n")
+        git(repo, ["add", "a.txt"])
+        git(repo, ["commit", "-qm", "base"])
+        const base = git(repo, ["rev-parse", "HEAD"]).trim()
+        assert.equal(goalBranch(repo), undefined)
+        assert.equal(unpublishedWork(repo, base), undefined)
+
+        git(repo, ["checkout", "-qb", "baro/feat"])
+        writeFileSync(join(repo, "a.txt"), "changed\n")
+        git(repo, ["commit", "-qam", "story"])
+        git(repo, ["checkout", "-q", "main"])
+        writeFileSync(join(repo, "prd.json"), JSON.stringify({ branchName: "baro/baro/baro/feat" }))
+
+        assert.equal(goalBranch(repo), "baro/feat")
+        const work = unpublishedWork(repo, base)
+        assert.equal(work?.diffBase, base)
+        assert.equal(work?.goalBranch, "baro/feat")
+        assert.match(work?.diff ?? "", /^\+changed$/m)
+        assert.equal(work?.diff, unpublishedWorkDiff(repo, base))
     })
 })
