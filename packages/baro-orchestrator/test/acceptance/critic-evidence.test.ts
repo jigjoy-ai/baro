@@ -23,6 +23,7 @@ import {
     CriticCommandEvidenceCollector,
     PublishedNoteCollector,
     buildEvalPrompt,
+    captureCriticRepositoryFingerprint,
     prepareCriticEvalPrompts,
     mergeSegmentVerdicts,
     prepareCriticEvaluation,
@@ -1027,6 +1028,36 @@ describe("Critic repository evidence", () => {
             assert.ok(
                 snapshot.text.indexOf("npm test") <
                     snapshot.text.indexOf("git status --short # after"),
+            )
+        })
+    })
+
+    it("fingerprints a candidate that deleted a whole directory (#199)", async () => {
+        await withTempDir("baro-critic-fingerprint-deleted-dir-", async (repo) => {
+            git(repo, "init", "--quiet")
+            mkdirSync(join(repo, "src", "test", "resources"), { recursive: true })
+            writeFileSync(join(repo, "src", "test", "resources", "fixture.html"), "<p>x</p>\n")
+            git(repo, "add", ".")
+            git(
+                repo,
+                "-c",
+                "user.name=Baro Test",
+                "-c",
+                "user.email=baro@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "baseline",
+            )
+            const baseSha = git(repo, "rev-parse", "HEAD").trim()
+            rmSync(join(repo, "src", "test"), { recursive: true, force: true })
+
+            const deleted = await captureCriticRepositoryFingerprint({ cwd: repo, baseSha })
+            assert.match(deleted, /^[a-f0-9]{64}$/)
+            writeFileSync(join(repo, "other.txt"), "changed\n")
+            assert.notEqual(
+                await captureCriticRepositoryFingerprint({ cwd: repo, baseSha }),
+                deleted,
             )
         })
     })

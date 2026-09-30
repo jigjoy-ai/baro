@@ -799,7 +799,15 @@ async function assertNoSymlinkParents(
     let current = resolve(cwd)
     for (const part of parts.slice(0, -1)) {
         current = resolve(current, part)
-        const stat = await lstat(current)
+        let stat: Awaited<ReturnType<typeof lstat>>
+        try {
+            stat = await lstat(current)
+        } catch (error) {
+            // A deleted directory takes its changed files with it; the caller
+            // records those as missing, and nothing absent can redirect a read.
+            if (errorCode(error) === "ENOENT") return
+            throw error
+        }
         if (stat.isSymbolicLink() || !stat.isDirectory()) {
             throw new Error(
                 "fingerprint path has a symlink or non-directory parent",

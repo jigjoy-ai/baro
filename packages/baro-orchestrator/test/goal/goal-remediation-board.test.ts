@@ -708,6 +708,118 @@ describe("goal remediation graph admission", () => {
         })
     })
 
+    it("waits for queued same-invariant work instead of racing it (#199)", async () => {
+        await withTempDir("goal-remediation-prereq-", async (dir) => {
+            const runId = "run-goal-remediation-prereq"
+            const path = join(dir, "prd.json")
+            const story = (
+                id: string,
+                overrides: Partial<PrdStory>,
+            ): PrdStory => ({
+                id,
+                priority: 1,
+                title: `Story ${id}`,
+                description: `Work for ${id}.`,
+                dependsOn: [],
+                retries: 2,
+                acceptance: ["Done."],
+                tests: [],
+                goalInvariantIds: [],
+                passes: false,
+                completedAt: null,
+                durationSecs: null,
+                model: "standard",
+                ...overrides,
+            })
+            // The shape a surgeon split leaves behind: governance, then the
+            // implementation and evidence that carry the invariant.
+            const prd: PrdFile = {
+                project: "goal-remediation-prereq",
+                branchName: "baro/goal-remediation-prereq",
+                description: "Remediation must not race its prerequisite chain.",
+                goalEnvelope: envelope,
+                userStories: [
+                    story("S-DONE", {
+                        goalInvariantIds: ["G-A1"],
+                        passes: true,
+                        completedAt: "2026-01-01T00:00:00.000Z",
+                    }),
+                    story("S-GOV", {}),
+                    story("S-IMPL", { dependsOn: ["S-GOV"], goalInvariantIds: ["G-A1"] }),
+                    story("S-EVID", { dependsOn: ["S-IMPL"], goalInvariantIds: ["G-A1"] }),
+                    story("S-OTHER", { goalInvariantIds: ["G-C1"] }),
+                ],
+            }
+            writeFileSync(path, JSON.stringify(prd, null, 2) + "\n")
+
+            const guardian = new GoalGuardian({
+                runId,
+                goalEnvelope: envelope,
+                storyMappings: prd.userStories.map((entry) => ({
+                    storyId: entry.id,
+                    invariantIds: entry.goalInvariantIds ?? [],
+                })),
+            })
+            const bridge = source("bridge")
+            guardian.setChallengeAuthority(bridge)
+            const board = new CollectiveBoard({
+                runId,
+                prdPath: path,
+                cwd: dir,
+                timeoutSecs: 60,
+                goalCompletionAuthority: guardian,
+            })
+            guardian.setRequestAuthority(board)
+            const env = captureEnv()
+            guardian.join(env)
+            board.join(env)
+
+            env.deliverSemanticEvent(
+                source("operator"),
+                RunStartRequest.create({ reason: "test" }),
+            )
+            env.deliverSemanticEvent(
+                source("repository"),
+                RunPrepared.create({ runId, baseSha: null }),
+            )
+            env.deliverSemanticEvent(
+                bridge,
+                GoalInvariantChallengeRaised.create({
+                    runId,
+                    challengeId: "challenge-g-a1-governance",
+                    invariantId: "G-A1",
+                    raisedBy: "guardian-review",
+                    reason: "the invariant needs a governance decision first",
+                }),
+            )
+            await board.idle()
+
+            const applied = env.events.find(RuntimeReplanApplied.is)
+            assert.ok(applied)
+            const remediation = applied.data.mutation.addedStories[0]!
+            assert.match(remediation.id, /^GREM-/u)
+            assert.deepEqual(remediation.dependsOn, ["S-EVID", "S-IMPL"])
+            assert.equal(remediation.retries, 0)
+
+            // A replayed proposal (restart, retained outbox) carries the
+            // guardian's original empty dependsOn and must still match.
+            const proposed = env.events.find(GoalInvariantRemediationProposed.is)!
+            env.deliverSemanticEvent(
+                guardian,
+                GoalInvariantRemediationProposed.create(proposed.data),
+            )
+            await board.idle()
+            const admissions = env.events.filter(GoalInvariantRemediationAdmitted.is)
+            assert.equal(admissions.at(-1)?.data.disposition, "existing")
+            assert.equal(
+                env.events.some((event) =>
+                    typeof (event.data as { detail?: unknown }).detail === "string" &&
+                    (event.data as { detail: string }).detail.includes("story id collision")),
+                false,
+            )
+        })
+    })
+
     it("defers invariant work above the healing budget and admits it after progress", async () => {
         await withTempDir("goal-remediation-backpressure-", async (dir) => {
             const runId = "run-goal-remediation-backpressure"

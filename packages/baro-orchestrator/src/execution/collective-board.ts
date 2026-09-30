@@ -2229,7 +2229,12 @@ export class CollectiveBoard extends SerializedObserver {
                 `autonomous remediation for ${invariantIds.join(", ")}: ` +
                 remediation.reason,
             mutation: {
-                addedStories: [remediation.story],
+                addedStories: [
+                    this.withRemediationPrerequisites(
+                        remediation.story,
+                        invariantIds,
+                    ),
+                ],
                 removedStoryIds: [],
                 modifiedDeps: {},
             },
@@ -2290,6 +2295,35 @@ export class CollectiveBoard extends SerializedObserver {
         if (scheduleAfterAdmission && this.phase === "running") {
             if (this.wave) this.reconcileReadyStories()
             else this.scheduleNextWave()
+        }
+    }
+
+    /**
+     * A remediation waits for every queued, not-yet-integrated story already
+     * working the same invariants — e.g. the chain a surgeon split out of the
+     * previous remediation. Running beside that chain, it re-attempts work
+     * whose prerequisite has not landed and the review rejects it every turn
+     * (#199). Leased stories are left out: the story that raised the challenge
+     * is one, and a remediation must not wait on its own source.
+     */
+    private withRemediationPrerequisites(
+        story: GoalInvariantRemediationProposedData["story"],
+        invariantIds: readonly string[],
+    ): GoalInvariantRemediationProposedData["story"] {
+        const targets = new Set(invariantIds)
+        const prerequisites = (this.prd?.userStories ?? [])
+            .filter((candidate) =>
+                candidate.id !== story.id &&
+                !candidate.passes &&
+                !this.completed.includes(candidate.id) &&
+                !this.failed.has(candidate.id) &&
+                !this.leases.has(candidate.id) &&
+                (candidate.goalInvariantIds ?? []).some((id) => targets.has(id)))
+            .map(({ id }) => id)
+        if (prerequisites.length === 0) return story
+        return {
+            ...story,
+            dependsOn: [...new Set([...story.dependsOn, ...prerequisites])].sort(),
         }
     }
 
@@ -3702,8 +3736,8 @@ function sameRemediationStory(
         current.priority === expected.priority &&
         current.title === expected.title &&
         current.description === expected.description &&
-        sameStrings(current.dependsOn, expected.dependsOn) &&
-        current.retries === (expected.retries ?? 2) &&
+        // Admission may add same-invariant prerequisites to the proposal.
+        expected.dependsOn.every((id) => current.dependsOn.includes(id)) &&
         sameStrings(current.acceptance, expected.acceptance ?? []) &&
         sameStrings(current.tests, expected.tests ?? []) &&
         sameStrings(
