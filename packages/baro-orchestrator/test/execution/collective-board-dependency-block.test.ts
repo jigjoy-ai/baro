@@ -13,6 +13,7 @@ import {
     RunPushRequested,
     RunStartRequest,
     RuntimeReplanApplied,
+    RuntimeReplanProposed,
     StoryMerged,
     StoryResult,
     WorkBlockAccepted,
@@ -30,6 +31,52 @@ import {
 import { joinWithCapture, source, withTempDir } from "./helpers.js"
 
 describe("CollectiveBoard dependency suspension", () => {
+    it("suspends a story whose own replan adds its prerequisite (#199)", async () => {
+        await withTempDir("collective-self-prerequisite-", async (dir) => {
+            const fixture = await startRunningBoard(dir, {
+                dependencySuspensionEnabled: true,
+                supportsCooperativeSuspend: true,
+                allowUnboundReplan: true,
+            })
+            fixture.env.deliverSemanticEvent(
+                source("S1"),
+                RuntimeReplanProposed.create({
+                    runId: fixture.runId,
+                    proposalId: "proposal-self-prerequisite",
+                    sourceStoryId: "S1",
+                    leaseId: S1_LEASE,
+                    generation: fixture.s1Offer.data.generation,
+                    baseGraphVersion: 1,
+                    reason: "the review needs a decision-level ratification first",
+                    mutation: {
+                        addedStories: [{
+                            id: "S1-RATIFY",
+                            priority: 1,
+                            title: "Ratify the retention basis",
+                            description: "Record the decision S1 relies on.",
+                            dependsOn: [],
+                            acceptance: ["The decision is recorded."],
+                            tests: ["git diff --check"],
+                        }],
+                        removedStoryIds: [],
+                        modifiedDeps: { S1: ["S1-RATIFY"] },
+                    },
+                }),
+            )
+            const applied = await waitFor(fixture.env.events, RuntimeReplanApplied.is)
+            assert.deepEqual(
+                applied.data.mutation.addedStories.map(({ id }) => id),
+                ["S1-RATIFY"],
+            )
+            assert.deepEqual(applied.data.mutation.modifiedDeps, {})
+            const accepted = await waitFor(fixture.env.events, WorkBlockAccepted.is)
+            assert.equal(accepted.data.storyId, "S1")
+            assert.deepEqual(accepted.data.requiredStoryIds, ["S1-RATIFY"])
+            assert.equal(fixture.env.events.some(WorkBlockRejected.is), false)
+        })
+    })
+
+
     it("durably rewires, preserves, and resumes a blocked story without recovery failure", async () => {
         await withTempDir("collective-dependency-block-", async (dir) => {
             const runId = "run-dependency-block"
@@ -379,6 +426,7 @@ async function startRunningBoard(
     options: {
         dependencySuspensionEnabled?: boolean
         supportsCooperativeSuspend: boolean
+        allowUnboundReplan?: boolean
     },
 ) {
     const runId = "run-dependency-board-safety"
@@ -402,6 +450,9 @@ async function startRunningBoard(
         leaseAuthority: broker,
         dependencyAuthority: bridge,
         contextAuthority: context,
+        ...(options.allowUnboundReplan
+            ? { unsafeAllowUnboundRuntimeReplanAuthority: true }
+            : {}),
         ...(options.dependencySuspensionEnabled !== undefined
             ? {
                   dependencySuspensionEnabled:

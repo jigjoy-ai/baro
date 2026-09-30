@@ -1,5 +1,5 @@
 import type { Participant, SemanticEvent } from "../runtime/mozaik.js"
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 
 import { buildDag } from "../runtime-graph/dag.js"
 import {
@@ -2434,8 +2434,13 @@ export class CollectiveBoard extends SerializedObserver {
         additionalImmutableStoryIds: Iterable<string> = [],
         retractedStoryIds: readonly string[] = [],
     ): RuntimeReplanDecisionOutcome {
-        const { proposal, requireActiveLease } = queued
-        const lease = this.leases.get(proposal.sourceStoryId)
+        const { requireActiveLease } = queued
+        const lease = this.leases.get(queued.proposal.sourceStoryId)
+        const { proposal, selfBlock } = splitSelfDependency(
+            queued.proposal,
+            requireActiveLease ? lease : undefined,
+            this.prd,
+        )
         const immutableStoryIds = this.runtimeImmutableStoryIds()
         for (const storyId of additionalImmutableStoryIds) {
             immutableStoryIds.add(storyId)
@@ -2472,6 +2477,7 @@ export class CollectiveBoard extends SerializedObserver {
                 }),
             )
             this.reconcileRuntimeGraphApplication(outcome.applied)
+            if (selfBlock) this.onWorkBlocked(selfBlock)
             return outcome
         }
         this.emitGraphDecision(outcome.event)
@@ -3782,6 +3788,57 @@ function nonNegativeFinite(value: unknown): number | null {
     return typeof value === "number" && Number.isFinite(value) && value >= 0
         ? value
         : null
+}
+
+/**
+ * A leased story whose replan adds work and rewires ITS OWN dependsOn onto it
+ * is naming a prerequisite for itself (#199: GREM added S-GA3-RATIFY and kept
+ * running). Its own node is immutable to a replan, so that part is taken out
+ * and settled as a cooperative dependency block once the new work exists.
+ * A replan that only rewires the source story is left as is — that is what
+ * `--kind block` is for.
+ */
+function splitSelfDependency(
+    proposal: RuntimeReplanProposedData,
+    lease: { leaseId: string; generation: number } | undefined,
+    prd: PrdFile | null,
+): { proposal: RuntimeReplanProposedData; selfBlock?: WorkBlockedData } {
+    const source = proposal.sourceStoryId
+    const own = proposal.mutation.modifiedDeps[source]
+    if (
+        !own ||
+        !lease ||
+        lease.leaseId !== proposal.leaseId ||
+        lease.generation !== proposal.generation
+    ) return { proposal }
+    const otherDeps = Object.fromEntries(
+        Object.entries(proposal.mutation.modifiedDeps)
+            .filter(([storyId]) => storyId !== source),
+    )
+    const stripped: RuntimeReplanProposedData = {
+        ...proposal,
+        mutation: { ...proposal.mutation, modifiedDeps: otherDeps },
+    }
+    if (
+        stripped.mutation.addedStories.length === 0 &&
+        stripped.mutation.removedStoryIds.length === 0 &&
+        Object.keys(otherDeps).length === 0
+    ) return { proposal }
+    const current = prd?.userStories.find(({ id }) => id === source)?.dependsOn ?? []
+    const required = [...new Set(own.filter((id) => !current.includes(id)))]
+    if (required.length === 0) return { proposal: stripped }
+    return {
+        proposal: stripped,
+        selfBlock: {
+            runId: proposal.runId,
+            blockId: `self-${createHash("sha256").update(proposal.proposalId).digest("hex").slice(0, 24)}`,
+            storyId: source,
+            leaseId: proposal.leaseId,
+            generation: proposal.generation,
+            requiredStoryIds: required,
+            reason: proposal.reason,
+        },
+    }
 }
 
 function validDependencyBlock(request: WorkBlockedData): boolean {

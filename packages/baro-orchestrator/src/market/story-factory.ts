@@ -1356,7 +1356,7 @@ export class StoryFactory extends BaseObserver {
                       ...(graphVersion !== undefined
                           ? [
                                 `- The launch DAG version is ${graphVersion}. To atomically add, replace, or rewire future work and receive the Board's decision immediately: ${command} emit ${capability} --kind replan --base-version ${graphVersion} --replan-json ${JSON.stringify('{"addedStories":[],"removedStoryIds":[],"modifiedDeps":{}}')} --reason ${JSON.stringify("WHY THE PLAN MUST CHANGE")}`,
-                                "  Use the newest `graphVersion` returned by a prior decision. Active/already-started stories are immutable; express additional work as future stories.",
+                                "  Use the newest `graphVersion` returned by a prior decision. Active/already-started stories are immutable; express additional work as future stories. The one exception is your own story: when stories you add are its prerequisites, also set `modifiedDeps` for your own id to your dependsOn plus their ids — the Board then suspends this story until they integrate, so stop work once the replan is applied.",
                                 `  If replan exits 3 or returns \`outcome_unknown\`, do not assume whether it applied. Resolve that same proposal before continuing: ${command} decision ${capability} --proposal ${JSON.stringify("PROPOSAL_ID")} --wait-ms 30000`,
                             ]
                           : []),
