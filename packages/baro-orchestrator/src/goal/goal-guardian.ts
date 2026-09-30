@@ -1044,6 +1044,10 @@ function boundedChallengeReason(reason: string): string {
     return `${cut} … [truncated; the full reasoning is in the story description]`
 }
 
+// One attempt: a failed remediation already goes to the surgeon and back to this
+// guardian, so story-level retries only replay the same rejection (#199).
+const REMEDIATION_STORY_RETRIES = 0
+
 function legacyRemediationStory(
     storyId: string,
     { challenge, invariant }: RemediationTarget,
@@ -1061,7 +1065,7 @@ function legacyRemediationStory(
             `Observed risk: ${challenge.reason}\n` +
             "Implement the smallest correct fix and focused regression evidence; preserve every other GoalContract invariant.",
         dependsOn: [],
-        retries: 2,
+        retries: REMEDIATION_STORY_RETRIES,
         acceptance: [
             `[${invariant.id}] ${invariant.text}`,
             `Challenge ${challenge.challengeId} is addressed: ${boundedChallengeReason(challenge.reason)}`,
@@ -1092,7 +1096,7 @@ function groupedRemediationStory(
             "\n" +
             "Implement the smallest correct fix and focused regression evidence; preserve every other GoalContract invariant.",
         dependsOn: [],
-        retries: 2,
+        retries: REMEDIATION_STORY_RETRIES,
         acceptance: [
             ...targets.map(({ invariant }) =>
                 `[${invariant.id}] ${invariant.text}`),
