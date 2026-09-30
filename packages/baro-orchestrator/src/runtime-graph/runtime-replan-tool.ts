@@ -120,6 +120,12 @@ export function createRuntimeReplanTool(graphVersion: number): Tool {
                 },
                 modifiedDeps: {
                     type: "object",
+                    description:
+                        "Record<storyId, full dependsOn>. Started stories are immutable, " +
+                        "except your own: when stories you add here are prerequisites of " +
+                        "THIS story, set your own id to your dependsOn plus their ids — " +
+                        "the Board adds them, then suspends this story and resumes it " +
+                        "after they integrate. Stop working once that is applied.",
                     additionalProperties: {
                         type: "array",
                         items: { type: "string" },
