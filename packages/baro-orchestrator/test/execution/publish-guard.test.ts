@@ -31,6 +31,7 @@ import {
     type ArchitectureObligationContractV1,
 } from "../../src/planning/domain/architecture-obligation-contract.js"
 import { deriveGoalContract } from "../../src/goal/goal-contract.js"
+import { deliveryObligationViolation } from "../../src/planning/domain/delivery-obligation.js"
 
 describe("publishCommandRefusal", () => {
     for (const command of [
@@ -231,6 +232,29 @@ describe("one-shot lane guard bin", { skip: process.platform === "win32" }, () =
             ])
             assert.deepEqual(drainGuardRefusals(guard), [])
         })
+    })
+})
+
+describe("delivery wording vs. a constraint against delivery", () => {
+    it("admits negations before, welded onto, and after the trigger word (#205)", () => {
+        for (const text of [
+            "Cloud-free, push-free local scope of the Goal 02 deliverable.",
+            "The deliverable stays local and publish-less",
+            "Pushing is forbidden for every story",
+            "A push must not happen during the run",
+            "The branch isn't pushed anywhere",
+            "Publishing is out of scope for Goal 02",
+            "stories do not run git push",
+            "nothing is pushed, tagged, or published",
+        ]) assert.equal(deliveryObligationViolation(text), null, text)
+    })
+
+    it("still rejects an instruction to deliver", () => {
+        for (const text of [
+            "Push the branch and publish a PR",
+            "The story pushes the goal branch to origin",
+            "Local checks pass. Then the release is published to npm",
+        ]) assert.notEqual(deliveryObligationViolation(text), null, text)
     })
 })
 

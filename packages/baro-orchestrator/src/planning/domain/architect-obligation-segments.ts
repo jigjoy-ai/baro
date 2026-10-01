@@ -33,6 +33,7 @@ import {
     type ArchitectureObligationContractV1,
     type ArchitectureObligationV1,
 } from "./architecture-obligation-contract.js"
+import { deliveryObligationViolation } from "./delivery-obligation.js"
 
 export const ARCHITECT_OBLIGATION_BATCH_SIZE = 3
 export const MAX_ARCHITECT_OBLIGATIONS_PER_SEGMENT = 8
@@ -645,6 +646,20 @@ function parseSegmentResponse(
             )
         }
         fingerprints.add(fingerprint)
+    }
+    // The contract rejects delivery at admission; caught here it costs one
+    // batch repair instead of the whole Architect run (#205).
+    for (const [index, draft] of drafts.entries()) {
+        const sentence = deliveryObligationViolation(
+            [draft.subject, draft.scenario, draft.expectedOutcome].join(". "),
+        )
+        if (sentence) {
+            throw new ArchitectObligationSegmentError(
+                `obligations[${index}] reads as an instruction to push or publish, ` +
+                    `which stories never perform: "${sentence}". If it is a restriction, ` +
+                    `say so explicitly ("nothing is pushed or published"); otherwise drop it.`,
+            )
+        }
     }
     return drafts
 }

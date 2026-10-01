@@ -331,6 +331,38 @@ describe("segmented Architect obligation compiler", () => {
         assert.equal(result.contract.obligations.length, 1)
     })
 
+    it("repairs a delivery-shaped obligation inside its batch instead of failing the run (#205)", async () => {
+        const requests: ArchitectObligationSegmentRequest[] = []
+        const obligation = (subject: string) => JSON.stringify({
+            schemaVersion: 1,
+            obligations: [{
+                adrIds: ["ADR-001"],
+                invariantIds: ["G-A1"],
+                subject,
+                scenario: "the change is finished",
+                expectedOutcome: "the result is observable",
+                evidence: ["a focused regression test"],
+            }],
+        })
+        const result = await compileArchitectObligationSegments({
+            decisionDocument: DECISION_DOCUMENT,
+            goalEnvelope: goalEnvelope(1, 0),
+            respond: async (request) => {
+                requests.push(request)
+                return request.attempt === 1
+                    ? obligation("Push the branch and publish a release")
+                    : obligation("Cloud-free, push-free local scope of the deliverable")
+            },
+        })
+
+        assert.deepEqual(requests.map(({ attempt }) => attempt), [1, 2])
+        assert.match(repairOf(requests[1]!), /instruction to push or publish/u)
+        assert.equal(
+            result.contract.obligations[0]?.subject,
+            "Cloud-free, push-free local scope of the deliverable",
+        )
+    })
+
     it("discards a redundant echoed id without burning the repair budget", async () => {
         // Models routinely echo an id despite the instruction; it is never
         // authoritative (the host renumbers positionally), so the draft is
