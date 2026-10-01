@@ -87,7 +87,6 @@ export async function runOpenCodeOneShot(
     }
     if (opts.model) args.push("-m", opts.model)
     if (opts.cwd) args.push("--dir", opts.cwd)
-    if (!safeEvaluator) args.push(opts.prompt)
 
     const timeoutMs = opts.timeoutMs ?? 600_000
     const terminationGraceMs = opts.terminationGraceMs ?? 5_000
@@ -119,7 +118,7 @@ export async function runOpenCodeOneShot(
                           OPENCODE_CONFIG_CONTENT: safeConfig.content,
                       }
                     : childEnvironment,
-                stdio: [safeEvaluator ? "pipe" : "ignore", "pipe", "pipe"],
+                stdio: ["pipe", "pipe", "pipe"],
                 detached: POSIX_PROCESS_GROUPS_SUPPORTED,
             })
         } catch (e) {
@@ -463,7 +462,9 @@ export async function runOpenCodeOneShot(
             )
         })
 
-        if (safeEvaluator) {
+        // The prompt always travels over stdin: Windows caps a command line at
+        // ~32K chars (8191 through the npm .cmd shim) and baro's prompts exceed it (#203).
+        {
             if (!proc.stdin) {
                 if (timer !== null) {
                     clearTimeout(timer)

@@ -44,6 +44,7 @@ import {
     type ProgressiveBootstrapMetadata,
 } from "../src/planning/application/progressive-planner-protocol.js"
 import { emit } from "../src/tui-protocol.js"
+import { plainWindowsPath } from "../src/runtime/windows-path.js"
 
 interface Args {
     goal: string
@@ -90,7 +91,7 @@ function parseArgs(argv: string[]): Args {
                 goal = required(argv, ++i, "--goal")
                 break
             case "--cwd":
-                cwd = required(argv, ++i, "--cwd")
+                cwd = plainWindowsPath(required(argv, ++i, "--cwd"))
                 break
             case "--llm": {
                 const v = required(argv, ++i, "--llm")

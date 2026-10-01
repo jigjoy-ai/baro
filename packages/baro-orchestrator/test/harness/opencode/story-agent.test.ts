@@ -92,10 +92,12 @@ printf '%s\n' \
 const { appendFileSync, existsSync, writeFileSync } = require("node:fs")
 const { join } = require("node:path")
 const marker = join(process.cwd(), "candidate.txt")
+const stdinPrompt = require("node:fs").readFileSync(0, "utf8")
 const inheritedCandidate = existsSync(marker)
 if (!inheritedCandidate) writeFileSync(marker, "candidate from first process")
 appendFileSync(${JSON.stringify(promptLog)}, JSON.stringify({
-  prompt: process.argv[process.argv.length - 1],
+  prompt: stdinPrompt,
+  promptInArgv: process.argv.includes(stdinPrompt),
   inheritedCandidate
 }) + "\\n")
 console.log(JSON.stringify({ type: "step_start", sessionID: "opencode-session", timestamp: 1 }))
@@ -218,8 +220,14 @@ process.exit(0)
                     .split("\n")
                     .map((line) => JSON.parse(line) as {
                         prompt: string
+                        promptInArgv: boolean
                         inheritedCandidate: boolean
                     })
+                // #203: the prompt reaches the CLI over stdin, never argv.
+                assert.deepEqual(
+                    prompts.map((entry) => entry.promptInArgv),
+                    [false, false],
+                )
                 assert.equal(outcome.success, true)
                 assert.equal(outcome.attempts, 2)
                 assert.equal(env.events.filter(StoryResult.is).length, 1)

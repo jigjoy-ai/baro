@@ -3,6 +3,7 @@ mod architect_runner;
 mod awake_clock;
 mod baro_home;
 mod branch_authority;
+mod canonical_path;
 mod cli;
 mod clipboard;
 mod config;
@@ -512,6 +513,21 @@ async fn run_main() -> Result<(), Box<dyn std::error::Error>> {
         cli.goal.as_deref().unwrap_or(""),
         &cli.cwd,
     );
+    let coordination_explicit = std::env::var_os("BARO_COORDINATION").is_some()
+        || std::env::args().any(|arg| arg == "--coordination" || arg.starts_with("--coordination="));
+    if cli::cli::falls_back_to_legacy_coordination(
+        cfg!(windows),
+        coordination_explicit,
+        &cli.coordination,
+        &cli.llm,
+        cli.story_llm.as_deref(),
+    ) {
+        eprintln!(
+            "baro: collective coordination cannot supervise CLI story agents on native Windows; \
+             using --coordination legacy (run under WSL for collective)"
+        );
+        cli.coordination = "legacy".to_string();
+    }
     std::env::set_var("BARO_COORDINATION", &cli.coordination);
     if cli.local_only {
         std::env::set_var("BARO_LOCAL_ONLY", "1");
@@ -800,7 +816,7 @@ async fn run_connect(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     }
 
     let workspace = workspace.unwrap_or_else(|| ".".to_string());
-    let cwd = std::fs::canonicalize(&workspace)
+    let cwd = canonical_path::canonicalize(&workspace)
         .map_err(|e| format!("workspace '{}' not found: {}", workspace, e))?;
 
     // Install the background service (workspace baked in) and exit — the
@@ -931,7 +947,7 @@ async fn run_app(
     let launch_goal = cli.goal.clone();
     let critic_backend_explicitly_set = cli.critic_llm.is_some();
     let mut app = App::new();
-    let cwd = std::fs::canonicalize(&cli.cwd)?;
+    let cwd = canonical_path::canonicalize(&cli.cwd)?;
 
     let rc = config::load_config(&cwd);
 

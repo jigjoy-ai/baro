@@ -329,7 +329,7 @@ pub fn parse() -> Result<(Cli, Option<SessionLock>), Error> {
     })
     .map_err(|msg| cmd.error(ErrorKind::ValueValidation, msg))?;
 
-    let cwd = fs::canonicalize(&cli.cwd)?;
+    let cwd = crate::canonical_path::canonicalize(&cli.cwd)?;
 
     // A --base run never touches the checkout, so it must not hold the checkout's lock.
     let lock_dir = match cli.base.as_deref() {
@@ -351,6 +351,23 @@ pub fn parse() -> Result<(Cli, Option<SessionLock>), Error> {
     };
 
     Ok((cli, lock))
+}
+
+/// Native Windows cannot prove a CLI lane's process tree is quiet, so the
+/// collective engine refuses every claude/codex/opencode/pi story there (#203).
+/// Unless the user chose an engine, such a run starts on legacy instead.
+pub fn falls_back_to_legacy_coordination(
+    windows: bool,
+    coordination_explicit: bool,
+    coordination: &str,
+    llm: &str,
+    story_llm: Option<&str>,
+) -> bool {
+    if !windows || coordination_explicit || coordination != "collective" {
+        return false;
+    }
+    let story_backend = story_llm.unwrap_or(if llm == "hybrid" { "codex" } else { llm });
+    matches!(story_backend, "claude" | "codex" | "opencode" | "pi")
 }
 
 #[cfg(test)]
@@ -487,5 +504,22 @@ mod tests {
         ] {
             assert!(help.contains(summary), "epilogue drifted from {summary}:\n{help}");
         }
+    }
+
+    #[test]
+    fn windows_cli_story_lanes_start_on_legacy_unless_chosen() {
+        use super::falls_back_to_legacy_coordination as falls_back;
+        for llm in ["claude", "codex", "opencode", "pi", "hybrid"] {
+            assert!(falls_back(true, false, "collective", llm, None), "{llm}");
+        }
+        // Native lanes prove their own quiescence.
+        assert!(!falls_back(true, false, "collective", "openai", None));
+        assert!(!falls_back(true, false, "collective", "jigjoy", None));
+        assert!(falls_back(true, false, "collective", "openai", Some("codex")));
+        assert!(!falls_back(true, false, "collective", "codex", Some("openai")));
+        // An explicit choice and other platforms are left alone.
+        assert!(!falls_back(true, true, "collective", "codex", None));
+        assert!(!falls_back(false, false, "collective", "codex", None));
+        assert!(!falls_back(true, false, "legacy", "codex", None));
     }
 }

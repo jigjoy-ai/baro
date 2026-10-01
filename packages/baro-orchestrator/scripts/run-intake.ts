@@ -21,6 +21,7 @@ import { runCodexIntake } from "../src/planning/adapters/planner-codex.js"
 import { runOpenAIIntake } from "../src/planning/adapters/planner-openai.js"
 import { runOpenCodeIntake } from "../src/planning/adapters/planner-opencode.js"
 import { runPiIntake } from "../src/planning/adapters/planner-pi.js"
+import { plainWindowsPath } from "../src/runtime/windows-path.js"
 
 interface Args {
     goal: string
@@ -41,7 +42,7 @@ function parseArgs(argv: string[]): Args {
                 args.goal = required(argv, ++i, "--goal")
                 break
             case "--cwd":
-                args.cwd = required(argv, ++i, "--cwd")
+                args.cwd = plainWindowsPath(required(argv, ++i, "--cwd"))
                 break
             case "--llm": {
                 const v = required(argv, ++i, "--llm")

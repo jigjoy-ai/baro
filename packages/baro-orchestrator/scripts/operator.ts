@@ -7,6 +7,7 @@ import {
 import { runOperator } from "../src/operator/operator-session.js"
 import { JsonUi } from "../src/operator/json-ui.js"
 import { TerminalUi } from "../src/operator/terminal-ui.js"
+import { plainWindowsPath } from "../src/runtime/windows-path.js"
 
 /* `baro operator`: a conversation with Claude Code in front and baro behind.
    The same bundle also serves as the MCP stdio child Claude spawns to reach
@@ -32,7 +33,7 @@ async function main(): Promise<void> {
         const value = argv[index + 1]
         switch (flag) {
             case "--cwd":
-                cwd = resolve(value ?? cwd)
+                cwd = resolve(plainWindowsPath(value ?? cwd))
                 index += 1
                 break
             case "--model":

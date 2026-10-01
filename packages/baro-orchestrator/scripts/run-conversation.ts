@@ -52,6 +52,7 @@ import {
     DIALOGUE_RETRY_MAX_WAIT_MS_ENV,
     resolveDialogueRetryPolicy,
 } from "../src/harness/dialogue-retry-policy.js"
+import { plainWindowsPath } from "../src/runtime/windows-path.js"
 
 interface Args {
     inputFile: string
@@ -113,7 +114,7 @@ function parseArgs(argv: readonly string[]): Args {
     }
     const inputFile = required(values, "--input-file")
     const resultFile = required(values, "--result-file")
-    const cwd = required(values, "--cwd")
+    const cwd = plainWindowsPath(required(values, "--cwd"))
     const llm = required(values, "--llm")
     if (
         llm !== "claude" &&
