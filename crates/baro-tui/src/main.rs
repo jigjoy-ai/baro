@@ -77,7 +77,7 @@ use headless_transport::StdinHub;
 pub(crate) use planner_host::PrdOutput;
 use planner_host::{PlannerOutcome, PlannerRunSpec, ProgressivePlannerRuntime};
 
-const JIGJOY_STRONG_MODEL: &str = "glm-5.3";
+const JIGJOY_STRONG_MODEL: &str = "gpt-6.1-sol";
 const JIGJOY_CHEAP_STORY_MODEL: &str = "deepseek-flash";
 const JIGJOY_HEAVY_STORY_MODEL: &str = "deepseek-flash";
 const JIGJOY_GATEWAY_URL: &str = "https://gw.baro.jigjoy.ai/v1";
@@ -5216,7 +5216,7 @@ mod tests {
         // Measured preference: DeepSeek Pro underperforms Flash on execution
         // and review, so every DeepSeek lane rides Flash; only the planning
         // lane stays on the strong (non-DeepSeek) model.
-        assert_eq!(JIGJOY_STRONG_MODEL, "glm-5.3");
+        assert_eq!(JIGJOY_STRONG_MODEL, "gpt-6.1-sol");
         assert_eq!(JIGJOY_CHEAP_STORY_MODEL, "deepseek-flash");
         assert_eq!(JIGJOY_HEAVY_STORY_MODEL, "deepseek-flash");
         assert_eq!(JIGJOY_GATEWAY_URL, "https://gw.baro.jigjoy.ai/v1");

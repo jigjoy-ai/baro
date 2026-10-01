@@ -301,19 +301,45 @@ function getChatRuntime(
     return rt
 }
 
-// The Responses API runtime is env-driven, so one shared instance suffices.
+// The env-driven endpoint shares one runtime; a custom endpoint (the baro
+// gateway) gets its own, keyed like the chat runtimes.
 let responsesRuntime: OpenAIResponses | undefined
-function getResponsesRuntime(): OpenAIResponses {
-    if (!responsesRuntime) responsesRuntime = new OpenAIResponses()
-    return responsesRuntime
+const responsesRuntimeCache = new Map<string, OpenAIResponses>()
+function getResponsesRuntime(conn?: OpenAIConnection): OpenAIResponses {
+    if (!conn?.baseURL && !conn?.apiKey) {
+        if (!responsesRuntime) responsesRuntime = new OpenAIResponses()
+        return responsesRuntime
+    }
+    const key = `${conn.baseURL ?? ""}|${conn.apiKey ?? ""}`
+    const cached = responsesRuntimeCache.get(key)
+    if (cached) return cached
+    // Mozaik's Responses adapter only builds an env-configured client, and
+    // throws without OPENAI_API_KEY. Borrow the SDK client a connection-bound
+    // chat runtime constructs; the request/response mapping is the adapter's.
+    const client = (getChatRuntime(
+        { baseURL: conn.baseURL, apiKey: conn.apiKey },
+        false,
+    ) as unknown as { client: unknown }).client
+    const rt = Object.assign(
+        Object.create(OpenAIResponses.prototype) as OpenAIResponses,
+        { client },
+    )
+    responsesRuntimeCache.set(key, rt)
+    return rt
 }
 
-// OpenAI-native families (gpt-*, o-series, chatgpt-*) must use the Responses
-// API: OpenAI rejects function tools + reasoning_effort on chat completions,
-// and baro's agents always use tools. Everything else (DeepSeek, MiniMax,
+// OpenAI-native families (gpt-*, o-series, chatgpt-*) use the Responses API on
+// every endpoint: GPT-6 rejects function tools on chat completions outright,
+// and baro's agents always use tools. Everything else (DeepSeek, GLM, MiniMax,
 // Qwen, Llama, ...) speaks Chat Completions and has no /v1/responses.
+// BARO_OPENAI_CHAT_ONLY=1 keeps gpt-* on chat for a compatible endpoint that
+// serves those names without a Responses API.
 function isOpenAINativeModel(name: string): boolean {
     return /^(gpt[-\d]|o[1-9]|chatgpt|text-|davinci)/i.test(name.trim())
+}
+
+function usesResponsesApi(name: string): boolean {
+    return isOpenAINativeModel(name) && process.env.BARO_OPENAI_CHAT_ONLY !== "1"
 }
 
 /**
@@ -346,16 +372,16 @@ export async function runInferenceRound(
 
     try {
         const response =
-            isOpenAINativeModel(name) && !conn?.baseURL
+            usesResponsesApi(name)
                 ? dispatch
                     ? await inferResponsesWithExtension(
-                          getResponsesRuntime(),
+                          getResponsesRuntime(conn),
                           request,
                           dispatch.requestExtension,
                           options.signal,
                       )
                     : await inferResponsesRound(
-                          getResponsesRuntime(),
+                          getResponsesRuntime(conn),
                           request,
                           options.signal,
                       )
