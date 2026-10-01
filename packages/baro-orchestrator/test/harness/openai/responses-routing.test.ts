@@ -18,16 +18,38 @@ import {
 describe("OpenAI-native models use the Responses API on a custom endpoint", () => {
     let server: Server
     let baseURL: string
-    const hits: { path: string; auth: string | undefined; model: unknown }[] = []
+    const hits: { path: string; auth: string | undefined; model: unknown; body: Record<string, unknown> }[] = []
 
     before(async () => {
         server = createServer((req, res) => {
             let raw = ""
             req.on("data", (chunk) => (raw += chunk))
             req.on("end", () => {
-                const body = JSON.parse(raw || "{}") as { model?: unknown; stream?: boolean }
-                hits.push({ path: req.url ?? "", auth: req.headers.authorization, model: body.model })
+                const body = JSON.parse(raw || "{}") as Record<string, unknown> & { model?: unknown; stream?: boolean }
+                hits.push({ path: req.url ?? "", auth: req.headers.authorization, model: body.model, body })
                 res.setHeader("content-type", "application/json")
+                if (req.url === "/v1/responses" && body.model === "gpt-tool-round") {
+                    const sealed = (body.include as string[] | undefined)?.includes("reasoning.encrypted_content")
+                    res.end(JSON.stringify({
+                        id: "resp_2",
+                        object: "response",
+                        status: "completed",
+                        model: body.model,
+                        output: [
+                            { type: "reasoning", id: "rs_1", content: [], encrypted_content: sealed ? "sealed" : null, summary: [] },
+                            { type: "reasoning", id: "rs_2", content: [], encrypted_content: null, summary: [] },
+                            { type: "function_call", id: "fc_1", status: "completed", call_id: "call_1", name: "read_file", arguments: "{}" },
+                        ],
+                        usage: {
+                            input_tokens: 3,
+                            input_tokens_details: { cached_tokens: 0 },
+                            output_tokens: 2,
+                            output_tokens_details: { reasoning_tokens: 1 },
+                            total_tokens: 5,
+                        },
+                    }))
+                    return
+                }
                 if (req.url === "/v1/responses") {
                     res.end(JSON.stringify({
                         id: "resp_1",
@@ -83,7 +105,27 @@ describe("OpenAI-native models use the Responses API on a custom endpoint", () =
     it("sends gpt-* to /v1/responses with the connection's own key", async () => {
         hits.length = 0
         assert.equal(await ask("gpt-6.1-sol"), "from responses")
-        assert.deepEqual(hits, [{ path: "/v1/responses", auth: "Bearer gateway-key", model: "gpt-6.1-sol" }])
+        assert.deepEqual(
+            hits.map(({ path, auth, model }) => ({ path, auth, model })),
+            [{ path: "/v1/responses", auth: "Bearer gateway-key", model: "gpt-6.1-sol" }],
+        )
+    })
+
+    it("replays encrypted reasoning statelessly across a tool round", async () => {
+        hits.length = 0
+        const model = new GenericOpenAIModel("gpt-tool-round", { baseURL, apiKey: "gateway-key" })
+        const context = ModelContext.create("routing").addContextItem(UserMessageItem.create("hello"))
+        const round = await runInferenceRound(context, model)
+        assert.deepEqual(hits[0]?.body.include, ["reasoning.encrypted_content"])
+        assert.equal(hits[0]?.body.store, false)
+        // The reasoning item with nothing to replay is dropped; order is kept.
+        assert.deepEqual(round.items.map((item) => item.getType()), ["reasoning", "function_call"])
+        await runInferenceRound(context.applyModelOutput(round.items), model)
+        const replayed = (hits[1]?.body.input as Record<string, unknown>[]).slice(1)
+        assert.deepEqual(replayed, [
+            { type: "reasoning", id: "rs_1", summary: [], encrypted_content: "sealed" },
+            { type: "function_call", call_id: "call_1", name: "read_file", arguments: "{}" },
+        ])
     })
 
     it("keeps every other model on chat completions", async () => {

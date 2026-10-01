@@ -21,6 +21,7 @@ import {
     InferenceRequest,
     OpenAICompatibleChatCompletions,
     OpenAIResponses,
+    ReasoningItem,
     TokenUsage,
     type GenerativeModel,
     type ModelContext,
@@ -656,15 +657,86 @@ async function inferResponsesWithExtension(
     disableOpenAiSdkRetries(runtime)
     const response = await internals.client.responses.create(
         {
-            ...internals.buildRequest(request),
+            ...responsesBody(internals, request),
             ...extension,
         },
         { ...(signal ? { signal } : {}), ...uncappedTransport() },
     )
     return {
-        contextItems: internals.extractContextItems(response),
+        contextItems: replayableResponseItems(internals, response),
         tokenUsage: internals.extractTokenUsage(response),
     }
+}
+
+/**
+ * Baro's own Responses mapping for reasoning, until Mozaik 4 owns it. Mozaik
+ * 3.12 never asks for the encrypted reasoning and rehydrates the item with the
+ * wire's raw `content: []`, which then throws from `toJSON()` when the next
+ * round serializes the context. Stateless replay (`store: false` plus the
+ * encrypted content) hands the model its own reasoning back across tool
+ * rounds without depending on anything the provider stored.
+ */
+function responsesBody(
+    internals: ResponsesRuntimeInternals,
+    request: InferenceRequest,
+): Record<string, unknown> {
+    return {
+        ...internals.buildRequest(request),
+        include: ["reasoning.encrypted_content"],
+        store: false,
+    }
+}
+
+interface WireReasoning {
+    type?: unknown
+    id?: unknown
+    summary?: unknown
+    encrypted_content?: unknown
+}
+
+function replayableResponseItems(
+    internals: ResponsesRuntimeInternals,
+    response: unknown,
+): ContextItem[] {
+    const output = (response as { output?: unknown }).output
+    const wire = Array.isArray(output) ? (output as WireReasoning[]) : []
+    const mapped = internals.extractContextItems({
+        ...(response as object),
+        output: wire.filter((item) => item?.type !== "reasoning"),
+    })
+    const replayable = mapped[Symbol.iterator]()
+    const items: ContextItem[] = []
+    for (const item of wire) {
+        if (item?.type === "reasoning") {
+            const reasoning = replayableReasoning(item)
+            if (reasoning) items.push(reasoning)
+            continue
+        }
+        // Output types the adapter does not map come back as holes.
+        const next = replayable.next().value as ContextItem | undefined
+        if (next) items.push(next)
+    }
+    return items
+}
+
+/** An item without encrypted content has nothing to replay and is left out. */
+function replayableReasoning(wire: WireReasoning): ReasoningItem | null {
+    if (typeof wire.encrypted_content !== "string" || !wire.encrypted_content) {
+        return null
+    }
+    const item = ReasoningItem.rehydrate({
+        content: undefined,
+        encryptedContent: wire.encrypted_content,
+        summary: [],
+    })
+    const json = {
+        type: "reasoning",
+        ...(typeof wire.id === "string" ? { id: wire.id } : {}),
+        summary: Array.isArray(wire.summary) ? wire.summary : [],
+        encrypted_content: wire.encrypted_content,
+    }
+    item.toJSON = () => json
+    return item
 }
 
 async function inferResponsesRound(
@@ -672,20 +744,13 @@ async function inferResponsesRound(
     request: InferenceRequest,
     signal?: AbortSignal,
 ): Promise<InferredRound> {
-    if (!signal) {
-        const response = await runtime.infer(request)
-        return {
-            contextItems: response.contextItems,
-            tokenUsage: response.tokenUsage,
-        }
-    }
     const internals = responseInternals(runtime)
     const response = await internals.client.responses.create(
-        internals.buildRequest(request),
-        { signal },
+        responsesBody(internals, request),
+        { ...(signal ? { signal } : {}), ...uncappedTransport() },
     )
     return {
-        contextItems: internals.extractContextItems(response),
+        contextItems: replayableResponseItems(internals, response),
         tokenUsage: internals.extractTokenUsage(response),
     }
 }
