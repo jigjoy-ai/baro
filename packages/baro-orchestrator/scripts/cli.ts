@@ -42,6 +42,7 @@ import {
     type StoryRoute,
     type TierMap,
 } from "../src/market/routing.js"
+import { plainWindowsPath } from "../src/runtime/windows-path.js"
 
 const ownershipManifestPath = process.env.BARO_INTERNAL_PROVIDER_OWNERSHIP_MANIFEST
 const ownershipManifestToken = process.env.BARO_INTERNAL_PROVIDER_OWNERSHIP_TOKEN
@@ -135,7 +136,7 @@ function parseArgs(argv: string[]): CliArgs {
                 args.prd = required(argv, ++i, "--prd")
                 break
             case "--cwd":
-                args.cwd = required(argv, ++i, "--cwd")
+                args.cwd = plainWindowsPath(required(argv, ++i, "--cwd"))
                 break
             case "--parallel":
                 args.parallel = parseInt(required(argv, ++i, "--parallel"), 10)

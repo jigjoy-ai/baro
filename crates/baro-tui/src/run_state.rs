@@ -47,7 +47,7 @@ impl RunState {
 }
 
 fn canonical_checkout(cwd: &Path) -> String {
-    std::fs::canonicalize(cwd)
+    crate::canonical_path::canonicalize(cwd)
         .unwrap_or_else(|_| cwd.to_path_buf())
         .to_string_lossy()
         .into_owned()

@@ -74,7 +74,8 @@ export class OpenCodeCliParticipant extends CliParticipant<OpenCodeRunSummary> {
             // Nullish-coalesce so an explicit `undefined` can't clobber a default.
             binary: opts.opencodeBin ?? "opencode",
             cwd: opts.cwd,
-            stdinMode: "ignore",
+            stdinMode: "pipe",
+            stdinPayload: opts.prompt,
             closeDrainTimeoutMs: opts.closeDrainTimeoutMs ?? 7_500,
             captureStderrTail: true,
         })
@@ -96,7 +97,6 @@ export class OpenCodeCliParticipant extends CliParticipant<OpenCodeRunSummary> {
         }
         if (this.options.model) args.push("-m", this.options.model)
         if (this.options.cwd) args.push("--dir", this.options.cwd)
-        args.push(this.options.prompt)
         return args
     }
 
@@ -145,7 +145,7 @@ export class OpenCodeCliParticipant extends CliParticipant<OpenCodeRunSummary> {
         source: Participant,
         event: SemanticEvent<unknown>,
     ): Promise<void> {
-        // OpenCode run is one-shot — no stdin channel; targeted messages are
+        // OpenCode run is one-shot — stdin carries only the initial prompt; targeted messages are
         // logged and dropped.
         if (
             AgentTargetedMessage.is(event) &&

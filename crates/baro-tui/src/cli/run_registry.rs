@@ -119,7 +119,7 @@ pub fn register(goal: &str, cwd: &str) -> Option<RunHandle> {
         process_group: own_process_group(),
         // The listing is read from another terminal, where a relative path
         // names a different directory than the one the run is in.
-        cwd: std::fs::canonicalize(cwd)
+        cwd: crate::canonical_path::canonicalize(cwd)
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| cwd.to_string()),
         goal: goal.chars().take(400).collect(),
@@ -139,7 +139,7 @@ fn detached_record(goal: &str, cwd: &str, child_pid: u32, log_path: &Path) -> Ru
         id: format!("run-{child_pid}"),
         pid: child_pid,
         process_group: Some(child_pid),
-        cwd: std::fs::canonicalize(cwd)
+        cwd: crate::canonical_path::canonicalize(cwd)
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| cwd.to_string()),
         goal: goal.chars().take(400).collect(),

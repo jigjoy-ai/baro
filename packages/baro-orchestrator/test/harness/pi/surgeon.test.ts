@@ -54,6 +54,8 @@ async function withSpawnOutput(
     const originalSpawn = childProcess.spawn
     childProcess.spawn = (() => {
         const proc = new EventEmitter() as ChildProcess
+        const stdin = new PassThrough()
+        stdin.resume()
         const stdout = new PassThrough()
         const stderr = new PassThrough()
         let terminalEmitted = false
@@ -68,6 +70,7 @@ async function withSpawnOutput(
             queueMicrotask(() => proc.emit("close", code, signal))
         }
         Object.assign(proc, {
+            stdin,
             stdout,
             stderr,
             kill: () => {
