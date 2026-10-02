@@ -9,13 +9,11 @@
 import {
     mkdtempSync,
     readFileSync,
-    renameSync,
     rmSync,
-    writeFileSync,
 } from "fs"
 import { randomUUID } from "node:crypto"
 import { tmpdir } from "node:os"
-import { basename, dirname, join } from "node:path"
+import { join } from "node:path"
 
 import {
     createGatewayBillingCoordinatorFromEnv,
@@ -81,6 +79,7 @@ import {
     validateGoalEnvelope,
     type GoalEnvelope,
 } from "../src/conversation/session/conversation-contract.js"
+import { writeFileAtomic } from "../src/runtime/atomic-write.js"
 import { plainWindowsPath } from "../src/runtime/windows-path.js"
 
 interface Args {
@@ -981,23 +980,6 @@ function publishArchitectInvocation(
             invocation.observation,
         ),
     })
-}
-
-function writeFileAtomic(path: string, contents: string): void {
-    const temporary = join(
-        dirname(path),
-        `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`,
-    )
-    try {
-        writeFileSync(temporary, contents, {
-            encoding: "utf8",
-            mode: 0o600,
-            flag: "wx",
-        })
-        renameSync(temporary, path)
-    } finally {
-        rmSync(temporary, { force: true })
-    }
 }
 
 main().catch((e) => {
