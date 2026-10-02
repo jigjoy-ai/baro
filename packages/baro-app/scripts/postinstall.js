@@ -96,8 +96,17 @@ async function main() {
 
     fs.mkdirSync(BARO_HOME, { recursive: true })
 
-    // Clean up old binary
-    try { fs.unlinkSync(binaryPath) } catch {}
+    // Clean up old binary. Windows cannot delete a running executable but can
+    // rename it, so an update started from baro itself moves it aside.
+    try {
+        fs.unlinkSync(binaryPath)
+    } catch (err) {
+        if (err.code !== "ENOENT") {
+            const aside = `${binaryPath}.old`
+            try { fs.unlinkSync(aside) } catch {}
+            try { fs.renameSync(binaryPath, aside) } catch {}
+        }
+    }
 
     try {
         await download(url, binaryPath)
