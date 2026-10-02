@@ -2321,7 +2321,7 @@ describe("declared verification policy", () => {
             )
             assert.equal(
                 spec?.incompleteReason,
-                "unsupported declared test; allowed tools are npm/pnpm/yarn, exact npx rstest run paths, cargo, node, git diff --check, composer, vendor/bin/phpunit, and ddev exec",
+                "unsupported declared test; allowed tools are npm/pnpm/yarn, exact npx rstest run paths, cargo, node, mvn, gradle, git diff --check, composer, vendor/bin/phpunit, and ddev exec",
             )
         })
     })

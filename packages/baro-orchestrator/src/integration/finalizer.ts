@@ -36,6 +36,7 @@ import { getHeadSha } from "./git.js"
 import { BARO_COAUTHOR_TRAILER, loadPrd, type PrdFile, type PrdStory } from "../prd.js"
 import { readAuthoritativeVerifyPlanOptions } from "../verification/prd-declared-tests.js"
 import { formatDeclaredBudgetEvidence } from "../verification/declared-test-budget.js"
+import { provesOnlyHygiene } from "../verification/hygiene-command.js"
 import { renderRuntimeAmendments } from "../planning/domain/runtime-amendments.js"
 import { runRepositoryCommand as execFileAsync } from "./repository-command.js"
 import type { StoryOutcomeAuthority } from "../runtime/story-outcome-authority.js"
@@ -516,10 +517,18 @@ export class Finalizer extends BaseObserver {
                 hostRepoRoot: this.opts.hostRepoRoot,
             })
         }
+        // Complete and unfailed, but nothing built or tested the merge: an
+        // honest "not test-verified" delivery, not a failed-run checkpoint.
+        const hygieneOnly = verify.ok && provesOnlyHygiene(
+            verify.commands.filter((command) => command.command !== VERDICT_COMMAND),
+        )
         const verificationIncomplete =
-            !verify.ran ||
-            verify.commands.some((command) => command.status === "skipped")
-        if (!verify.ok) {
+            !hygieneOnly &&
+            (!verify.ran ||
+                verify.commands.some((command) => command.status === "skipped"))
+        if (hygieneOnly) {
+            this.log("[finalizer] not test-verified: only git diff --check ran on the merged result")
+        } else if (!verify.ok) {
             this.log(`[finalizer] ⚠ verification failed: ${verify.failures[0]?.cmd ?? "build/test"}`)
         } else if (!verify.ran) {
             this.log("[finalizer] nothing to verify (no build/test)")
@@ -543,6 +552,7 @@ export class Finalizer extends BaseObserver {
             prd,
             run,
             checkpoint,
+            hygieneOnly,
             verify,
             orderedStories,
             passed,
@@ -851,6 +861,7 @@ export class Finalizer extends BaseObserver {
         prd: PrdFile | null
         run: RunCompletedData
         checkpoint: boolean
+        hygieneOnly: boolean
         verify: VerifyResult
         orderedStories: StoryRecord[]
         passed: StoryRecord[]
@@ -909,7 +920,14 @@ export class Finalizer extends BaseObserver {
         const skippedVerification = args.verify.commands.filter(
             (command) => command.status === "skipped",
         )
-        if (!args.verify.ran || skippedVerification.length > 0) {
+        if (args.hygieneOnly) {
+            lines.push("## Not test-verified")
+            lines.push("")
+            lines.push(
+                "The only check run on the merged branch was `git diff --check`. No build or test command verified it; run the project's tests before merging.",
+            )
+            lines.push("")
+        } else if (!args.verify.ran || skippedVerification.length > 0) {
             lines.push("## ⚠ Build/test verification incomplete")
             lines.push("")
             lines.push(
@@ -1081,6 +1099,8 @@ function bindAuthority(
     return authority
 }
 
+const VERDICT_COMMAND = "objective verification verdict"
+
 function verificationResult(evidence: RunVerificationEvidence): VerifyResult {
     const commands = evidence.commands.map((command) => ({ ...command }))
     if (
@@ -1088,7 +1108,7 @@ function verificationResult(evidence: RunVerificationEvidence): VerifyResult {
         !commands.some((command) => command.status === "skipped")
     ) {
         commands.push({
-            command: "objective verification verdict",
+            command: VERDICT_COMMAND,
             status: "skipped",
             durationMs: 0,
             tail: "verifier reported an incomplete/skipped objective gate",

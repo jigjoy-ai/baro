@@ -4,6 +4,7 @@ import { join } from "node:path"
 import { describe, it } from "node:test"
 
 import { detectJvmCommands } from "../../src/verification/jvm-commands.js"
+import { translateDeclaredTests } from "../../src/verification/declared-verification.js"
 import { createVerifyPlan, verifyBuild } from "../../src/verification/verify.js"
 import { withTempDir } from "../execution/helpers.js"
 
@@ -122,6 +123,73 @@ describe("detectJvmCommands (#210)", () => {
             })
             assert.deepEqual(commands, [])
             assert.equal(probed, false)
+        })
+    })
+
+    describe("declared mvn/gradle story tests (#215)", () => {
+        async function withToolchain<T>(
+            tools: readonly string[],
+            run: (repo: string) => T,
+        ): Promise<T> {
+            return withTempDir("baro-jvm-", async (root) => {
+                const repo = join(root, "repo")
+                const bin = join(root, "bin")
+                mkdirSync(repo)
+                mkdirSync(bin)
+                for (const tool of tools) executable(bin, tool)
+                const saved = { PATH: process.env.PATH, JAVA_HOME: process.env.JAVA_HOME }
+                process.env.PATH = bin
+                delete process.env.JAVA_HOME
+                try {
+                    return run(repo)
+                } finally {
+                    process.env.PATH = saved.PATH
+                    if (saved.JAVA_HOME !== undefined) process.env.JAVA_HOME = saved.JAVA_HOME
+                }
+            })
+        }
+        const translate = (repo: string, command: string) =>
+            translateDeclaredTests(repo, [{ storyId: "S1", command }], [])[0]!
+
+        it("translates the forms a planner writes into a real command", async () => {
+            await withToolchain(["java", "mvn", "gradle"], (repo) => {
+                writeFileSync(join(repo, "pom.xml"), "<project/>")
+                writeFileSync(join(repo, "build.gradle"), "")
+                const maven = translate(repo, "mvn -B -ntp -Dtest=OfferFilterTest test")
+                assert.equal(maven.incompleteReason, undefined)
+                assert.deepEqual(
+                    { tool: maven.tool, args: maven.args },
+                    { tool: "mvn", args: ["-B", "-ntp", "-Dtest=OfferFilterTest", "test"] },
+                )
+                const gradle = translate(repo, "gradle :app:test --tests com.example.FooTest")
+                assert.equal(gradle.incompleteReason, undefined)
+                assert.deepEqual(gradle.args, [":app:test", "--tests", "com.example.FooTest"])
+            })
+        })
+
+        it("refuses goals and flags outside the allowlist", async () => {
+            await withToolchain(["java", "mvn", "gradle"], (repo) => {
+                writeFileSync(join(repo, "pom.xml"), "<project/>")
+                writeFileSync(join(repo, "build.gradle"), "")
+                for (const command of [
+                    "mvn deploy",
+                    "mvn test -Dexec.executable=sh",
+                    "mvn test verify",
+                    "mvn -B",
+                    "gradle publish",
+                    "gradle test --init-script=x.gradle",
+                ]) assert.ok(translate(repo, command).incompleteReason, command)
+            })
+        })
+
+        it("is incomplete, not a crash, when the host has no toolchain", async () => {
+            await withToolchain([], (repo) => {
+                writeFileSync(join(repo, "pom.xml"), "<project/>")
+                assert.match(
+                    translate(repo, "mvn -B test").incompleteReason ?? "",
+                    /no working JDK and Maven/,
+                )
+            })
         })
     })
 })

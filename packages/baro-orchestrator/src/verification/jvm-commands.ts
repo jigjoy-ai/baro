@@ -78,6 +78,31 @@ function javaRuns(env: NodeJS.ProcessEnv): boolean {
     }
 }
 
+/**
+ * The executable for a declared `mvn …` / `gradle …` test, or null when this
+ * host cannot run the build at all.
+ */
+export function resolveJvmBuildTool(
+    cwd: string,
+    kind: "maven" | "gradle",
+    probe: JvmToolchainProbe = {},
+): string | null {
+    const env = probe.env ?? process.env
+    const windows = (probe.platform ?? process.platform) === "win32"
+    if (!(probe.javaRuns ?? javaRuns)(env)) return null
+    return kind === "maven"
+        ? wrapperOrTool(cwd, windows ? "mvnw.cmd" : "mvnw", "mvn", env, windows)
+        : wrapperOrTool(cwd, windows ? "gradlew.bat" : "gradlew", "gradle", env, windows)
+}
+
+export function isMavenRepository(cwd: string): boolean {
+    return MAVEN_FILES.some((name) => existsSync(join(cwd, name)))
+}
+
+export function isGradleRepository(cwd: string): boolean {
+    return GRADLE_FILES.some((name) => existsSync(join(cwd, name)))
+}
+
 // The repository's wrapper pins the build tool version, so it wins over PATH.
 function wrapperOrTool(
     cwd: string,
