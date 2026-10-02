@@ -9,13 +9,11 @@
 import {
     mkdtempSync,
     readFileSync,
-    renameSync,
     rmSync,
-    writeFileSync,
 } from "fs"
 import { randomUUID } from "node:crypto"
 import { tmpdir } from "node:os"
-import { basename, dirname, join } from "node:path"
+import { join } from "node:path"
 
 import {
     createGatewayBillingCoordinatorFromEnv,
@@ -81,6 +79,7 @@ import {
     validateGoalEnvelope,
     type GoalEnvelope,
 } from "../src/conversation/session/conversation-contract.js"
+import { writeFileAtomic } from "../src/runtime/atomic-write.js"
 import { plainWindowsPath } from "../src/runtime/windows-path.js"
 
 interface Args {
@@ -981,36 +980,6 @@ function publishArchitectInvocation(
             invocation.observation,
         ),
     })
-}
-
-function writeFileAtomic(path: string, contents: string): void {
-    const temporary = join(
-        dirname(path),
-        `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`,
-    )
-    try {
-        writeFileSync(temporary, contents, {
-            encoding: "utf8",
-            mode: 0o600,
-            flag: "wx",
-        })
-        try {
-            renameSync(temporary, path)
-        } catch (error) {
-            // The host keeps its result file open while this child runs, and
-            // Windows refuses to replace an open file: every Architect there
-            // finished its work and then crashed on this rename (#192).
-            if (!isReplaceRefused(error)) throw error
-            writeFileSync(path, contents, { encoding: "utf8" })
-        }
-    } finally {
-        rmSync(temporary, { force: true })
-    }
-}
-
-function isReplaceRefused(error: unknown): boolean {
-    const code = (error as NodeJS.ErrnoException | null)?.code
-    return code === "EPERM" || code === "EACCES" || code === "EBUSY"
 }
 
 main().catch((e) => {
