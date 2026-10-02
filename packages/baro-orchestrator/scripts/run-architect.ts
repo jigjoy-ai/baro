@@ -994,10 +994,23 @@ function writeFileAtomic(path: string, contents: string): void {
             mode: 0o600,
             flag: "wx",
         })
-        renameSync(temporary, path)
+        try {
+            renameSync(temporary, path)
+        } catch (error) {
+            // The host keeps its result file open while this child runs, and
+            // Windows refuses to replace an open file: every Architect there
+            // finished its work and then crashed on this rename (#192).
+            if (!isReplaceRefused(error)) throw error
+            writeFileSync(path, contents, { encoding: "utf8" })
+        }
     } finally {
         rmSync(temporary, { force: true })
     }
+}
+
+function isReplaceRefused(error: unknown): boolean {
+    const code = (error as NodeJS.ErrnoException | null)?.code
+    return code === "EPERM" || code === "EACCES" || code === "EBUSY"
 }
 
 main().catch((e) => {
