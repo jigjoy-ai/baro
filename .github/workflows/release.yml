@@ -62,8 +62,12 @@ jobs:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
 
+  # Nothing ships that cannot run its whole pipeline on native Windows (#192).
+  windows-smoke:
+    uses: ./.github/workflows/windows-smoke.yml
+
   publish:
-    needs: build-binary
+    needs: [build-binary, windows-smoke]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
