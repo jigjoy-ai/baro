@@ -82,6 +82,10 @@ async function materializeWorkspace(
     match: boolean,
     runInstall: (workspaceDir: string) => Promise<void>,
 ): Promise<MaterializedWorkspace> {
+    // Not a Node package: `npm ci` here only fails with a usage dump (#210).
+    if (!existsSync(join(dir, "package.json"))) {
+        return { dir, action: "skipped", reason: "no package.json" }
+    }
     const nodeModules = join(dir, "node_modules")
     const hostNodeModules = join(hostDir, "node_modules")
     if (match && existsSync(hostNodeModules) && !existsSync(nodeModules)) {

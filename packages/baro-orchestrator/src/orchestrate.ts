@@ -108,6 +108,7 @@ import {
     plannerBusAgentId,
     runPlannerBusSession,
 } from "./planning/adapters/planner-bus-session.js"
+import { provesOnlyHygiene } from "./verification/hygiene-command.js"
 import { RunVerifier } from "./verification/run-verifier.js"
 import { Sentry } from "./execution/sentry.js"
 import { StoryFactory } from "./market/story-factory.js"
@@ -487,6 +488,14 @@ export interface OrchestrateResult {
     storyAgents: Map<string, StoryAgent>
 }
 
+export function withoutLatchlessBusPlanner(
+    config: OrchestrateConfig,
+): OrchestrateConfig {
+    return config.busPlanner && !config.progressivePlanningId
+        ? { ...config, busPlanner: undefined }
+        : config
+}
+
 /**
  * Build, run, and tear down the orchestration environment for a single
  * PRD execution.
@@ -521,6 +530,10 @@ export async function orchestrate(
             }
         }
     }
+    // The bus planner is the progressive planner. A run that starts from a
+    // finished plan has no planning latch, so every fragment it proposed was
+    // refused while each attempt still cost a model turn (#209, #210).
+    config = withoutLatchlessBusPlanner(config)
     // Set once at the chokepoint every run passes through; child agents
     // inherit process.env, so no shell command they issue can hang on a
     // prompt or a test watcher.
@@ -2073,7 +2086,11 @@ export async function orchestrate(
     await integrationWorktree?.syncHostCheckout({
         verified: finalizer
             ? finalizer.checkpoint === false
-            : summary.success && summary.verificationStatus === "passed",
+            : summary.success &&
+              (summary.verificationStatus === "passed" ||
+                  // Not verified, and reported so; delivery to the checkout is
+                  // unchanged for a repo baro has no build/test command for.
+                  provesOnlyHygiene(summary.verification?.commands ?? [])),
     })
 
     let filesCreated = 0

@@ -181,7 +181,7 @@ pub fn render_completion(f: &mut Frame, app: &App) {
         let (label, color) = match status {
             "passed" => ("passed", theme::SUCCESS),
             "failed" => ("failed", theme::WARNING),
-            _ => ("not run", theme::WARNING),
+            _ => ("not verified", theme::WARNING),
         };
         let evidence_detail = app.verification.as_ref().map(|evidence| {
             let duration = if evidence.duration_ms >= 1_000 {

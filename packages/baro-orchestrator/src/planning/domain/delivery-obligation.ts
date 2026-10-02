@@ -7,6 +7,14 @@ const NEGATING_SUFFIX = /^[-\s]?(free|less)\b/iu
 const PROHIBITION_AFTER =
     /\b(?:is|are|was|were|be|being|stays?|remains?|must|shall|should|may|can|will|does|do)\s+(?:not|never)\b|n't\b|\b(?:forbidden|prohibited|disallowed|banned|excluded|refused|denied|blocked|out of scope|off limits)\b/iu
 
+// Where code is delivered to. "Publish" and "push" are also what applications
+// do (SNS publish, publishing an event, a push notification), and eight live
+// Architect runs died on exactly that reading (#211). Only a sentence that
+// names one of these is about delivering the work. Deliberately narrow: the
+// shell guard is what actually stops a story from pushing.
+const DELIVERY_TARGET =
+    /\b(?:git|branch(?:es)?|pull[- ]requests?|merge[- ]requests?|github|gitlab|bitbucket|npm|pypi|crates\.io|maven central|docker hub|(?:package|container|docker|npm) registry)\b|\bPRs?\b/iu
+
 /**
  * Delivery (push/publish) is the user's to do, never a story's or the
  * operator's. A sentence that negates the trigger word states a constraint
@@ -20,6 +28,7 @@ export function deliveryObligationViolation(text: string): string | null {
         .map((sentence) => sentence.trim())
         .filter((sentence) => sentence.length > 0)
     for (const sentence of sentences) {
+        if (!DELIVERY_TARGET.test(sentence)) continue
         for (const match of sentence.matchAll(DELIVERY_WORD)) {
             const before = sentence.slice(0, match.index)
             const after = sentence.slice(match.index + match[0].length)
