@@ -3,9 +3,21 @@
 // shebang, and a #!/bin/sh bin makes the Windows shim invoke sh.exe (absent on
 // Windows). A node shebang yields correct cmd/ps1/sh shims on every platform.
 import { spawnSync } from "node:child_process"
-import { existsSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import path from "node:path"
+import { fileURLToPath } from "node:url"
+
+import { selfUpdate } from "./self-update.mjs"
+
+const argv = process.argv.slice(2)
+try {
+    const packageJson = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "package.json")
+    const packageVersion = JSON.parse(readFileSync(packageJson, "utf8")).version
+    await selfUpdate({ packageVersion, argv })
+} catch {
+    // An update that cannot be attempted never stops baro from starting.
+}
 
 const bin = path.join(
     homedir(),
@@ -19,7 +31,7 @@ if (!existsSync(bin)) {
     process.exit(1)
 }
 
-const result = spawnSync(bin, process.argv.slice(2), { stdio: "inherit" })
+const result = spawnSync(bin, argv, { stdio: "inherit" })
 if (result.error) {
     console.error(`baro: failed to launch binary: ${result.error.message}`)
     process.exit(1)
