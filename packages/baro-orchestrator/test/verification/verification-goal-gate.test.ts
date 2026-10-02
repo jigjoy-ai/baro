@@ -162,6 +162,29 @@ describe("VerificationGoalGate awake watchdogs", () => {
         assert.equal(gate.status(), "passed")
     })
 
+    it("reports a run verified only by git diff --check as skipped, without stopping it (#210)", () => {
+        const { host, events, pushes } = createHost(goalPrd())
+        const gate = new VerificationGoalGate({
+            runId: "run-awake-gate",
+            verifyBeforePush: true,
+            verificationTimeoutMs: VERIFICATION_TIMEOUT_MS,
+            hasGoalCompletionAuthority: false,
+            host,
+            awakeClock: createFakeAwakeClock(),
+        })
+
+        gate.requestVerification(null)
+        gate.onVerificationCompleted({
+            ...passingVerification(pendingVerificationId(events)),
+            commands: [{ command: "git diff --check", status: "passed", durationMs: 1 }],
+        })
+
+        assert.equal(gate.status(), "skipped")
+        assert.equal(gate.evidence()?.status, "skipped")
+        // Same tail as a passed verification: no incomplete-verification stop reason.
+        assert.deepEqual(pushes, [null])
+    })
+
     it("defers the goal-completion watchdog across a suspension and releasePendings cancels it", () => {
         const clock = createFakeAwakeClock()
         const { host, events } = createHost(goalPrd())

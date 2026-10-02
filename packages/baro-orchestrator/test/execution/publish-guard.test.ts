@@ -258,6 +258,34 @@ describe("delivery wording vs. a constraint against delivery", () => {
     })
 })
 
+describe("delivery wording vs. what the application itself does (#211)", () => {
+    // Verbatim obligations that failed live Architect runs.
+    it("admits publish/push as application behaviour", () => {
+        for (const text of [
+            "Lambda execution role includes AWSLambdaBasicExecutionRole and an inline policy granting dynamodb:PutItem on the JobinnSeenOffersTable ARN and sns:Publish on the JobinnTopic ARN; scheduler role trusts scheduler.amazonaws.com and grants lambda:InvokeFunction only on the JobinnFunction ARN.",
+            "When PutItem succeeds, ConditionalCheckFailedException occurs, SNS publish succeeds, SNS publish fails, or retrieval fails.",
+            "template.yaml is valid SAM and defines hourly EventBridge Scheduler, resource-scoped IAM for SNS publish/DynamoDB GetItem+PutItem/CloudWatch logs, Lambda Timeout 60 and MemorySize 512, and CloudWatch log retention 14 days.",
+            "The role grants only basic Lambda logging, DynamoDB GetItem/PutItem/UpdateItem on JobinnSeenOffersTable, and SNS Publish on JobinnTopic using dynamic resource references",
+            "One invocation retrieves, parses, filters weekend title matching shifts, skips persisted identities, publishes only new matches, persists successes atomically, and prints MonitorSummary; retrieval failure exits 4 and leaves state untouched",
+            "One cycle loads, parses, filters, loads state, publishes each newly qualifying shift, merges identities, saves state once, and prints summary.",
+            "A qualified shift is published through an injectable PrintStream.",
+            "Declared permissions restrict DynamoDB writes to the state table and log writes to its streams; the SNS publishing permission is restricted by action and deployment region despite its required wildcard resource.",
+            "The service sends a push notification and pushes the event onto the retry queue",
+            "The outbox commits the transaction, then publishes the event to the Kafka topic through the schema registry",
+        ]) assert.equal(deliveryObligationViolation(text), null, text)
+    })
+
+    it("still rejects delivery of the work itself", () => {
+        for (const text of [
+            "The story runs git push after the tests pass",
+            "The change is published as a pull request on GitHub",
+            "The package is published to the npm registry",
+            "The image is pushed to the container registry",
+            "Open a PR and push the fix",
+        ]) assert.notEqual(deliveryObligationViolation(text), null, text)
+    })
+})
+
 describe("obligation admission rejects delivery", () => {
     function deliveryContract(): ArchitectureObligationContractV1 {
         return {

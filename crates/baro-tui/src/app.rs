@@ -847,6 +847,11 @@ impl App {
         // Conversation-owned runs keep the chat spine through planning.
         if self.conversation.goal_envelope().is_none() {
             self.screen = Screen::Planning;
+        } else if matches!(self.screen, Screen::Context) {
+            // A repo without AGENTS.md/CLAUDE.md passes through the context
+            // scan; left there, "Scanning project structure..." stayed up for
+            // the whole Architect and Planner phase (#192).
+            self.screen = Screen::Conversation;
         }
         self.planning_start = Some(Instant::now());
         self.planning_progress = None;

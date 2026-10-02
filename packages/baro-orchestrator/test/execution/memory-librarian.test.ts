@@ -149,6 +149,37 @@ describe("MemoryLibrarian", () => {
         )
     })
 
+    it("remembers the native lane's exploration tools under their canonical names (#210)", async () => {
+        const remembered: Finding[] = []
+        const librarian = new MemoryLibrarian()
+        ;(librarian as unknown as { store: MemoryStore }).store = memoryStore({
+            remembered,
+        })
+        const agent = source("S1")
+        const calls: [string, Record<string, unknown>][] = [
+            ["read_file", { path: "pom.xml" }],
+            ["grep", { pattern: "OfferFilter" }],
+            ["bash", { command: "ls src" }],
+            ["write_file", { path: "src/A.java" }],
+        ]
+        for (const [index, [name, args]] of calls.entries()) {
+            await librarian.onExternalFunctionCall(agent, call(`call-${index}`, name, args))
+            await librarian.onExternalFunctionCallOutput(
+                agent,
+                FunctionCallOutputItem.create(`call-${index}`, `${name} output`),
+            )
+        }
+
+        assert.deepEqual(
+            remembered.map((finding) => ({ tool: finding.tool, filePath: finding.filePath })),
+            [
+                { tool: "Read", filePath: "pom.xml" },
+                { tool: "Grep", filePath: undefined },
+                { tool: "Bash", filePath: undefined },
+            ],
+        )
+    })
+
     it("does not expose a direct memory transport to collective workers", async () => {
         const secretSessionPath = "/private/run/memory-session"
         let cachedPathsRead = false

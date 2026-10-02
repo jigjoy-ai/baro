@@ -610,7 +610,7 @@ fn block_lines(
                     let (label, color) = match status {
                         "passed" => ("passed", theme::SUCCESS),
                         "failed" => ("failed", theme::ERROR),
-                        _ => ("not run", theme::WARNING),
+                        _ => ("not verified", theme::WARNING),
                     };
                     let detail = app
                         .verification

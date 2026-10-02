@@ -68,6 +68,22 @@ function logStats(): void {
 
 const EXPLORATION_TOOLS = new Set(["Read", "Grep", "Glob", "Bash", "LSP"])
 
+// The native lane names the same tools differently. Matching only the Claude
+// names stored nothing on every openai/jigjoy run (#210).
+const NATIVE_EXPLORATION_TOOLS: Readonly<Record<string, string>> = {
+    read_file: "Read",
+    read_files: "Read",
+    grep: "Grep",
+    glob: "Glob",
+    file_tree: "Glob",
+    bash: "Bash",
+}
+
+function explorationTool(name: string): string | null {
+    if (EXPLORATION_TOOLS.has(name)) return name
+    return NATIVE_EXPLORATION_TOOLS[name] ?? null
+}
+
 /** TTL-based cleanup prevents leaks from timed-out agents. */
 interface PendingCall {
     agentId: string
@@ -282,7 +298,8 @@ export class MemoryLibrarian extends BaseObserver {
     }
 
     override async onExternalFunctionCall(source: Participant, item: FunctionCallItem): Promise<void> {
-        if (!EXPLORATION_TOOLS.has(item.name)) return
+        const tool = explorationTool(item.name)
+        if (!tool) return
         const agentId = (source as unknown as { agentId?: string }).agentId
         if (typeof agentId !== "string") return
         const correlation = this.opts.collective
@@ -302,7 +319,7 @@ export class MemoryLibrarian extends BaseObserver {
         sourcePending.set(item.callId, {
             agentId,
             correlation,
-            tool: item.name,
+            tool,
             args,
             timestamp: Date.now(),
         })

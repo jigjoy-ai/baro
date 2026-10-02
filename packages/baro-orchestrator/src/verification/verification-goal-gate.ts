@@ -31,6 +31,7 @@ import {
     type RunVerificationCompletedData,
     type RunVerificationEvidence,
 } from "../semantic-events.js"
+import { provesOnlyHygiene } from "./hygiene-command.js"
 
 export interface GoalCompletionCheckTimedOutData {
     runId: string
@@ -208,12 +209,18 @@ export class VerificationGoalGate {
         const skippedCommands = result.commands
             .filter((command) => command.status === "skipped")
             .map((command) => command.command)
+        // Complete, but nothing built or tested the merged result: the run
+        // goes on to the goal check as before and reports `skipped`, never
+        // `passed`.
+        const hygieneOnly =
+            result.status === "passed" && provesOnlyHygiene(result.commands)
         const effectiveStatus =
             failedCommand || result.status === "failed"
                 ? "failed"
                 : result.status === "passed" &&
                       hasPassedCommand &&
-                      skippedCommands.length === 0
+                      skippedCommands.length === 0 &&
+                      !hygieneOnly
                   ? "passed"
                   : "skipped"
         this.verificationStatus = effectiveStatus
@@ -230,6 +237,10 @@ export class VerificationGoalGate {
             this.host.requestPush(
                 `verification failed: ${failedCommand?.command ?? "build/test"}`,
             )
+            return
+        }
+        if (hygieneOnly) {
+            this.requestGoalCompletion(result.verificationId)
             return
         }
         if (effectiveStatus === "skipped") {

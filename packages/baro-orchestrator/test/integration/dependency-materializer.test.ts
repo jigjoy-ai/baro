@@ -208,6 +208,30 @@ describe("materializeDependencies", () => {
         })
     })
 
+    it("never runs npm in a repository without a package.json (#210)", async () => {
+        await withTempDir("baro-dep-mat-", async (root) => {
+            const host = join(root, "host")
+            const run = join(root, "run")
+            for (const dir of [host, run]) {
+                mkdirSync(dir, { recursive: true })
+                writeFileSync(join(dir, "pom.xml"), "<project/>")
+            }
+            const { calls, runInstall } = recordingInstall()
+
+            const result = await materializeDependencies({
+                hostRoot: host,
+                integrationRoot: run,
+                runInstall,
+            })
+
+            assert.deepEqual(calls, [])
+            assert.deepEqual(
+                result.workspaces.map(({ action, reason }) => ({ action, reason })),
+                [{ action: "skipped", reason: "no package.json" }],
+            )
+        })
+    })
+
     it("does nothing when the host and the worktree are the same directory", async () => {
         await withTempDir("baro-dep-mat-", async (root) => {
             writeWorkspace(root, { name: "root", private: true }, '{"lockfileVersion":3}')
