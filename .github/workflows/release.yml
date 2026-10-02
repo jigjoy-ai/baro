@@ -76,6 +76,9 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           path: binaries/
+          # Only the binaries: the Windows smoke job's logs live in the same
+          # run and were once uploaded to the release next to them.
+          pattern: baro-*
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
