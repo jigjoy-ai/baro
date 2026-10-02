@@ -1,0 +1,55 @@
+name: Windows smoke
+
+# Native Windows broke at the Architect for months without anyone seeing it
+# (#192). This runs the whole pipeline there on every change, against stand-in
+# models: no key, no model cost.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+
+concurrency:
+  group: windows-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build binary
+        run: cargo build --release
+      - name: Build bundles
+        shell: pwsh
+        run: |
+          npm install --workspaces --include-workspace-root
+          Push-Location packages/baro-app
+          npm run build
+          Pop-Location
+      - name: Stage like an install
+        shell: pwsh
+        run: |
+          # postinstall stages the bundles and their dependency link; the
+          # binary it may download is replaced with the one just built.
+          node packages/baro-app/scripts/postinstall.js
+          Copy-Item -Force target/release/baro.exe "$env:USERPROFILE\.baro\bin\baro.exe"
+          Get-ChildItem "$env:USERPROFILE\.baro\bin" | Select-Object Name, Length
+      - name: Codex lane (legacy coordination)
+        shell: pwsh
+        run: ./.github/smoke/run.ps1 -Llm codex
+      - name: Native lane (collective)
+        shell: pwsh
+        run: ./.github/smoke/run.ps1 -Llm openai
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: windows-smoke
+          path: ${{ runner.temp }}/smoke-*/out
+          include-hidden-files: true
