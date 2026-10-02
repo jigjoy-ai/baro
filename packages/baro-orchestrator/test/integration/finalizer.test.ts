@@ -725,6 +725,22 @@ describe("Finalizer", () => {
         })
     })
 
+    it("delivers a run verified only by git diff --check as not test-verified, not as a checkpoint (#215)", async () => {
+        await withTempDir("baro-finalizer-", async (dir) => {
+            const { title, body } = await runFinalizerWithVerify(dir, null, true, {
+                runId: "run-hygiene",
+                verificationId: "run-hygiene:verification:1",
+                status: "skipped",
+                commands: [{ command: "git diff --check", status: "passed", durationMs: 1 }],
+                durationMs: 1,
+            })
+            assert.doesNotMatch(title, /^Checkpoint:/)
+            assert.match(body, /## Not test-verified/)
+            assert.doesNotMatch(body, /Checkpoint PR/)
+            assert.doesNotMatch(body, /verification incomplete/)
+        })
+    })
+
     it("checkpoints fallback verification when a PRD test cannot execute", async () => {
         await withTempDir("baro-finalizer-", async (dir) => {
             const { title, body } = await runFinalizerWithVerify(

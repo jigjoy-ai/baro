@@ -15,6 +15,11 @@ import {
 import { createHash } from "node:crypto"
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 
+import {
+    isGradleRepository,
+    isMavenRepository,
+    resolveJvmBuildTool,
+} from "./jvm-commands.js"
 import type {
     DeclaredTestRequirement,
     VerifyCommandSpec,
@@ -175,6 +180,10 @@ function dispatchDeclared(
             args: ["diff", "--no-ext-diff", "--no-textconv", "--check"],
         }
     }
+    if (tool === "mvn" || tool === "./mvnw") return translateMaven(cwd, requirement, parsed)
+    if (tool === "gradle" || tool === "./gradlew") {
+        return translateGradle(cwd, requirement, parsed)
+    }
     if (tool === "composer") return translateComposer(cwd, requirement, parsed)
     if (tool === "vendor/bin/phpunit") {
         return translatePhpunit(cwd, requirement, parsed)
@@ -190,7 +199,7 @@ function dispatchDeclared(
     }
     return incomplete(
         requirement,
-        "unsupported declared test; allowed tools are npm/pnpm/yarn, exact npx rstest run paths, cargo, node, git diff --check, composer, vendor/bin/phpunit, and ddev exec",
+        "unsupported declared test; allowed tools are npm/pnpm/yarn, exact npx rstest run paths, cargo, node, mvn, gradle, git diff --check, composer, vendor/bin/phpunit, and ddev exec",
     )
 }
 
@@ -1099,6 +1108,93 @@ function translateCargo(
         tool: "cargo",
         args,
     }
+}
+
+const MAVEN_GOALS = new Set(["test", "verify", "package", "compile", "test-compile"])
+const MAVEN_FLAGS = new Set([
+    "-B", "--batch-mode", "-ntp", "--no-transfer-progress", "-q", "--quiet",
+    "-o", "--offline", "-e", "-am", "--also-make",
+])
+const MAVEN_PROPERTY =
+    /^-D(?:test|failIfNoTests|surefire\.failIfNoSpecifiedTests|skipITs)=[A-Za-z0-9_.,*#+!$-]+$/
+const JVM_MODULE = /^[A-Za-z0-9_./:-]+$/
+
+function translateMaven(
+    cwd: string,
+    requirement: DeclaredTestRequirement,
+    parsed: DeclaredTokens,
+): VerifyCommandSpec {
+    if (!isMavenRepository(cwd)) {
+        return incomplete(requirement, "declared mvn test requires pom.xml at the repository root")
+    }
+    const args = parsed.tokens.slice(1)
+    let goals = 0
+    for (let index = 0; index < args.length; index++) {
+        const token = args[index]!
+        if (MAVEN_GOALS.has(token)) {
+            goals++
+        } else if (token === "-pl" || token === "--projects") {
+            const module = args[++index]
+            if (!module || !JVM_MODULE.test(module) || hasParentTraversal(module)) {
+                return incomplete(requirement, "mvn -pl needs a module path inside the repository")
+            }
+        } else if (!MAVEN_FLAGS.has(token) && !MAVEN_PROPERTY.test(token)) {
+            return incomplete(
+                requirement,
+                `mvn declarations are limited to test, verify, package, compile and test-compile with batch/offline flags, -pl and -Dtest; unsupported '${token}'`,
+            )
+        }
+    }
+    if (goals !== 1) {
+        return incomplete(requirement, "mvn declaration must name exactly one goal")
+    }
+    const tool = resolveJvmBuildTool(cwd, "maven")
+    if (!tool) {
+        return incomplete(requirement, "this host has no working JDK and Maven (or ./mvnw) to run the declared test")
+    }
+    return { label: ["mvn", ...args].join(" "), tool, args }
+}
+
+const GRADLE_TASK = /^(?::[A-Za-z0-9_-]+)*:?(?:test|check|build|assemble)$/
+const GRADLE_FLAGS = new Set([
+    "--console=plain", "--offline", "--no-daemon", "-q", "--quiet", "--stacktrace", "--continue",
+])
+const GRADLE_TEST_FILTER = /^[A-Za-z0-9_.*$]+$/
+
+function translateGradle(
+    cwd: string,
+    requirement: DeclaredTestRequirement,
+    parsed: DeclaredTokens,
+): VerifyCommandSpec {
+    if (!isGradleRepository(cwd)) {
+        return incomplete(requirement, "declared gradle test requires a Gradle build at the repository root")
+    }
+    const args = parsed.tokens.slice(1)
+    let tasks = 0
+    for (let index = 0; index < args.length; index++) {
+        const token = args[index]!
+        if (GRADLE_TASK.test(token)) {
+            tasks++
+        } else if (token === "--tests") {
+            const filter = args[++index]
+            if (!filter || !GRADLE_TEST_FILTER.test(filter)) {
+                return incomplete(requirement, "gradle --tests needs a class or method filter")
+            }
+        } else if (!GRADLE_FLAGS.has(token)) {
+            return incomplete(
+                requirement,
+                `gradle declarations are limited to test, check, build and assemble tasks with --tests; unsupported '${token}'`,
+            )
+        }
+    }
+    if (tasks === 0) {
+        return incomplete(requirement, "gradle declaration must name a test, check, build or assemble task")
+    }
+    const tool = resolveJvmBuildTool(cwd, "gradle")
+    if (!tool) {
+        return incomplete(requirement, "this host has no working JDK and Gradle (or ./gradlew) to run the declared test")
+    }
+    return { label: ["gradle", ...args].join(" "), tool, args }
 }
 
 interface ContainedPath {
