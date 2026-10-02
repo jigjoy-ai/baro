@@ -32,6 +32,7 @@ import {
     recordTiming,
     type CommandCeiling,
 } from "./command-timing.js"
+import { detectJvmCommands } from "./jvm-commands.js"
 import {
     creditDeclaredRequirements,
     declaredRequirementFiles,
@@ -554,6 +555,8 @@ function detectCommands(cwd: string): DetectedVerifyPlan {
         cmds.push({ label: "go build ./...", tool: "go", args: ["build", "./..."] })
         cmds.push({ label: "go test ./...", tool: "go", args: ["test", "./..."] })
     }
+
+    cmds.push(...detectJvmCommands(cwd))
 
     return { commands: cmds, javascriptPackageManagers }
 }
