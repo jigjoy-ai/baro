@@ -12,6 +12,7 @@ import { join } from "node:path"
 import spawn from "cross-spawn"
 
 import { harnessChildEnvironment } from "../environment.js"
+import { openCodeRunArgs } from "./cli-version.js"
 import {
     ManagedProcessTree,
     POSIX_PROCESS_GROUPS_SUPPORTED,
@@ -79,14 +80,11 @@ export async function runOpenCodeOneShot(
         : null
     if (opts.signal?.aborted) throw abortError()
 
-    const args = ["run", "--format", "json"]
-    if (safeEvaluator) {
-        args.push("--pure", "--agent", "baro-critic")
-    } else {
-        args.push("--dangerously-skip-permissions")
-    }
-    if (opts.model) args.push("-m", opts.model)
-    if (opts.cwd) args.push("--dir", opts.cwd)
+    const args = openCodeRunArgs(opts.opencodeBin ?? "opencode", {
+        cwd: opts.cwd,
+        model: opts.model,
+        ...(safeEvaluator ? { evaluatorAgent: "baro-critic" } : { autoApprove: true }),
+    })
 
     const timeoutMs = opts.timeoutMs ?? 600_000
     const terminationGraceMs = opts.terminationGraceMs ?? 5_000
@@ -139,6 +137,7 @@ export async function runOpenCodeOneShot(
         })
 
         let assistantText = ""
+        let providerError: string | null = null
         let stdoutBuffer = ""
         let stdoutBufferBytes = 0
         let discardingOversizedStdoutLine = false
@@ -225,6 +224,12 @@ export async function runOpenCodeOneShot(
                 if (!timedOut && !aborted) {
                     invocations.observe(openCodeObservation(event, opts))
                 }
+                return
+            }
+            if (type === "error") {
+                const error = record(event.error)
+                providerError = openCodeErrorText(error, safeEvaluator)
+                process.stderr.write(`[${label}] error: ${providerError}\n`)
                 return
             }
             if (type === "text") {
@@ -347,6 +352,7 @@ export async function runOpenCodeOneShot(
                 signal ? `signal=${signal}` : null,
                 timedOut ? `timedOut=true (idle=${timeoutMs}ms)` : null,
                 aborted ? "aborted=true" : null,
+                providerError ? `error=${providerError}` : null,
                 `events=${eventTypesSeen.length}`,
                 eventTypesSeen.length > 0
                     ? `event_types=[${[...new Set(eventTypesSeen)].join(",")}]`
@@ -508,6 +514,23 @@ function abortError(): Error {
     const error = new Error("OpenCode one-shot aborted")
     error.name = "AbortError"
     return error
+}
+
+/**
+ * OpenCode 2.0's free tier serves only OpenCode's own agents with their full
+ * tool set. Baro's evaluator is deliberately tool-less, so on a free model
+ * it is refused; say so instead of an opaque 403.
+ */
+function openCodeErrorText(
+    error: Record<string, unknown>,
+    safeEvaluator: boolean,
+): string {
+    const message = typeof error.message === "string" ? error.message : "unknown error"
+    const freeTier = JSON.stringify(error).includes("FreeTierError")
+    if (freeTier && safeEvaluator) {
+        return `${message} — baro's evaluator runs without tools, which OpenCode's free tier refuses; use a paid OpenCode model for this phase or another backend (e.g. --critic-llm, --dialogue-llm)`
+    }
+    return message
 }
 
 async function installSafeEvaluatorAgent(

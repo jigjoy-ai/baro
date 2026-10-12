@@ -16,6 +16,7 @@ import {
     CliParticipant,
     type CliRunSummaryCore,
 } from "../cli-participant.js"
+import { openCodeMajor, openCodeRunArgs } from "./cli-version.js"
 
 export interface OpenCodeCliParticipantOptions {
     cwd: string
@@ -66,6 +67,8 @@ export class OpenCodeCliParticipant extends CliParticipant<OpenCodeRunSummary> {
     }
     private sessionId: string | null = null
     private sawStepFinish = false
+    private stepOpen = false
+    private sawError = false
     private toolCallCount = 0
 
     constructor(agentId: string, opts: OpenCodeCliParticipantOptions) {
@@ -91,13 +94,27 @@ export class OpenCodeCliParticipant extends CliParticipant<OpenCodeRunSummary> {
     }
 
     protected override buildArgs(): string[] {
-        const args = ["run", "--format", "json"]
-        if (this.options.skipPermissions) {
-            args.push("--dangerously-skip-permissions")
-        }
-        if (this.options.model) args.push("-m", this.options.model)
-        if (this.options.cwd) args.push("--dir", this.options.cwd)
-        return args
+        return openCodeRunArgs(this.options.opencodeBin ?? "opencode", {
+            cwd: this.options.cwd,
+            model: this.options.model,
+            autoApprove: this.options.skipPermissions,
+        })
+    }
+
+    /**
+     * OpenCode 2.0 closes a tool step with `step_finish` but ends the final
+     * answer with no frame at all; the clean exit is the only sign the turn
+     * finished. Without this the last step stayed open and the Critic had no
+     * terminal turn to review.
+     */
+    protected override beforeClose(code: number | null, signal: NodeJS.Signals | null): void {
+        if (code !== 0 || signal != null || this.sawError || !this.stepOpen) return
+        if (openCodeMajor(this.options.opencodeBin ?? "opencode") < 2) return
+        this.consumeLine({
+            type: "step_finish",
+            ...(this.sessionId ? { sessionID: this.sessionId } : {}),
+            part: { type: "step-finish", reason: "stop", synthesized: true },
+        })
     }
 
     protected override summarize(): OpenCodeRunSummary {
@@ -119,7 +136,12 @@ export class OpenCodeCliParticipant extends CliParticipant<OpenCodeRunSummary> {
         }
         // Completion evidence for the success predicate — exit 0 alone is
         // not sufficient (see OpenCodeRunSummary field docs).
-        if (parsed.type === "step_finish") this.sawStepFinish = true
+        if (parsed.type === "step_finish") {
+            this.sawStepFinish = true
+            this.stepOpen = false
+        }
+        if (parsed.type === "step_start") this.stepOpen = true
+        if (parsed.type === "error") this.sawError = true
         // Real opencode emits `tool_use`; `tool_call` is the legacy fallback.
         if (parsed.type === "tool_use" || parsed.type === "tool_call") {
             this.toolCallCount += 1

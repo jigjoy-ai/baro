@@ -304,6 +304,7 @@ export abstract class CliParticipant<
             if (this.doneSettled) return
             this.exitCode = code
             this.exitSignal = signal
+            this.beforeClose(code, signal)
             this.failReady(
                 this.spawnError ?? new Error(this.readyFailureMessage(code)),
             )
@@ -328,6 +329,9 @@ export abstract class CliParticipant<
             this.settleDone(this.summarize())
         })
     }
+
+    /** Last word before the process is settled: every stdout line is in. */
+    protected beforeClose(_code: number | null, _signal: NodeJS.Signals | null): void {}
 
     /** Kill the harness process, escalating if it ignores the soft signal. */
     abort(signal: NodeJS.Signals = "SIGTERM"): void {
