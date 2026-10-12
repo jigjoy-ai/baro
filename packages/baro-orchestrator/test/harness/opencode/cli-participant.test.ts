@@ -213,6 +213,52 @@ console.log(JSON.stringify({ type: "step_finish", timestamp: 2, sessionID: "env-
         })
     })
 
+    it("closes OpenCode 2.0's final answer step on a clean exit", async () => {
+        await withTempDir("baro-opencode-cli-", async (dir) => {
+            const bin = join(dir, "fake-opencode-2.mjs")
+            // 2.0's shape: the tool step ends with step_finish, the answer step does not.
+            const events = [
+                { type: "step_start", sessionID: "s2", part: { type: "step-start" } },
+                { type: "tool_use", sessionID: "s2", part: { type: "tool", tool: "write", callID: "t1", state: { status: "completed", input: {}, output: "ok" } } },
+                { type: "step_finish", sessionID: "s2", part: { type: "step-finish", tokens: { input: 1, output: 1 } } },
+                { type: "step_start", sessionID: "s2", part: { type: "step-start" } },
+                { type: "text", sessionID: "s2", part: { type: "text", text: "done" } },
+            ]
+            writeFileSync(
+                bin,
+                `#!/usr/bin/env node\nif (process.argv.includes("--version")) { console.log("opencode v2.0.27"); process.exit(0) }\n` +
+                    `const events = ${JSON.stringify(events)};\nfor (const event of events) console.log(JSON.stringify(event));\n`,
+            )
+            chmodSync(bin, 0o755)
+            const pinned = process.env.BARO_OPENCODE_MAJOR
+            process.env.BARO_OPENCODE_MAJOR = "2"
+            try {
+                const env = captureEnv()
+                env.deliverFunctionCall = (() => {}) as typeof env.deliverFunctionCall
+                env.deliverFunctionCallOutput = (() => {}) as typeof env.deliverFunctionCallOutput
+                const participant = new OpenCodeCliParticipant("opencode-agent", {
+                    cwd: dir,
+                    prompt: "do the work",
+                    opencodeBin: bin,
+                })
+                participant.start(env)
+                await participant.ready
+                await participant.done
+
+                const finishes = env.events.filter(
+                    (event) => OpenCodeSystem.is(event) && event.data.subtype === "step_finish",
+                )
+                // The real tool-step frame plus the closing one for the answer step.
+                assert.equal(finishes.length, 2)
+                const last = env.events.filter((event) => OpenCodeSystem.is(event)).at(-1)
+                assert.ok(last && OpenCodeSystem.is(last) && last.data.subtype === "step_finish")
+            } finally {
+                if (pinned === undefined) delete process.env.BARO_OPENCODE_MAJOR
+                else process.env.BARO_OPENCODE_MAJOR = pinned
+            }
+        })
+    })
+
     it("reports a failed phase when the fake OpenCode process exits nonzero", async () => {
         await withTempDir("baro-opencode-cli-fail-", async (dir) => {
             const env = captureEnv()
