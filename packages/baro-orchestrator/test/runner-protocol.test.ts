@@ -313,4 +313,55 @@ describe("bundled runner v2 protocol", () => {
         finish({ success: true, durationSecs: 1, error: null })
         await tick()
     })
+
+    it("rejects a reply that arrives after baro decided on its own", async () => {
+        const sent: Array<Record<string, unknown>> = []
+        const writes: string[] = []
+        let bind!: (runId: string, sink: { writable: boolean; destroyed: boolean; write(data: string, callback?: (error?: Error | null) => void): boolean } | null) => void
+        let emitChild!: (event: { type: string; agentId: string; data: unknown }) => void
+        let finish!: (outcome: { success: boolean; durationSecs: number; error: string | null }) => void
+        const outcome = new Promise<{ success: boolean; durationSecs: number; error: string | null }>((resolve) => {
+            finish = resolve
+        })
+        const controller = new RunnerProtocolController(
+            (message) => sent.push(message as Record<string, unknown>),
+            async (_dispatch, emit, _signal, bindCommandSink) => {
+                bind = bindCommandSink
+                emitChild = emit
+                return outcome
+            },
+        )
+        controller.handle({ t: "dispatch_run", runId: "late", goal: "x", workspaceId: "default", parallel: 1, timeoutSecs: 60, conversation: true })
+        bind("late", {
+            writable: true,
+            destroyed: false,
+            write(data, callback) {
+                writes.push(data)
+                callback?.()
+                return true
+            },
+        }, false)
+        emitChild({
+            type: "conversation_needs_input",
+            agentId: "late",
+            data: { type: "conversation_needs_input", session_id: "session-1", after_request_id: "request-1" },
+        })
+        emitChild({
+            type: "conversation_clarification_resolved",
+            agentId: "late",
+            data: { type: "conversation_clarification_resolved" },
+        })
+        controller.handle({
+            t: "conversation_message",
+            runId: "late",
+            messageId: "late-1",
+            sessionId: "session-1",
+            afterRequestId: "request-1",
+            text: "Too late.",
+        })
+        assert.equal(writes.length, 0)
+        assert.ok(sent.some((message) => message.t === "command_ack" && message.commandId === "late-1" && message.status === "rejected"))
+        finish({ success: true, durationSecs: 1, error: null })
+        await tick()
+    })
 })

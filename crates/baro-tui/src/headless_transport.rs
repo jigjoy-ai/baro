@@ -167,13 +167,13 @@ impl StdinHub {
         }
     }
 
-    /// Wait for a correlated pre-run conversation message. Unlike the mode
-    /// proposal this must never auto-accept an assumption: EOF closes the gate,
-    /// otherwise the durable session remains alive until the user answers.
+    /// Wait for a correlated pre-run conversation message. `None` on EOF or
+    /// after `timeout`, so the caller decides instead of holding the run.
     pub(crate) async fn await_conversation_message(
         &'static self,
         session_id: &str,
         after_request_id: &str,
+        timeout: Duration,
     ) -> Option<String> {
         let mut gate = self.conversation_gate.lock().unwrap();
         let mut backlog = self.conversation_backlog.lock().unwrap();
@@ -194,9 +194,18 @@ impl StdinHub {
         drop(backlog);
         drop(gate);
         self.ensure_reader();
-        match rx.await {
-            Ok(Some(text)) if !text.trim().is_empty() => Some(text),
-            _ => None,
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(Some(text))) if !text.trim().is_empty() => Some(text),
+            Ok(_) => None,
+            Err(_) => {
+                let mut gate = self.conversation_gate.lock().unwrap();
+                if gate.as_ref().is_some_and(|pending| {
+                    pending.session_id == session_id && pending.after_request_id == after_request_id
+                }) {
+                    *gate = None;
+                }
+                None
+            }
         }
     }
 }
@@ -415,11 +424,33 @@ mod tests {
         assert_eq!(confirm, None);
         let conversation = tokio::time::timeout(
             std::time::Duration::from_millis(50),
-            hub.await_conversation_message("session-7", "request-4"),
+            hub.await_conversation_message(
+                "session-7",
+                "request-4",
+                std::time::Duration::from_secs(60),
+            ),
         )
         .await
         .expect("closed conversation input must return immediately");
         assert_eq!(conversation, None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_unanswered_conversation_gate_times_out_and_closes() {
+        let hub: &'static StdinHub = Box::leak(Box::new(StdinHub::new()));
+        hub.reader_started
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let reply = hub
+            .await_conversation_message(
+                "session-7",
+                "request-3",
+                std::time::Duration::from_millis(20),
+            )
+            .await;
+
+        assert_eq!(reply, None);
+        assert!(hub.conversation_gate.lock().unwrap().is_none());
     }
 
     #[test]
