@@ -3952,6 +3952,12 @@ async fn accept_conversation_response(
             if !headless {
                 return Ok(());
             }
+            // stdin being open proves nothing: the runner keeps it piped for
+            // cancel/agent messages, so without an answering peer this waited
+            // for the 180-minute cloud cap.
+            if !headless_conversation_has_a_peer() {
+                return resolve_clarification_without_a_human(app, cwd, tx, &message);
+            }
             println!(
                 "{}",
                 serde_json::json!({
@@ -3982,6 +3988,12 @@ async fn accept_conversation_response(
             }
         }
     }
+}
+
+/// Only `--with-dialogue` promises someone will answer; `BARO_COORDINATION`
+/// alone enables the dialogue participant but not a human behind it.
+fn headless_conversation_has_a_peer() -> bool {
+    std::env::var("BARO_WITH_DIALOGUE").is_ok_and(|value| value == "1")
 }
 
 /// How many times one headless run may answer its own clarification before
