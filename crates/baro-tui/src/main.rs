@@ -3958,17 +3958,19 @@ async fn accept_conversation_response(
             if !headless_conversation_has_a_peer() {
                 return resolve_clarification_without_a_human(app, cwd, tx, &message);
             }
+            let reply_timeout = headless_conversation_reply_timeout();
             println!(
                 "{}",
                 serde_json::json!({
                     "type": "conversation_needs_input",
                     "session_id": app.conversation.session_id(),
                     "after_request_id": request_id,
+                    "reply_timeout_secs": reply_timeout.as_secs(),
                 })
             );
             let session_id = app.conversation.session_id().to_string();
             match StdinHub::global()
-                .await_conversation_message(&session_id, &request_id)
+                .await_conversation_message(&session_id, &request_id, reply_timeout)
                 .await
             {
                 Some(text) => submit_conversation_message(
@@ -3994,6 +3996,16 @@ async fn accept_conversation_response(
 /// alone enables the dialogue participant but not a human behind it.
 fn headless_conversation_has_a_peer() -> bool {
     std::env::var("BARO_WITH_DIALOGUE").is_ok_and(|value| value == "1")
+}
+
+/// A reply that never comes must not hold the run until the cloud's runtime cap.
+fn headless_conversation_reply_timeout() -> std::time::Duration {
+    let secs = std::env::var("BARO_CONVERSATION_REPLY_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .unwrap_or(30 * 60);
+    std::time::Duration::from_secs(secs)
 }
 
 /// How many times one headless run may answer its own clarification before

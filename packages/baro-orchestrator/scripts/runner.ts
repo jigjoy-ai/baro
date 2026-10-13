@@ -1109,7 +1109,10 @@ export class RunnerProtocolController {
             }
             return
         }
-        if (event.type === "conversation_response" && data.kind === "ready") {
+        if (
+            (event.type === "conversation_response" && data.kind === "ready")
+            || event.type === "conversation_clarification_resolved"
+        ) {
             this.frontDoorGate = null
             return
         }
@@ -1124,6 +1127,7 @@ export class RunnerProtocolController {
             "conversation_responded",
             "conversation_failed",
             "conversation_needs_input",
+            "conversation_clarification_resolved",
             "init",
         ].includes(event.type)) return
         let events = this.conversationEventReplay.get(runId)
