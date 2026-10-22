@@ -517,7 +517,7 @@ setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_0
         })
     })
 
-    it("allows explicit dependency reads only under Seatbelt and never trusts the real path", async () => {
+    it("allows dependency reads through the manager link on every platform and never trusts the real path", async () => {
         await withManagerDependencyLink(async ({ origin, story, dependencyRoot }) => {
             mkdirSync(join(story, "untrusted"))
             symlinkSync(join(origin, ".git"), join(story, "untrusted", "vendor"), "dir")
@@ -533,13 +533,68 @@ setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_0
                 command: "cat untrusted/vendor/config",
             })
 
-            if (process.platform === "darwin" && existsSync("/usr/bin/sandbox-exec")) {
-                assert.equal(throughLink, "dependency-ok\n")
-            } else {
-                assert.match(throughLink, /rejected by project containment guard/)
-            }
+            assert.equal(throughLink, "dependency-ok\n")
             assert.match(directTarget, /rejected by project containment guard/)
             assert.match(sameNamedUntrustedLink, /rejected by project containment guard/)
+        })
+    })
+
+    it("reads and executes through a dependency link without the write sandbox, refusing writes (#182)", async () => {
+        await withManagerDependencyLink(async ({ story, dependencyRoot }) => {
+            const bin = join(dependencyRoot, ".bin")
+            mkdirSync(bin)
+            writeFileSync(join(bin, "fixture-tool"), "#!/bin/sh\necho fixture-tool-ran\n")
+            chmodSync(join(bin, "fixture-tool"), 0o755)
+            const dependencyFile = join(dependencyRoot, "fixture", "index.js")
+
+            await withPortableShellGuard(async () => {
+                const bash = namedTool(createStoryTools(story), "bash")
+                for (const command of [
+                    "ls node_modules/.bin",
+                    "ls ./node_modules",
+                    "test -d node_modules && echo present",
+                    "grep -r dependency-ok node_modules/fixture",
+                    "head -1 node_modules/fixture/index.js | wc -l",
+                ]) {
+                    const result = await invoke(bash, { command })
+                    assert.doesNotMatch(result, /containment guard/, command)
+                }
+                assert.equal(
+                    await invoke(bash, { command: "node_modules/.bin/fixture-tool" }),
+                    "fixture-tool-ran\n",
+                )
+
+                for (const command of [
+                    "cp README.md node_modules/fixture/index.js",
+                    "mv README.md node_modules/fixture/index.js",
+                    "cat README.md | tee node_modules/fixture/index.js",
+                    "cat README.md > node_modules/fixture/index.js",
+                    "touch node_modules/fixture/index.js",
+                    "ln -sf README.md node_modules/fixture/index.js",
+                    "find node_modules -name index.js -delete",
+                    "sort -o node_modules/fixture/index.js README.md",
+                    "cd node_modules/fixture && cat index.js",
+                ]) {
+                    const result = await invoke(bash, { command })
+                    assert.match(result, /rejected by project containment guard/, command)
+                }
+                assert.equal(readFileSync(dependencyFile, "utf8"), "dependency-ok\n")
+            })
+        })
+    })
+
+    it("does not treat a project-local script named like a read command as that command", async () => {
+        await withManagerDependencyLink(async ({ story }) => {
+            mkdirSync(join(story, "scripts"))
+            writeFileSync(join(story, "scripts", "cat"), "#!/bin/sh\necho local\n")
+            chmodSync(join(story, "scripts", "cat"), 0o755)
+            await withPortableShellGuard(async () => {
+                const bash = namedTool(createStoryTools(story), "bash")
+                const result = await invoke(bash, {
+                    command: "scripts/cat node_modules/fixture/index.js",
+                })
+                assert.match(result, /rejected by project containment guard/)
+            })
         })
     })
 
@@ -700,7 +755,7 @@ setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_0
                 for (const command of commands) {
                     const result = await invoke(bash, { command })
                     assert.match(result, /rejected by project containment guard/)
-                    assert.match(result, /node inline code flags require the macOS write sandbox/)
+                    assert.match(result, /node inline code flags require a process write sandbox/)
                 }
             })
         })
@@ -743,7 +798,7 @@ setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_0
                     const result = await invoke(bash, { command })
                     assert.match(result, /rejected by project containment guard/, command)
                     assert.match(result, interpreter, command)
-                    assert.match(result, /require the macOS write sandbox/, command)
+                    assert.match(result, /require a process write sandbox/, command)
                 }
 
                 for (const command of [

@@ -60,6 +60,8 @@ export interface ShellAccessContext {
     git: ReturnType<typeof gitSandboxPaths>
     dependencyTargets: string[]
     collaboration: CollaborationShellAccess | null
+    /** True only when the command will run under the macOS Seatbelt write profile. */
+    writeSandbox: boolean
 }
 
 export function shellAccessContext(
@@ -74,6 +76,7 @@ export function shellAccessContext(
             git.commonWorktreeRoot,
         ),
         collaboration: resolveCollaborationShellAccess(options.collaboration),
+        writeSandbox: hasMacosWriteSandbox(),
     }
 }
 
@@ -174,6 +177,37 @@ function withDependencyToolHint(rejection: string, word: string): string {
     const segments = word.split(/[\\/]/u)
     if (!segments.some((segment) => depDirNames.has(segment))) return rejection
     return `${rejection}; run the project's installed tools with \`npx <tool>\` or \`npm run <script> -- <args>\` rather than reaching into the dependency dir directly`
+}
+
+/**
+ * Commands with no option that writes or spawns on a file operand, so a
+ * manager-owned dependency link may be read through them without the write
+ * sandbox (redirections are checked separately). Tools like `sort -o`,
+ * `tree -o`, `find -exec`, `rg --pre`, `file -C`, and `less` stay out.
+ */
+function isDependencyReadCommand(commandWord: string): boolean {
+    return new Set([
+        "cat",
+        "head",
+        "tail",
+        "ls",
+        "wc",
+        "grep",
+        "egrep",
+        "fgrep",
+        "diff",
+        "cmp",
+        "stat",
+        "du",
+        "readlink",
+        "realpath",
+        "test",
+        "[",
+        "md5sum",
+        "sha1sum",
+        "sha256sum",
+        "shasum",
+    ]).has(commandWord)
 }
 
 function dependencySymlinkTargets(cwd: string, commonRoot: string | null): string[] {
@@ -305,7 +339,8 @@ function containmentRejection(
     let opaqueArgumentPending = false
     let opaqueInterpreter: OpaqueInterpreter | null = null
     let collaborationInvocation = false
-    const canSandboxOpaqueCode = hasMacosWriteSandbox()
+    let dependencyRead = false
+    const canSandboxOpaqueCode = access.writeSandbox
 
     for (const token of parsed) {
         if (token.kind === "operator") {
@@ -329,6 +364,7 @@ function containmentRejection(
             opaqueArgumentPending = false
             opaqueInterpreter = null
             collaborationInvocation = false
+            dependencyRead = false
             continue
         }
 
@@ -395,6 +431,8 @@ function containmentRejection(
                 commandName,
             )
             opaqueInterpreter = classifyOpaqueInterpreter(commandName)
+            // A bare name only: a project-local `scripts/cat` is not the system tool.
+            dependencyRead = word === commandName && isDependencyReadCommand(word)
             cdAwaitingPath = commandName === "cd"
             continue
         }
@@ -413,7 +451,7 @@ function containmentRejection(
                 if (!canSandboxOpaqueCode) {
                     return (
                         `${opaqueInterpreter.label} inline code flags ` +
-                        "require the macOS write sandbox"
+                        "require a process write sandbox, which this shell does not run under"
                     )
                 }
                 opaqueArgumentPending = opaqueInlineCode === "next-argument"
@@ -481,7 +519,7 @@ function containmentRejection(
             false,
             access,
             false,
-            canSandboxOpaqueCode,
+            canSandboxOpaqueCode || dependencyRead,
         )
         if (rejected) return withDependencyToolHint(rejected, word)
     }
@@ -874,7 +912,7 @@ function tokenizeShell(command: string): ShellToken[] | string {
                 continue
             }
             if (quote === '"' && (ch === "`" || ch === "$")) {
-                return "shell expansion inside double quotes is not allowed"
+                return "shell expansion inside double quotes is not allowed; use single quotes for literal text"
             }
             word += ch
             continue
@@ -935,7 +973,8 @@ export function hookShellAccessContext(
     root: string,
     collabCommandPath: string | null,
 ): ShellAccessContext {
-    const access = shellAccessContext(root, {})
+    // Claude Code runs the command itself, outside baro's Seatbelt profile.
+    const access = { ...shellAccessContext(root, {}), writeSandbox: false }
     if (!collabCommandPath || !path.isAbsolute(collabCommandPath)) return access
     try {
         const commandPath = path.resolve(collabCommandPath)
@@ -966,6 +1005,7 @@ const HOOK_SOURCE_GRAPH: ReadonlyArray<(...args: never[]) => unknown> = [
     isEnvironmentAssignment,
     isSedAwkScriptOperand,
     withDependencyToolHint,
+    isDependencyReadCommand,
     hasMacosWriteSandbox,
     classifyNodeInlineCodeFlag,
     classifyPythonInlineCodeFlag,

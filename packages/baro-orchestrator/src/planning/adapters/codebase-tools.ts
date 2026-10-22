@@ -1011,7 +1011,7 @@ function prepareShellSandbox(
     access: ShellAccessContext,
 ): PreparedShellSandbox {
     const inheritedEnv = containedShellEnvironment(process.env)
-    if (!hasMacosWriteSandbox()) {
+    if (!access.writeSandbox) {
         return {
             executable: "/bin/sh",
             args: ["-c", command],

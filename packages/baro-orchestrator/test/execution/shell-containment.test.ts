@@ -6,6 +6,7 @@ import {
     mkdirSync,
     readFileSync,
     rmSync,
+    symlinkSync,
     writeFileSync,
 } from "node:fs"
 import { join } from "node:path"
@@ -129,6 +130,47 @@ describe("shell containment — one rule, the native lane and the Claude hook", 
                 shellContainmentRefusal(worktree, CONTAINED, access),
                 null,
             )
+        })
+    })
+
+    it("the hook never claims baro's write sandbox: Claude Code runs the command outside it (#182)", async () => {
+        await withTempDir("shell-containment-deps-", async (dir) => {
+            const origin = join(dir, "origin")
+            const story = join(dir, "story")
+            mkdirSync(origin)
+            const git = (...args: string[]) =>
+                execFileSync("git", args, { cwd: origin, stdio: "ignore" })
+            git("init")
+            writeFileSync(join(origin, "README.md"), "base\n")
+            git("add", "-A")
+            git("-c", "user.name=Baro", "-c", "user.email=baro@example.invalid", "commit", "-m", "base")
+            git("worktree", "add", "-b", "story-deps", story)
+            mkdirSync(join(origin, "node_modules", "fx"), { recursive: true })
+            writeFileSync(join(origin, "node_modules", "fx", "index.js"), "ok\n")
+            symlinkSync(join(origin, "node_modules"), join(story, "node_modules"), "dir")
+            const hooks = installStoryHooks(dir, story)
+
+            const access = hookShellAccessContext(story, null)
+            assert.equal(access.writeSandbox, false)
+            for (const command of [
+                "ls node_modules/.bin",
+                "cat node_modules/fx/index.js",
+                "grep -r ok node_modules/fx",
+            ]) {
+                assert.equal(shellContainmentRefusal(story, command, access), null, command)
+            }
+            for (const [command, reason] of [
+                ["cp README.md node_modules/fx/index.js", /escapes the project/],
+                ["cat README.md > node_modules/fx/index.js", /redirection target/],
+                ["node -e 'process.exit(0)'", /inline code flags require a process write sandbox/],
+            ] as const) {
+                assert.match(shellContainmentRefusal(story, command, access) ?? "", reason, command)
+            }
+
+            // The serialized hook carries the same classification.
+            assert.equal(runPreBash(hooks, "cat node_modules/fx/index.js"), "")
+            const denied = JSON.parse(runPreBash(hooks, "node -e 'process.exit(0)'"))
+            assert.equal(denied.hookSpecificOutput.permissionDecision, "deny")
         })
     })
 
