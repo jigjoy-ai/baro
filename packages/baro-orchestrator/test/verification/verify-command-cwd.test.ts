@@ -5,6 +5,7 @@ import { describe, it } from "node:test"
 
 import {
     defaultSleep,
+    integrationCwdResolver,
     resolveCommandCwd,
     RETRY_BACKOFF_MS,
 } from "../../src/verification/command-cwd.js"
@@ -90,6 +91,20 @@ describe("resolveCommandCwd", () => {
 
             assert.equal(resolveCommandCwd(runCwd, outside), runCwd)
             assert.equal(resolveCommandCwd(runCwd, join(dir, "gone")), runCwd)
+        })
+    })
+
+    it("remaps a workspace under a vanished integration root onto the fallback root", async () => {
+        await withTempDir("baro-cwd-goneintegration-", async (dir) => {
+            const removedRun = join(dir, "baro-worktrees", "run-1", "__run")
+            const hostRepo = join(dir, "host")
+            const twin = join(hostRepo, "packages", "baro-dsh")
+            mkdirSync(twin, { recursive: true })
+
+            assert.equal(
+                resolveCommandCwd(hostRepo, join(removedRun, "packages", "baro-dsh")),
+                twin,
+            )
         })
     })
 
@@ -219,6 +234,32 @@ describe("verifyBuild working-directory resolution", () => {
 
             assert.equal(result.ok, true)
             assertRanIn(log, runCwd)
+        })
+    })
+
+    it("runs a workspace spec in its host twin once the integration root is gone", async () => {
+        await withTempDir("baro-verify-cwd-goneintegration-", async (dir) => {
+            const integrationRoot = join(dir, "baro-worktrees", "run-1", "__run")
+            const hostRepo = join(dir, "host")
+            const twin = join(hostRepo, "packages", "baro-dsh")
+            mkdirSync(twin, { recursive: true })
+            const log = join(dir, "cwd.log")
+
+            const result = await verifyBuild(integrationRoot, {
+                emitActivity: () => {},
+                sleep: async () => {},
+                hostRepoRoot: hostRepo,
+                resolveRunCwd: integrationCwdResolver(integrationRoot, hostRepo),
+                plan: planOf({
+                    label: "node --test (test)",
+                    tool: process.execPath,
+                    args: cwdProbe(log),
+                    cwd: join(integrationRoot, "packages", "baro-dsh"),
+                }),
+            })
+
+            assert.equal(result.ok, true)
+            assertRanIn(log, twin)
         })
     })
 
