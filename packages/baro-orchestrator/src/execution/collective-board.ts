@@ -3059,12 +3059,19 @@ export class CollectiveBoard extends SerializedObserver {
                     : {}),
                 ...(surface ? { surface } : {}),
                 ...(recovery ? { recovery } : {}),
-                // Only a host-suspended story is resumed: the spawn must
-                // re-base through the host-owned step rather than start from
-                // a fresh worktree that abandons the preserved attempt.
+                // A host-suspended or unjudged story re-bases through the
+                // host-owned step rather than starting from a fresh worktree
+                // that abandons the preserved attempt.
                 ...(recovery?.kind === "dependency"
                     ? { resume: { preservedBranch: recovery.branch ?? null } }
-                    : {}),
+                    : recovery?.branch && isUnjudgedRecovery(recovery.kind)
+                      ? {
+                            resume: {
+                                preservedBranch: recovery.branch,
+                                reverify: true as const,
+                            },
+                        }
+                      : {}),
             },
         })
         this.offers.recordOffer(offered.data)
@@ -3911,6 +3918,12 @@ function isOperationalFailure(
     // in the operational lane.
     return failure.code !== "acceptance_not_met" &&
         failure.code !== "canonical_check_failed"
+}
+
+/** An attempt that died here was never judged, so its commits may already be
+ * the answer: the next offer re-runs the gate on them before an agent. */
+function isUnjudgedRecovery(kind: string): boolean {
+    return kind === "infrastructure" || kind === "transport"
 }
 
 function failureImplicatesWorkerRoute(failure: StoryFailureData): boolean {

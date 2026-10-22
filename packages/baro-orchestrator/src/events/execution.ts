@@ -195,10 +195,14 @@ export interface RecoveryStartedData {
 export const RecoveryStarted =
     defineSemanticEvent<RecoveryStartedData>("recovery_started")
 
-/** Set only when this attempt resumes a story the host suspended; the
- *  preserved ref is null when no recovery material survived cleanup. */
+/** Set when this attempt resumes a story the host suspended, or re-verifies
+ *  an attempt nobody judged; the preserved ref is null when no recovery
+ *  material survived cleanup. */
 export interface StoryResumeDirective {
     readonly preservedBranch: string | null
+    /** Re-run the story's gate on the preserved commits before spending an
+     *  agent attempt; a red gate falls back to a fresh worktree. */
+    readonly reverify?: true
 }
 
 /**
@@ -226,9 +230,9 @@ export interface StorySpawnRequestData {
         reason: string
         branch?: string
     }
-    /** Present only on a re-offer of a host-suspended story: the spawn must
-     * go through the host-owned resume step so the recorded creation SHA
-     * moves with the re-base instead of staying on a stale one. */
+    /** Present only on a re-offer of a host-suspended or unjudged story: the
+     * spawn must go through the host-owned resume step so the recorded
+     * creation SHA moves with the re-base instead of staying on a stale one. */
     resume?: StoryResumeDirective
     offerId?: string
     runId?: string

@@ -65,7 +65,7 @@ const DEFAULT_SETTLE_MS = 20_000
  * have been seen in the wild: the runner reporting no exit status, and the Go
  * toolchain reporting its own child as `signal: killed` under memory pressure.
  */
-function wasKilled(command: { status: string; tail?: string }): boolean {
+export function gateCommandWasKilled(command: { status: string; tail?: string }): boolean {
     if (command.status === "passed") return false
     const tail = command.tail ?? ""
     return /exited with code null/u.test(tail) || /signal: (killed|terminated)/u.test(tail)
@@ -186,7 +186,7 @@ export class ContinuousGateRunner extends BaseObserver {
         // A command we killed (no exit status) says nothing about the agent's
         // work. Reporting it as a failure once told an agent its tests were
         // broken when only our own gate had been cut short.
-        if (result.commands.some((command) => wasKilled(command))) {
+        if (result.commands.some((command) => gateCommandWasKilled(command))) {
             throw new Error("a gate command was killed before it reported")
         }
         // A skipped command (tool not installed, containment cut short, a

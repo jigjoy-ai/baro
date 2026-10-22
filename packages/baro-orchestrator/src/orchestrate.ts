@@ -111,7 +111,8 @@ import {
 import { provesOnlyHygiene } from "./verification/hygiene-command.js"
 import { RunVerifier } from "./verification/run-verifier.js"
 import { Sentry } from "./execution/sentry.js"
-import { StoryFactory } from "./market/story-factory.js"
+import { StoryFactory, type StoryFactoryOptions } from "./market/story-factory.js"
+import { runCommitGate } from "./execution/commit-reverification.js"
 import { WorkContextProvider } from "./market/work-context-provider.js"
 import { reportGoalPreconditions } from "./goal/goal-precondition-report.js"
 import {
@@ -778,6 +779,7 @@ export async function orchestrate(
     let shutdownWorktrees: WorktreeManager | null = null
     let integrationWorktree: IntegrationWorktree | null = null
     let continuousGate: ContinuousGateRunner | null = null
+    let commitGate: StoryFactoryOptions["commitGate"]
     let mergeAwareness: MergeAwarenessRunner | null = null
     let overlapAwareness: OverlapAwarenessRunner | null = null
     let attemptRecall: AttemptRecallRunner | null = null
@@ -1433,6 +1435,8 @@ export async function orchestrate(
             })
             continuousGate.join(env)
         }
+        commitGate = (cwd, signal) =>
+            runCommitGate(cwd, { plan: verifyPlan, hostRepoRoot: repoRoot, signal })
         // Tell still-working agents what a sibling landed. A story once wrote
         // two files, then died at integration against stories that had merged
         // while it worked — the bus carried every one of those merges and no
@@ -1683,6 +1687,7 @@ export async function orchestrate(
         requireWorktree:
             worktrees !== null &&
             (coordinationMode === "collective" || integrationWorktree !== null),
+        commitGate,
         collaboration:
             collaborationConfig && collaborationBridge
                 ? {
