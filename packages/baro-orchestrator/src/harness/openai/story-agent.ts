@@ -252,6 +252,8 @@ export class OpenAIStoryAgent extends BaseObserver {
     private readonly liveSurface: {
         writes: string[]
         ownedElsewhere: Record<string, string>
+        regions?: Readonly<Record<string, readonly string[]>>
+        shared?: Readonly<Record<string, readonly string[]>>
     } | null
     private readonly collaborationAccess: StoryCollaborationAccess | null
     /** Rendered rule revisions awaiting the next inference round boundary.
@@ -323,6 +325,8 @@ export class OpenAIStoryAgent extends BaseObserver {
             ? {
                   writes: [...spec.surface.writes],
                   ownedElsewhere: { ...spec.surface.ownedElsewhere },
+                  regions: spec.surface.regions,
+                  shared: spec.surface.shared,
               }
             : null
         this.collaborationAccess = opts.collaboration ?? null
@@ -448,6 +452,8 @@ export class OpenAIStoryAgent extends BaseObserver {
                 this.liveSurface.ownedElsewhere,
                 event.data.surface.ownedElsewhere,
             )
+            this.liveSurface.regions = event.data.surface.regions
+            this.liveSurface.shared = event.data.surface.shared
             this.pendingRuleUpdates.push(
                 this.renderSurfaceRuleUpdate(event.data.graphVersion),
             )

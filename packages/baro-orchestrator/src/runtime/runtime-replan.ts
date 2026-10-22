@@ -7,7 +7,12 @@ import {
     type PrdStory,
 } from "../prd.js"
 import { writeSurfaceOf } from "../planning/domain/dependency-evidence.js"
-import { isActiveOwner, surfacesOverlap } from "../execution/write-surface.js"
+import { isActiveOwner } from "../execution/write-surface.js"
+import {
+    conflictingWritePaths,
+    parseWriteEntry,
+    writeEntriesOf,
+} from "../planning/domain/write-claims.js"
 import { isVerificationOnlyStory } from "../planning/domain/verification-stories.js"
 import { validateGoalContractCoverage } from "../planning/domain/goal-contract-coverage.js"
 import type {
@@ -437,7 +442,8 @@ function validateCandidateGraph(
 /**
  * Stories removed by this same mutation are already absent from `candidate`,
  * and a story that passes no longer holds its files, so neither can own a
- * conflict. Added-vs-added pairs are out of scope for this gate.
+ * conflict. Added-vs-added pairs are out of scope for this gate. A shared
+ * file is admitted when both sides claim disjoint regions of it.
  */
 function findWriteSurfaceOverlap(
     candidate: PrdFile,
@@ -454,10 +460,9 @@ function findWriteSurfaceOverlap(
             (story) => story.id === addedStoryId,
         )
         if (!subject) continue
-        const subjectWrites = writeSurfaceOf(subject)
-        if (subjectWrites.length === 0) continue
+        if (writeSurfaceOf(subject).length === 0) continue
         for (const owner of owners) {
-            const shared = surfacesOverlap(subjectWrites, writeSurfaceOf(owner))
+            const shared = conflictingWritePaths(subject, owner)
             if (shared.length > 0) {
                 return { addedStoryId, ownerStoryId: owner.id, paths: shared }
             }
@@ -481,27 +486,30 @@ function collectWriteSurfaceOverlapFacts(
         (story) => story.id === candidateStoryId,
     )
     if (!subject) return undefined
-    const subjectWrites = writeSurfaceOf(subject)
-    if (subjectWrites.length === 0) return undefined
+    const subjectEntries = writeEntriesOf(subject)
+    if (subjectEntries.length === 0) return undefined
 
     const owners: WriteSurfaceOverlapFacts["owners"] = []
     const collided = new Set<string>()
     for (const owner of candidate.userStories) {
         if (owner.id === candidateStoryId) continue
         if (added.has(owner.id) || !isActiveOwner(owner)) continue
-        const ownedFiles = writeSurfaceOf(owner).sort()
-        const collidingPaths = surfacesOverlap(subjectWrites, ownedFiles)
+        const collidingPaths = conflictingWritePaths(subject, owner)
         if (collidingPaths.length === 0) continue
         for (const path of collidingPaths) collided.add(path)
-        owners.push({ storyId: owner.id, ownedFiles, collidingPaths })
+        owners.push({
+            storyId: owner.id,
+            ownedFiles: writeEntriesOf(owner).sort(),
+            collidingPaths,
+        })
     }
     if (owners.length === 0) return undefined
 
     return {
         candidateStoryId,
         owners,
-        remainingPaths: subjectWrites
-            .filter((path) => !collided.has(path))
+        remainingPaths: subjectEntries
+            .filter((entry) => !collided.has(parseWriteEntry(entry).path))
             .sort(),
     }
 }

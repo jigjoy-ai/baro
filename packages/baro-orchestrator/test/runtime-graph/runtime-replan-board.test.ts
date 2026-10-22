@@ -1018,6 +1018,61 @@ describe("runtime replan write-surface disjointness", () => {
         assert.ok(result.ok)
     })
 
+    it("admits an added story editing a different region of an owned file", () => {
+        const prd = surfacePrd()
+        prd.userStories[1] = {
+            ...prd.userStories[1]!,
+            writes: ["src/two.ts#parse", "src/alpha.ts"],
+        }
+        const result = validateRuntimeReplanMutation(
+            prd,
+            addOnly("S4", ["src/two.ts#render", "src/four.ts"]),
+            surfaceOptions(),
+        )
+        assert.ok(result.ok)
+        assert.deepEqual(result.addedStoryIds, ["S4"])
+    })
+
+    it("rejects the same region, or a bare path against a region owner", () => {
+        const prd = surfacePrd()
+        prd.userStories[1] = {
+            ...prd.userStories[1]!,
+            writes: ["src/two.ts#parse", "src/alpha.ts"],
+        }
+        for (const writes of [["src/two.ts#parse"], ["src/two.ts"]]) {
+            const result = validateRuntimeReplanMutation(
+                prd,
+                addOnly("S4", [...writes, "src/four.ts#main"]),
+                surfaceOptions(),
+            )
+            assert.ok(!result.ok)
+            assert.equal(result.code, "overlapping_write_surface")
+            assert.equal(
+                result.reason,
+                "overlapping write surface: story 'S4' writes src/two.ts " +
+                    "already owned by story 'S2'",
+            )
+            assert.deepEqual(result.overlap?.owners, [
+                {
+                    storyId: "S2",
+                    ownedFiles: ["src/alpha.ts", "src/two.ts#parse"],
+                    collidingPaths: ["src/two.ts"],
+                },
+            ])
+            assert.deepEqual(result.overlap?.remainingPaths, ["src/four.ts#main"])
+        }
+    })
+
+    it("rejects a region against an owner that claims the whole file", () => {
+        const result = validateRuntimeReplanMutation(
+            surfacePrd(),
+            addOnly("S4", ["src/two.ts#render"]),
+            surfaceOptions(),
+        )
+        assert.ok(!result.ok)
+        assert.equal(result.code, "overlapping_write_surface")
+    })
+
     it("admits an overlap with a story the same mutation removes", () => {
         const result = validateRuntimeReplanMutation(
             surfacePrd(),

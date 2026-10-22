@@ -16,6 +16,8 @@ export interface GateAnnounceContext {
     surface?: {
         writes: readonly string[]
         ownedElsewhere: Readonly<Record<string, string>>
+        regions?: Readonly<Record<string, readonly string[]>>
+        shared?: Readonly<Record<string, readonly string[]>>
     }
     /** Collaboration command + capability names for surface remedies. */
     collabCommand?: string
@@ -81,6 +83,8 @@ const WRITE_SURFACE: GateDisclosure = {
         const surface = ctx.surface
         if (!surface || surface.writes.length === 0) return null
         const owners = Object.entries(surface.ownedElsewhere)
+        const shared = Object.entries(surface.shared ?? {})
+        const regionsOf = (path: string) => surface.regions?.[path] ?? []
         const command = ctx.collabCommand ?? "agent-collab"
         const capability = ctx.collabCapability ?? "note"
         return [
@@ -89,8 +93,26 @@ const WRITE_SURFACE: GateDisclosure = {
             "The files this story declared it would write, and the only ones",
             "the merge gate will accept from you:",
             "",
-            ...surface.writes.map((path) => `- ${path}`),
+            ...surface.writes.map((path) =>
+                regionsOf(path).length > 0
+                    ? `- ${path} (only: ${regionsOf(path).join(", ")})`
+                    : `- ${path}`,
+            ),
             "",
+            ...(shared.length > 0
+                ? [
+                      "Shared with stories running alongside you. Edit only the",
+                      "regions you declared and leave the rest of the file as you",
+                      "found it: both diffs are merged, and a hunk that collides",
+                      "with a peer's is a conflict, not a merge:",
+                      "",
+                      ...shared.map(
+                          ([path, peers]) =>
+                              `- ${path} — also written by ${peers.join(", ")}`,
+                      ),
+                      "",
+                  ]
+                : []),
             ...(owners.length > 0
                 ? [
                       "Owned by other stories in this run. A diff touching one of",

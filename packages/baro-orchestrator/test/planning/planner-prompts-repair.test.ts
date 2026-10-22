@@ -84,6 +84,27 @@ describe("write-surface overlap remedy section", () => {
     })
 })
 
+describe("the region remedy is offered only where it can work", () => {
+    it("names it when the owner claims regions of the colliding file", () => {
+        const section = buildWriteSurfaceOverlapRemedySection({
+            candidateStoryId: "S4",
+            owners: [
+                {
+                    storyId: "S2",
+                    ownedFiles: ["src/two.ts#parse"],
+                    collidingPaths: ["src/two.ts"],
+                },
+            ],
+            remainingPaths: [],
+        })
+        assert.match(section, /^4\. Where the owner claims only named regions/mu)
+    })
+
+    it("omits it when every owner claims whole files", () => {
+        assert.ok(!buildWriteSurfaceOverlapRemedySection(twoOwners).includes("\n4. "))
+    })
+})
+
 describe("final PRD repair message with overlap facts", () => {
     it("inserts the remedy section after the defects and before the obligations", () => {
         const message = buildFinalPrdRepairMessage({

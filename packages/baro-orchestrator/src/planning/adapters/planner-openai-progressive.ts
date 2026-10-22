@@ -98,8 +98,8 @@ immediately. Do not wait for the full DAG or terminal PRD before publishing a sa
 
 Every published story uses exactly the final-PRD story fields: id, priority, title, description,
 dependsOn, retries, acceptance, tests, goalInvariantIds, model, and writes. "writes" lists the files
-this story will create or modify; the host prunes any dependsOn edge no file supports, so an edge
-you cannot justify with a file will be dropped whether you publish it or not. A published fragment is closed: each dependency
+this story will create or modify (or "path#symbol" regions of a file it shares); the host prunes
+any dependsOn edge no file supports, so an edge you cannot justify with a file will be dropped whether you publish it or not. A published fragment is closed: each dependency
 must already have been published or be present in that same fragment.
 
 Architecture obligations ride WITH their owner story: every obligation id the decision document

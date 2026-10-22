@@ -253,6 +253,10 @@ export interface StorySpawnRequestData {
         readonly writes: readonly string[]
         /** path → the story that declared it; never this story's own. */
         readonly ownedElsewhere: Readonly<Record<string, string>>
+        /** path → regions this story declared in it (`path#region`). */
+        readonly regions?: Readonly<Record<string, readonly string[]>>
+        /** path → active peers that also write it; the merge decides. */
+        readonly shared?: Readonly<Record<string, readonly string[]>>
     }
 }
 

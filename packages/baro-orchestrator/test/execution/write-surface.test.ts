@@ -3,7 +3,8 @@ import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, it } from "node:test"
 
-import { storyWriteSurface } from "../../src/execution/write-surface.js"
+import { announceGates, SPAWN_GATES } from "../../src/execution/gate-registry.js"
+import { storyWriteSurface, surfaceKey } from "../../src/execution/write-surface.js"
 import type { PrdStory } from "../../src/prd.js"
 
 function story(id: string, writes?: string[]): PrdStory {
@@ -38,6 +39,40 @@ describe("the write surface a story is dispatched with", () => {
             undefined,
             "a story is never a stranger in its own surface",
         )
+    })
+
+    it("names the regions and the peers of a file shared by region", () => {
+        const a = story("S1", ["src/verify.ts#planDeclared", "src/a.ts"])
+        const b = story("S2", ["src/verify.ts#resolveCwd"])
+        const surface = storyWriteSurface(a, [a, b])
+        assert.ok(surface)
+        assert.deepEqual(surface.writes, ["src/verify.ts", "src/a.ts"])
+        assert.deepEqual(surface.ownedElsewhere, {})
+        assert.deepEqual(surface.regions, { "src/verify.ts": ["planDeclared"] })
+        assert.deepEqual(surface.shared, { "src/verify.ts": ["S2"] })
+
+        const prompt = announceGates(SPAWN_GATES, { surface }).join("\n")
+        assert.match(prompt, /- src\/verify\.ts \(only: planDeclared\)/u)
+        assert.match(prompt, /- src\/verify\.ts — also written by S2/u)
+        assert.notEqual(
+            surfaceKey(surface),
+            surfaceKey({ writes: surface.writes, ownedElsewhere: {} }),
+            "a changed sharing set is a revision worth announcing",
+        )
+    })
+
+    it("does not call a dependency-ordered peer a co-writer", () => {
+        const a = story("S1", ["src/verify.ts#planDeclared"])
+        const b = { ...story("S2", ["src/verify.ts#resolveCwd"]), dependsOn: ["S1"] }
+        const surface = storyWriteSurface(a, [a, b])
+        assert.equal(surface?.shared, undefined)
+    })
+
+    it("adds no new keys for a story that declared plain paths", () => {
+        assert.deepEqual(Object.keys(storyWriteSurface(owner, [owner, peer])!), [
+            "writes",
+            "ownedElsewhere",
+        ])
     })
 
     it("leaves a story that declared nothing unbounded", () => {

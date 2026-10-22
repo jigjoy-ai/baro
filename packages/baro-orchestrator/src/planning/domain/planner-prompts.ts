@@ -10,6 +10,7 @@ import { formatObligationIdList } from "./obligation-coverage-report.js"
 import { renderUnownedInvariantLines } from "./invariant-coverage-report.js"
 import type { GoalInvariant } from "../../goal/goal-contract.js"
 import type { WriteSurfaceOverlapFacts } from "../../events/runtime-graph.js"
+import { REGION_SEPARATOR } from "./write-claims.js"
 
 /**
  * Planner system prompt, shared by all planner backends so providers
@@ -113,7 +114,8 @@ than two artificially-split 1-file stories.
 RUN SHAPE:
 baro can run focused, sequential, or parallel work. Parallelism is valuable only
 when stories have independent write surfaces. Do NOT create parallel stories
-that edit the same file, component, state machine, schema, or API contract.
+that edit the same component, state machine, schema, or API contract, or the
+same file — unless they edit different named regions of it (see "writes").
 
 Mode semantics:
   - focused: exactly one story. Use this for one bug, one UI/component issue,
@@ -130,7 +132,11 @@ Dependency rules:
     each create their own new files run in parallel even inside one package,
     as long as none of them adds a shared top-level name.
   - Stories editing the same file, or racing on the same state/API/schema, must
-    be sequential or become one focused story.
+    be sequential or become one focused story. The one exception: stories that
+    edit DIFFERENT functions/classes of one large file may run in parallel when
+    each declares its region in "writes" (below). Git merges different hunks
+    of a file cleanly; a wrong guess costs a merge conflict and a rebuilt
+    story, so declare regions only when the edits are genuinely apart.
   - Only add dependsOn when story B literally cannot start until A is merged
     because B imports a symbol A defines, modifies a file A creates, or relies
     on a schema/API A introduces.
@@ -149,6 +155,11 @@ Dependency rules:
     modify. Config and test-runner files that every story happens to run
     (package.json, tsconfig.json, the test command) are not a write surface
     unless this story actually edits them.
+  - A "writes" entry may name a region as "path#symbol" — the top-level
+    function, class or const the story edits — one entry per region, e.g.
+    "src/verify.ts#resolveCwd". A bare path claims the whole file. Two stories
+    sharing a file run in parallel only when BOTH name regions and no region
+    appears in both; otherwise the file is a conflict and they must be ordered.
   - Declare story-scoped "tests" commands: target the files, package or test
     names the story touches (e.g. "npm test -- test/env-flag.test.ts",
     "cargo test env_flag"), never the whole repository suite. The host proves
@@ -299,13 +310,13 @@ export function renderModeContract(decision: ModeContract): string {
     } else if (decision.mode === "sequential") {
         lines.push(
             "Planner rules: order only what genuinely has to be ordered. Sequential mode means the run has an ordered spine, not that every story hangs off the previous one.",
-            "Do not create parallel siblings that edit the same file/component/state/API. Keep each story cheap-model-capable.",
+            "Do not create parallel siblings that edit the same file/component/state/API, except region-disjoint `path#symbol` writes in one file. Keep each story cheap-model-capable.",
             "Evidence overrides maxStories: when the work enumerates over independent units (controllers, modules, packages), emit one story per unit and declare each story's `writes`. The host verifies pairwise-disjoint write surfaces and keeps the full width; batching provably disjoint units into one story puts them all on the critical path.",
         )
     } else {
         lines.push(
             "Planner rules: output parallel siblings only where write surfaces are independent.",
-            "For each sibling story, name its expected write surface in the description. Shared files/components must be sequential.",
+            "For each sibling story, name its expected write surface in the description. Shared files/components must be sequential, unless siblings declare disjoint `path#symbol` regions of the shared file.",
             "Evidence overrides maxStories: declare each story's `writes` and the host keeps any width whose surfaces are pairwise disjoint.",
         )
     }
@@ -565,7 +576,22 @@ export function buildWriteSurfaceOverlapRemedySection(
         `1. Drop the overlapping file(s) from this story and keep only the files still available to it: ${remaining}`,
         "2. Drop this story entirely if its purpose is already covered by a settled story's merged output.",
         "3. Re-scope this story onto files no settled story owns.",
+        ...(ownerClaimsRegions(facts)
+            ? [
+                  "4. Where the owner claims only named regions (`path#symbol`) of a colliding file, claim the other regions this story edits there instead of the bare path; a bare path claims the whole file.",
+              ]
+            : []),
     ].join("\n")
+}
+
+function ownerClaimsRegions(facts: WriteSurfaceOverlapFacts): boolean {
+    return facts.owners.some((owner) =>
+        owner.collidingPaths.some((path) =>
+            owner.ownedFiles.some((entry) =>
+                entry.startsWith(`${path}${REGION_SEPARATOR}`),
+            ),
+        ),
+    )
 }
 
 /**

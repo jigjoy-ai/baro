@@ -11,6 +11,7 @@ import type { ClaudeRunSummary } from "./claude/cli-participant.js"
 import type {
     StoryFailureData,
     StoryResultData,
+    StorySpawnRequestData,
 } from "../semantic-events.js"
 
 export interface StorySpec {
@@ -49,10 +50,7 @@ export interface StorySpec {
      * states it; the tools enforce it — a cheap model reads the sentence and
      * edits the file anyway.
      */
-    surface?: {
-        readonly writes: readonly string[]
-        readonly ownedElsewhere: Readonly<Record<string, string>>
-    }
+    surface?: StorySpawnRequestData["surface"]
     /** Await an exact Critic verdict before completing each candidate turn. */
     requiresQualityReview?: boolean
     /** Object-identity authority allowed to review this worker's turns. */

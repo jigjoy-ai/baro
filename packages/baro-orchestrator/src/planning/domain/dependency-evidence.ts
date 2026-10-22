@@ -15,6 +15,7 @@
  */
 
 import type { PrdStory } from "../../prd.js"
+import { conflictingWritePaths, writeClaimsOf } from "./write-claims.js"
 
 export interface UnsupportedEdge {
     readonly from: string
@@ -29,11 +30,9 @@ export interface EdgePruneResult {
 const PATH_PATTERN =
     /(?:src|test|tests|lib|app|apps|packages|crates)\/[A-Za-z0-9_@./-]+\.[A-Za-z0-9]+|package\.json|tsconfig(?:\.[a-z]+)?\.json/gu
 
-/** Files a story says it will write, when it says so at all. */
+/** Files a story says it will write, when it says so at all; regions dropped. */
 export function writeSurfaceOf(story: PrdStory): string[] {
-    const declared = (story as PrdStory & { writes?: unknown }).writes
-    if (!Array.isArray(declared)) return []
-    return normalize(declared.filter((entry): entry is string => typeof entry === "string"))
+    return [...writeClaimsOf(story).keys()]
 }
 
 /** Every path the story's own text mentions, whether it writes it or not. */
@@ -204,7 +203,8 @@ export interface DisjointWidthEvidence {
  * from guessed-at parallel edits colliding; that risk is zero for stories
  * whose declared write surfaces are pairwise disjoint (pairs ordered by a
  * dependency path may overlap — the DAG already serializes them). A story
- * that declares nothing keeps the cap: silence is not evidence.
+ * that declares nothing keeps the cap: silence is not evidence. A file both
+ * stories split into disjoint `path#region` claims does not overlap.
  */
 export function disjointWidthEvidence(
     stories: readonly PrdStory[],
@@ -233,17 +233,12 @@ export function disjointWidthEvidence(
         }
     }
 
-    const surfaces = stories.map((story) => new Set(writeSurfaceOf(story)))
     const conflicts: { a: string; b: string; path: string }[] = []
     for (let i = 0; i < stories.length; i++) {
         for (let j = i + 1; j < stories.length; j++) {
             if (reachable[i]![j] || reachable[j]![i]) continue
-            for (const path of surfaces[i]!) {
-                if (surfaces[j]!.has(path)) {
-                    conflicts.push({ a: ids[i]!, b: ids[j]!, path })
-                    break
-                }
-            }
+            const [path] = conflictingWritePaths(stories[i]!, stories[j]!)
+            if (path !== undefined) conflicts.push({ a: ids[i]!, b: ids[j]!, path })
         }
     }
     return {
