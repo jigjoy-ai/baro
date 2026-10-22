@@ -789,7 +789,7 @@ export async function orchestrate(
         gatewayBillingReconciled = true
         try {
             const billing = await gatewayBillingCoordinator.drain()
-            if (!billing.complete) {
+            if (!billing.complete && !billing.receiptsUnavailable) {
                 process.stderr.write(
                     `[billing] ${billing.unresolvedInvocationIds.length} invocation(s) ` +
                         `remain without acknowledged authoritative telemetry` +
