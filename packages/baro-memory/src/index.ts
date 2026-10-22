@@ -1,7 +1,7 @@
 /**
  * @baro/memory — Vectra-backed semantic memory shared between parallel baro
  * agents (disk-persisted LocalIndex for cross-process access; CPU-only ONNX
- * embeddings via @xenova/transformers).
+ * embeddings via @huggingface/transformers).
  */
 
 export { createMemoryStore, pruneOldSessions } from './vectra-store.js'

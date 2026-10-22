@@ -83,15 +83,20 @@ export async function createMemoryStore(
         await index.createIndex({ version: 1 })
     }
 
-    // Pin the transformers.js model cache to a writable persistent dir: the
-    // default node_modules/@xenova/transformers/.cache can be read-only on a
-    // global install, and ~/.baro/models survives so MiniLM downloads once.
-    const transformers = await import('@xenova/transformers')
-    transformers.env.cacheDir = process.env.TRANSFORMERS_CACHE || join(homedir(), '.baro', 'models')
-    const { pipeline } = transformers
-    const extractor = await pipeline('feature-extraction', cfg.embeddingModel) as unknown as EmbeddingPipeline
-
+    const extractor = await loadEmbeddingPipeline(cfg.embeddingModel)
     return new VectraMemoryStore(index, extractor, sessionPath, cfg)
+}
+
+export async function loadEmbeddingPipeline(model: string): Promise<EmbeddingPipeline> {
+    // Pin the model cache to a writable persistent dir: the package-local
+    // default can be read-only on a global install, and ~/.baro/models
+    // survives so MiniLM downloads once.
+    const transformers = await import('@huggingface/transformers')
+    transformers.env.cacheDir = process.env.TRANSFORMERS_CACHE || join(homedir(), '.baro', 'models')
+    // transformers.js 3+ defaults to fp32 on Node; q8 keeps the quantized
+    // weights (and vectors) the 2.x stack produced, so stored indexes and
+    // similarity thresholds stay valid.
+    return await transformers.pipeline('feature-extraction', model, { dtype: 'q8' }) as unknown as EmbeddingPipeline
 }
 
 /** Prevents path traversal / sensitive-dir writes via BARO_MEMORY_PATH. */
@@ -242,7 +247,7 @@ class VectraMemoryStore implements MemoryStore {
 
             // Query more than needed so we can post-filter
             const fetchK = Math.min(Math.max(maxResults * 3, 30), 200)
-            const results: QueryResult<VectraItemMetadata>[] = await this.index.queryItems(vector, fetchK)
+            const results: QueryResult<VectraItemMetadata>[] = await this.index.queryItems(vector, query, fetchK)
 
             const output: RecalledFinding[] = []
 

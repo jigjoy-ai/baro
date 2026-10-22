@@ -204,15 +204,15 @@ function printUsage() {
 }
 
 /**
- * Make the externalized embedding stack (`@xenova/transformers` + friends)
- * resolvable from the staged bundles in ~/.baro/bin.
+ * Make the externalized embedding stack (`@huggingface/transformers` +
+ * friends) resolvable from the staged bundles in ~/.baro/bin.
  *
  * The bundles run from ~/.baro/bin/cli.mjs, detached from baro-ai's own
- * node_modules, so a runtime `import("@xenova/transformers")` would walk
+ * node_modules, so a runtime `import("@huggingface/transformers")` would walk
  * ~/.baro/bin/node_modules → ~/.baro/node_modules → … and find nothing —
  * which is exactly why semantic memory silently failed to load before.
  * We point ~/.baro/bin/node_modules at the real node_modules that holds
- * @xenova (and its hoisted siblings), so the dynamic import resolves.
+ * @huggingface (and its hoisted siblings), so the dynamic import resolves.
  * Best-effort: if it can't be wired, memory is simply unavailable (the
  * MemoryLibrarian already degrades gracefully) — never fail the install.
  */
@@ -237,11 +237,11 @@ function readLinkTarget(link) {
 
 function wireMemoryDeps() {
     try {
-        const entry = require.resolve("@xenova/transformers", { paths: [PACKAGE_ROOT] })
+        const entry = require.resolve("@huggingface/transformers", { paths: [PACKAGE_ROOT] })
         const marker = `${path.sep}node_modules${path.sep}`
         const idx = entry.lastIndexOf(marker)
         if (idx === -1) {
-            console.warn("Warning: @xenova/transformers not under a node_modules dir; skipping memory wiring")
+            console.warn("Warning: @huggingface/transformers not under a node_modules dir; skipping memory wiring")
             return
         }
         const realNodeModules = entry.slice(0, idx + marker.length - 1) // .../node_modules

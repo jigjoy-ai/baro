@@ -3,11 +3,5 @@
   "private": true,
   "workspaces": [
     "packages/*"
-  ],
-  "overrides": {
-    "onnx-proto": {
-      "protobufjs": "^7.5.5"
-    },
-    "protobufjs@<7.5.5": "^7.5.5"
-  }
+  ]
 }

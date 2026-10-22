@@ -37,7 +37,7 @@ const sharedBundleConfig = {
     external: [
         // Embedding stack: resolved at runtime from node_modules links that
         // postinstall.js places next to the staged bundle.
-        '@xenova/transformers',
+        '@huggingface/transformers',
         'sharp',
         'onnxruntime-node',
     ],
