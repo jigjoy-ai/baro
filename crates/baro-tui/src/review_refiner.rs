@@ -24,7 +24,7 @@ pub(crate) fn spawn_refiner(
     let cwd = cwd.to_path_buf();
     let model = app.model_for_phase("planning");
     let effort = app.effort.clone();
-    let context = app.claude_md_content.clone();
+    let context = app.planning_context();
     let decision_doc = app.decision_document.clone();
     let planner_llm = app.planner_llm;
     let openai_api_key = app.openai_api_key.clone();

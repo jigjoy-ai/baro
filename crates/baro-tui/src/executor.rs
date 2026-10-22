@@ -70,6 +70,13 @@ pub struct PrdFile {
         skip_serializing_if = "Option::is_none"
     )]
     pub goal_fingerprint: Option<String>,
+    /// `--repo` topology, written by Rust; the TS Finalizer reports it in the PR.
+    #[serde(
+        rename = "linkedRepositories",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub linked_repositories: Vec<crate::linked_repos::LinkedRepository>,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
@@ -772,6 +779,33 @@ mod tests {
         };
         let out = serde_json::to_string(&without_fingerprint).unwrap();
         assert!(!out.contains("goalFingerprint"));
+    }
+
+    #[test]
+    fn linked_repositories_survive_round_trip_and_resume_rebuild() {
+        let linked = PrdFile {
+            project: "p".to_string(),
+            branch_name: "baro/p".to_string(),
+            linked_repositories: vec![crate::linked_repos::LinkedRepository {
+                name: "engine".to_string(),
+                path: "/work/engine".to_string(),
+                package: Some("@acme/engine".to_string()),
+                dependency: None,
+                branch: Some("main".to_string()),
+                head_sha: Some("abc".to_string()),
+            }],
+            ..Default::default()
+        };
+        let out = serde_json::to_string(&linked).unwrap();
+        assert!(out.contains(r#""linkedRepositories":[{"name":"engine","path":"/work/engine","package":"@acme/engine","branch":"main","headSha":"abc"}]"#));
+        let parsed: PrdFile = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed.linked_repositories, linked.linked_repositories);
+
+        let resumed = prd_from_resume_review(&parsed, "p", "d", &[], None).unwrap();
+        assert_eq!(resumed.linked_repositories, linked.linked_repositories);
+
+        let bare = PrdFile { linked_repositories: Vec::new(), ..linked };
+        assert!(!serde_json::to_string(&bare).unwrap().contains("linkedRepositories"));
     }
 
     #[test]

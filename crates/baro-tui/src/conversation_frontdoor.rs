@@ -282,6 +282,12 @@ pub(crate) fn spawn_conversation_architect_validation(
     // force-drops it.
     let validation_timeout = preaccept_architect_outer_timeout(provider_timeout);
     let repository_context = build_preaccept_repository_context(&cwd, &repository_brief)?;
+    // The outcome keeps the bare repository context: planning appends the linked section itself.
+    let architect_context = crate::linked_repos::with_context(
+        Some(&repository_context),
+        app.linked_repositories_context.as_deref(),
+    )
+    .unwrap_or_default();
     app.conversation_error = None;
 
     tokio::spawn(async move {
@@ -302,7 +308,7 @@ pub(crate) fn spawn_conversation_architect_validation(
                     &cwd,
                     architect_llm,
                     architect_model.as_deref(),
-                    Some(&repository_context),
+                    Some(&architect_context),
                     fixed_mode_json.as_deref(),
                     &goal_envelope_json,
                     openai_api_key.as_deref(),

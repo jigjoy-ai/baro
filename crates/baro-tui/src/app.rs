@@ -384,6 +384,9 @@ pub struct App {
 
     // Context building screen
     pub claude_md_content: Option<String>,
+    pub linked_repositories: Vec<crate::linked_repos::LinkedRepository>,
+    /// Rendered `linked_repos::render_context`, appended to every planning phase's context.
+    pub linked_repositories_context: Option<String>,
     /// Architect's DecisionDocument, held until write_prd persists it
     /// into prd.json for the orchestrator to prepend to story prompts.
     pub decision_document: Option<String>,
@@ -665,6 +668,8 @@ impl App {
             welcome_field: WelcomeField::Goal,
 
             claude_md_content: None,
+            linked_repositories: Vec::new(),
+            linked_repositories_context: None,
             decision_document: None,
             architect_status: ArchitectStatus::Idle,
 
@@ -2165,6 +2170,13 @@ impl App {
     #[cfg(test)]
     fn story(&self, id: &str) -> &StoryState {
         self.stories.iter().find(|s| s.id == id).unwrap()
+    }
+
+    pub fn planning_context(&self) -> Option<String> {
+        crate::linked_repos::with_context(
+            self.claude_md_content.as_deref(),
+            self.linked_repositories_context.as_deref(),
+        )
     }
 
     pub fn model_for_phase(&self, phase: &str) -> Option<String> {

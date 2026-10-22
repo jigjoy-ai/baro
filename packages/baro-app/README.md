@@ -159,6 +159,9 @@ Options:
   --resume                     Resume from existing prd.json (also runs dry-run plans)
   --skip-context               Skip CLAUDE.md / AGENTS.md auto-generation
   --cwd <path>                 Working directory (default: current)
+  --repo <path>                Linked repository the goal also spans (repeatable,
+                               relative to --cwd). Planning sees it and the PR
+                               reports it; execution and PRs stay in --cwd
   -h, --help                   Print help
 ```
 
