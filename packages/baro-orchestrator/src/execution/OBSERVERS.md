@@ -5,7 +5,9 @@ in the orchestrator: passive bus listeners that watch bus traffic and
 (optionally) emit their own events back onto the bus. Cartographer is
 **not** covered here — it lives Rust-side under `crates/baro-tui/`.
 
-Every observer extends Mozaik's `BaseObserver`. They subscribe via
+Every observer extends `BaseObserver` from the Mozaik port
+([../runtime/mozaik.ts](../runtime/mozaik.ts)), whose bus runs on the
+Mozaik v4 runtime. They subscribe via
 `onExternalEvent(source, event: SemanticEvent<unknown>)` and gate per
 event type with the `.is()` user-defined type guard from
 [../semantic-events.ts](../semantic-events.ts). Mozaik LLM-shape items
@@ -61,7 +63,7 @@ of its output, and exposes the resulting index through both a
 `gatherContext(storyId, hints)` RPC (used to prepend findings to a new
 story's prompt) and a `Knowledge` emission on the bus so other
 observers can react. `FunctionCallItem` and `FunctionCallOutputItem`
-come from `@mozaik-ai/core`.
+come from the Mozaik port.
 
 - Subscribes to: `FunctionCallItem`, `FunctionCallOutputItem`
 - Emits: `Knowledge`, plus `AgentTargetedMessage` for mid-flight
@@ -79,8 +81,8 @@ phase each agent has reached. When two agents touch the same path, it
 calls the optional `onOverlap` callback and — at most once per path —
 emits a `Coordination` event with `kind="notice"` so the overlap shows
 up in the audit log. Phase-2 scope: detect and notify only, no
-tool-execution preemption. `FunctionCallItem` comes from
-`@mozaik-ai/core`.
+tool-execution preemption. `FunctionCallItem` comes from the Mozaik
+port.
 
 - Subscribes to: `AgentState`, `FunctionCallItem`
 - Emits: `Coordination`

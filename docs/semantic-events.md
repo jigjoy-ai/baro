@@ -2,7 +2,9 @@
 
 `packages/baro-orchestrator/src/semantic-events.ts` defines every baro
 orchestrator bus event as a Mozaik `SemanticEvent`. The conversion began on
-Mozaik 3.10; the runtime now uses Mozaik 3.12. It replaced the old `BusEvent`
+Mozaik 3.10. The bus now runs on the Mozaik v4 runtime, which sees each event
+as its wire `type` with `data` as the payload; the `SemanticEvent` value class
+itself still comes from 3.12 (`mozaik-core-v3`). The conversion replaced the old `BusEvent`
 class hierarchy (`types.ts`, plus `ConductorStateItem` in
 `participants/conductor.ts` and `StoryResultItem` in
 `participants/story-agent.ts`).

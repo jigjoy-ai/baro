@@ -26,7 +26,7 @@ import {
     Participant,
     ReasoningItem,
     SemanticEvent,
-} from "@mozaik-ai/core"
+} from "../../baro-orchestrator/src/runtime/mozaik.js"
 
 import { CodexCliParticipant } from "@baro/orchestrator"
 

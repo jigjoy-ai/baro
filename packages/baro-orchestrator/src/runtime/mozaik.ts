@@ -1,16 +1,32 @@
 /**
- * Anti-corruption port around `@mozaik-ai/core`.
+ * Anti-corruption port around Mozaik. Every Baro module imports Mozaik symbols
+ * from here; only src/runtime/mozaik*.ts may name the packages (enforced by
+ * test/runtime/mozaik-port.test.ts).
  *
- * Every Baro module must import Mozaik symbols from here, never from the
- * package directly — the Mozaik v4 runtime rewrite (RuntimeService/Behavior,
- * no AgenticEnvironment/BaseObserver) then lands as a second adapter behind
- * this one seam instead of a tree-wide migration. Enforced by
- * test/runtime/mozaik-port.test.ts.
+ * The bus runs on the Mozaik v4 runtime (mozaik-runtime.ts). Context items and
+ * provider adapters still come from 3.12 under the `mozaik-core-v3` alias
+ * until the native inference lane moves to v4's InferenceInput/runLoop.
  */
 
 export {
     AgenticEnvironment,
+    BaroRuntimeState,
     BaseObserver,
+    createAgent,
+    createHuman,
+    Participant,
+    RuntimeEvent,
+    RuntimeParticipant,
+    SituationSpecification,
+} from "./mozaik-runtime.js"
+export type {
+    InterceptionHandler,
+    SituationContext,
+    SituationHandler,
+    SituationProcessor,
+} from "./mozaik-runtime.js"
+
+export {
     ContextItem,
     FunctionCallItem,
     FunctionCallOutputItem,
@@ -25,12 +41,11 @@ export {
     OpenAICompatibleChatCompletions,
     OpenAIResponses,
     OutputTokenDetails,
-    Participant,
     ReasoningItem,
     SemanticEvent,
     SystemMessageItem,
     TokenUsage,
     UserMessageItem,
-} from "@mozaik-ai/core"
+} from "mozaik-core-v3"
 
-export type { GenerativeModel, Tool } from "@mozaik-ai/core"
+export type { GenerativeModel, Tool } from "mozaik-core-v3"

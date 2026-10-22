@@ -476,6 +476,26 @@ Critic and Verifier retain their independent authorities. That separation is
 the Mozaik-specific value: a familiar conversational surface without collapsing
 the runtime back into one harness process.
 
+## Mozaik v4 runtime and cloud export
+
+Each `AgenticEnvironment` owns a Mozaik v4 runtime (`defineRuntime` with a
+`BaroRuntimeState`). Every joined Baro participant is a runtime member with a
+manifest; its situation handlers route each runtime event to the participant's
+existing callbacks, so delivery order, the producer/other split and `listens`
+filtering are unchanged. Baro traffic is published under v4 event types
+(semantic events keep their wire `type`; model and tool items appear as
+`model.answer` and `function_call.started|completed`), so runtime-native
+participants can observe it. Context items and provider adapters still come
+from Mozaik 3.12 (`mozaik-core-v3`) until the native inference lane moves to
+v4's `runLoop`.
+
+Setting `BARO_MOZAIK_CLOUD=1` with `MOZAIK_API_KEY` joins the
+`@mozaik-ai/cloud-sdk` exporter to the run's runtime so the run appears in
+mozaik cloud (`MOZAIK_CLOUD_ENDPOINT` overrides the endpoint, `MOZAIK_REDACTION`
+limits payload content). It is off by default because bus payloads carry
+repository content; the session link goes to stderr and the final flush is
+bounded so an unreachable cloud cannot hold a run open.
+
 ## Provider-free verification
 
 These checks exercise the control plane with fake backends and local fixture

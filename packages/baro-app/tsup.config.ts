@@ -12,7 +12,7 @@ const PACKAGE_VERSION = (JSON.parse(readFileSync(join(process.cwd(), "package.js
  * (orchestrator_client.rs, architect_runner.rs, planner_runner.rs).
  * postinstall.js stages them to ~/.baro/bin; the runners check there, then
  * the cwd's node_modules/baro-ai/dist/, then fall back to tsx from a dev
- * checkout. Workspace sources + @mozaik-ai/core are bundled in — published
+ * checkout. Workspace sources + Mozaik (v4 runtime, 3.12 alias) are bundled in — published
  * .mjs files must have zero runtime deps beyond Node.
  */
 const sharedBundleConfig = {
@@ -28,6 +28,7 @@ const sharedBundleConfig = {
     splitting: false,
     noExternal: [
         /^@mozaik-ai\//,
+        /^mozaik-core-v3$/,
         // @baro/memory's own TS must be bundled or the staged cli.mjs can't
         // resolve it (ERR_MODULE_NOT_FOUND silently disabled semantic memory
         // on every npm install). Its heavy ML deps stay external below —

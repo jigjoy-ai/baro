@@ -14,6 +14,7 @@ import { fileURLToPath } from "url"
 import { randomUUID } from "node:crypto"
 
 import { AgenticEnvironment } from "./runtime/mozaik.js"
+import { linkMozaikCloud } from "./runtime/mozaik-cloud.js"
 
 import {
     GatewayBillingCoordinator,
@@ -806,6 +807,7 @@ export async function orchestrate(
         }
     }
 
+    const mozaikCloud = linkMozaikCloud(env)
     try {
     // Codex/OpenCode/Pi expose terminal turns through different native events.
     // Project them onto one neutral contract so policy participants such as the
@@ -2180,6 +2182,7 @@ export async function orchestrate(
             )
         }
         await shutdownCollaborationBridge?.shutdown()
+        await mozaikCloud?.end()
         await integrationWorktree?.remove({
             keepIfRetained: shutdownWorktrees?.hasRetainedWorktrees() ?? false,
         })
