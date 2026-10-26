@@ -1406,6 +1406,8 @@ async fn run_app(
                     app.execution_mode = prd.execution_mode.clone();
                     if app.linked_repositories.is_empty() {
                         app.linked_repositories = prd.linked_repositories.clone();
+                        app.linked_repositories_context =
+                            linked_repos::render_context(&cwd, &app.linked_repositories);
                     }
                     restore_conversation_from_prd(&mut app, &prd, &cwd);
                     let stories = review_stories_from_prd(&prd);

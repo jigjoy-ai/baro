@@ -41,6 +41,8 @@ describe("linked repositories", () => {
         }
         assert.ok(patchesDependency("patches/engine@1.2.0.patch", "engine"))
         assert.ok(!patchesDependency("patches/engine-sys@1.2.0.patch", "engine"))
+        assert.ok(patchesDependency("patches/lodash.patch", "lodash"))
+        assert.ok(!patchesDependency("patches/lodash.debounce@4.0.8.patch", "lodash"))
     })
 
     it("reports a moved HEAD and in-place dependency patches, and stays quiet otherwise", async () => {
@@ -63,10 +65,11 @@ describe("linked repositories", () => {
         const body = renderLinkedRepositoriesSection(reports).join("\n")
         assert.match(body, /^## Linked repositories/)
         assert.match(body, /No branch, commit or pull request was created in the linked repositories/)
-        assert.match(body, /- \*\*bedem\*\* — `\/work\/bedem` \(package `@kornelija-hse-project\/bedem-core`; consumed via package\.json dependencies/)
+        assert.doesNotMatch(body, /\/work\//)
+        assert.match(body, /- \*\*bedem\*\* \(package `@kornelija-hse-project\/bedem-core`; consumed via package\.json dependencies/)
         assert.match(body, /HEAD moved during the run: `1111111` → `3333333`/)
         assert.match(body, /patches the installed `@kornelija-hse-project\/bedem-core` instead of its source/)
-        assert.match(body, /- \*\*schema\*\* — `\/work\/schema`\n/)
+        assert.match(body, /- \*\*schema\*\*\n/)
 
         const logs = linkedRepositoryLogLines(reports)
         assert.equal(logs.length, 4)

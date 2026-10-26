@@ -778,7 +778,8 @@ export class Finalizer extends BaseObserver {
                 if (ch === "A") created++
                 else if (ch === "M" || ch === "R") modified++
                 const path = line.split("\t").pop()
-                if (line.includes("\t") && path) paths.push(path)
+                // A deleted path no longer patches anything.
+                if (ch !== "D" && line.includes("\t") && path) paths.push(path)
             }
             return { created, modified, paths }
         } catch {

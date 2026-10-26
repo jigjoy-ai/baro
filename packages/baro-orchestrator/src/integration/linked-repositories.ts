@@ -22,7 +22,8 @@ export function patchesDependency(path: string, pkg: string): boolean {
     const flat = (separator: string) => pkg.replace("/", separator)
     return (
         file.startsWith(`${flat("__")}@`) ||
-        file.startsWith(`${flat("__")}.`) ||
+        file === `${flat("__")}.patch` ||
+        file === `${flat("__")}.diff` ||
         file.startsWith(`${flat("+")}+`) ||
         file.startsWith(`${flat("-")}-npm-`)
     )
@@ -78,7 +79,8 @@ export function renderLinkedRepositoriesSection(
             repo.package ? `package \`${repo.package}\`` : null,
             repo.dependency ? `consumed via ${repo.dependency}` : null,
         ].filter(Boolean)
-        lines.push(`- **${repo.name}** — \`${repo.path}\`${facts.length > 0 ? ` (${facts.join("; ")})` : ""}`)
+        // Its name only: the local path (a home directory) doesn't belong in a published PR.
+        lines.push(`- **${repo.name}**${facts.length > 0 ? ` (${facts.join("; ")})` : ""}`)
         if (movedTo) {
             lines.push(`  - ⚠ HEAD moved during the run: \`${short(repo.headSha)}\` → \`${short(movedTo)}\` — changes there were made outside this PR; review them separately.`)
         }
