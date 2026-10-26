@@ -10,6 +10,8 @@ import {
 
 import {
     BILLING_MONEY_SCALE,
+    BILLING_RECEIPTS_AUTHORITATIVE,
+    BILLING_RECEIPTS_HEADER,
     GatewayBillingCoordinator,
     parseCloudBillingReceipt,
     resolveGatewayBillingEnvironment,
@@ -186,6 +188,170 @@ describe("GatewayBillingCoordinator", () => {
         assert.equal(result.complete, false)
         assert.equal(result.unresolvedInvocationIds.length, 1)
         assert.ok(elapsed < 250, `drain took ${elapsed}ms`)
+        gateway.close()
+    })
+
+    it("skips the drain wait when the gateway does not advertise authoritative receipts", async () => {
+        let feedCalls = 0
+        const gateway = new GatewayBillingCoordinator({
+            runId: "run-no-receipts",
+            gatewayBaseUrl: "https://gateway.example/v1",
+            apiKey: "tenant-a",
+            drainTimeoutMs: 5_000,
+            feedMaxRetries: 0,
+            publishMeasurement: () => undefined,
+            fetchImpl: async () => {
+                feedCalls += 1
+                return jsonResponse(page(gateway.billingSessionId, [], "cursor-1"))
+            },
+        })
+        const dispatch = gateway.prepareDispatch(
+            "https://gateway.example/v1",
+            "tenant-a",
+            invocationContext,
+        )
+        assert.ok(dispatch)
+        await gateway.observeRunner(dispatch, { status: "succeeded", durationMs: 1 })
+
+        const started = Date.now()
+        const result = await gateway.drain()
+        const elapsed = Date.now() - started
+
+        assert.equal(result.complete, false)
+        assert.equal(result.receiptsUnavailable, true)
+        assert.equal(result.feedError, null)
+        assert.deepEqual(result.unresolvedInvocationIds, [dispatch.record.invocationId])
+        assert.equal(gateway.feed.authoritativeReceipts, false)
+        assert.ok(feedCalls >= 1)
+        assert.ok(elapsed < 1_000, `drain took ${elapsed}ms`)
+        gateway.close()
+    })
+
+    it("does not let missing receipts hide a runner measurement that failed to publish", async () => {
+        const gateway = new GatewayBillingCoordinator({
+            runId: "run-publish-fails",
+            gatewayBaseUrl: "https://gateway.example/v1",
+            apiKey: "tenant-a",
+            drainTimeoutMs: 300,
+            feedMaxRetries: 0,
+            publishMeasurement: () => {
+                throw new Error("cloud unavailable")
+            },
+            fetchImpl: async () => jsonResponse(page(gateway.billingSessionId, [], "cursor-1")),
+        })
+        const dispatch = gateway.prepareDispatch(
+            "https://gateway.example/v1",
+            "tenant-a",
+            invocationContext,
+        )
+        assert.ok(dispatch)
+        await gateway.observeRunner(dispatch, { status: "succeeded", durationMs: 1 })
+
+        const result = await gateway.drain()
+
+        assert.equal(result.complete, false)
+        assert.equal(result.receiptsUnavailable, false)
+        gateway.close()
+    })
+
+    it("still ingests receipts from a gateway that does not advertise them", async () => {
+        let receipt: CloudBillingReceipt | null = null
+        const gateway = new GatewayBillingCoordinator({
+            runId: "run-unadvertised-receipt",
+            gatewayBaseUrl: "https://gateway.example/v1",
+            apiKey: "tenant-a",
+            drainTimeoutMs: 5_000,
+            feedMaxRetries: 0,
+            publishMeasurement: () => undefined,
+            fetchImpl: async () =>
+                jsonResponse(
+                    page(gateway.billingSessionId, receipt ? [receipt] : [], "cursor-1"),
+                ),
+        })
+        const dispatch = gateway.prepareDispatch(
+            "https://gateway.example/v1",
+            "tenant-a",
+            invocationContext,
+        )
+        assert.ok(dispatch)
+        receipt = completeReceipt(dispatch.record.billingSessionId, dispatch.record.invocationId)
+
+        const result = await gateway.drain()
+
+        assert.equal(result.complete, true)
+        assert.equal(result.settledInvocations, 1)
+        gateway.close()
+    })
+
+    it("keeps waiting for receipts a gateway advertises as authoritative", async () => {
+        const gateway = new GatewayBillingCoordinator({
+            runId: "run-authoritative",
+            gatewayBaseUrl: "https://gateway.example/v1",
+            apiKey: "tenant-a",
+            drainTimeoutMs: 200,
+            feedMaxRetries: 0,
+            publishMeasurement: () => undefined,
+            fetchImpl: async () =>
+                jsonResponse(page(gateway.billingSessionId, [], "cursor-1"), {
+                    [BILLING_RECEIPTS_HEADER]: BILLING_RECEIPTS_AUTHORITATIVE,
+                }),
+        })
+        assert.ok(
+            gateway.prepareDispatch(
+                "https://gateway.example/v1",
+                "tenant-a",
+                invocationContext,
+            ),
+        )
+
+        const started = Date.now()
+        const result = await gateway.drain()
+        const elapsed = Date.now() - started
+
+        assert.equal(result.complete, false)
+        assert.equal(result.receiptsUnavailable, false)
+        assert.equal(gateway.feed.authoritativeReceipts, true)
+        assert.ok(elapsed >= 150, `drain returned after ${elapsed}ms`)
+        gateway.close()
+    })
+
+    it("does not conclude receipts are unavailable from a pull that predates drain", async () => {
+        let releaseFirst!: () => void
+        const firstReleased = new Promise<void>((resolve) => {
+            releaseFirst = resolve
+        })
+        let feedCalls = 0
+        const gateway = new GatewayBillingCoordinator({
+            runId: "run-stale-pull",
+            gatewayBaseUrl: "https://gateway.example/v1",
+            apiKey: "tenant-a",
+            drainTimeoutMs: 150,
+            feedMaxRetries: 0,
+            publishMeasurement: () => undefined,
+            fetchImpl: async () => {
+                feedCalls += 1
+                if (feedCalls > 1) {
+                    return new Response("unavailable", { status: 503 })
+                }
+                await firstReleased
+                return jsonResponse(page(gateway.billingSessionId, [], "cursor-1"))
+            },
+        })
+        const dispatch = gateway.prepareDispatch(
+            "https://gateway.example/v1",
+            "tenant-a",
+            invocationContext,
+        )
+        assert.ok(dispatch)
+        await gateway.observeRunner(dispatch, { status: "succeeded", durationMs: 1 })
+
+        const draining = gateway.drain()
+        releaseFirst()
+        const result = await draining
+
+        assert.equal(gateway.feed.authoritativeReceipts, false)
+        assert.equal(result.receiptsUnavailable, false)
+        assert.match(result.feedError ?? "", /503/)
         gateway.close()
     })
 
@@ -800,10 +966,13 @@ function page(
     }
 }
 
-function jsonResponse(value: unknown): Response {
+function jsonResponse(
+    value: unknown,
+    headers: Record<string, string> = {},
+): Response {
     return new Response(JSON.stringify(value), {
         status: 200,
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", ...headers },
     })
 }
 

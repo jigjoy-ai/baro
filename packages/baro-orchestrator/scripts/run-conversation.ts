@@ -423,7 +423,7 @@ async function main(): Promise<void> {
         intake?.close()
         try {
             const result = await reconcileAndCloseGatewayBilling(billing)
-            if (result && !result.complete) {
+            if (result && !result.complete && !result.receiptsUnavailable) {
                 process.stderr.write(
                     `[run-conversation] billing reconciliation incomplete ` +
                         `(${result.unresolvedInvocationIds.length} invocation(s))\n`,

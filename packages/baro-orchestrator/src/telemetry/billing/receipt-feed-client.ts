@@ -15,6 +15,9 @@ const DEFAULT_PAGE_SIZE = 100
 const DEFAULT_MAX_RESPONSE_BYTES = 1_048_576
 const DEFAULT_RETRY_BASE_DELAY_MS = 50
 
+export const BILLING_RECEIPTS_HEADER = "x-baro-billing-receipts"
+export const BILLING_RECEIPTS_AUTHORITATIVE = "authoritative"
+
 export interface CloudBillingFeedPage {
     readonly schemaVersion: 1
     readonly billingSessionId: string
@@ -73,6 +76,7 @@ export class BillingReceiptFeedClient {
     private readonly commitCursor?: (cursor: string) => void | Promise<void>
     private readonly fetchImpl: typeof fetch
     private currentCursor: string | null
+    private receiptsAdvertised: boolean | null = null
     private activeController: AbortController | null = null
     private closed = false
 
@@ -130,6 +134,14 @@ export class BillingReceiptFeedClient {
 
     get cursor(): string | null {
         return this.currentCursor
+    }
+
+    /**
+     * Whether the last valid page came from a gateway that finalizes receipts;
+     * null until one page has been read.
+     */
+    get authoritativeReceipts(): boolean | null {
+        return this.receiptsAdvertised
     }
 
     /** Read and commit exactly one page. */
@@ -302,7 +314,11 @@ export class BillingReceiptFeedClient {
                 } catch {
                     throw new BillingFeedProtocolError("billing feed returned malformed JSON")
                 }
-                return parseCloudBillingFeedPage(parsed, this.pageSize)
+                const page = parseCloudBillingFeedPage(parsed, this.pageSize)
+                this.receiptsAdvertised =
+                    response.headers.get(BILLING_RECEIPTS_HEADER)?.toLowerCase() ===
+                    BILLING_RECEIPTS_AUTHORITATIVE
+                return page
             } catch (error) {
                 if (operationSignal.aborted) throw abortReason(operationSignal)
                 if (

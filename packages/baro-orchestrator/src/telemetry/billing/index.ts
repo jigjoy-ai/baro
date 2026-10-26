@@ -34,6 +34,8 @@ export {
 } from "./receipt-ledger.js"
 
 export {
+    BILLING_RECEIPTS_AUTHORITATIVE,
+    BILLING_RECEIPTS_HEADER,
     BillingReceiptFeedClient,
     BillingFeedProtocolError,
     BillingFeedHttpError,

@@ -365,6 +365,12 @@ cursor. Generic OpenAI-compatible endpoints, Claude Code, Codex, OpenCode and
 Pi never become billing authorities implicitly. Missing or late receipts stay
 unknown instead of becoming zero-cost observations.
 
+Final reconciliation waits (bounded, 5 s by default) for outstanding receipts
+only when the feed response carries `x-baro-billing-receipts: authoritative`,
+which a Gateway sends once it finalizes receipts. Without that header Baro
+still ingests whatever one final feed pass returns, then stops waiting and does
+not report the unreceipted invocations as a reconciliation failure.
+
 Selection is currently deterministic and greedy after policy constraints;
 there is no uncertainty-driven route exploration yet, so configured priors
 still matter. Learning is advisory and run-local; durable, cross-run

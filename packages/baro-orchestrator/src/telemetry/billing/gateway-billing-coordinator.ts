@@ -67,6 +67,11 @@ export interface GatewayBillingDrainResult {
     readonly unresolvedInvocationIds: readonly string[]
     readonly complete: boolean
     readonly feedError: string | null
+    /**
+     * The gateway answered without advertising authoritative receipts, so
+     * unresolved invocations were never going to settle; not a failure.
+     */
+    readonly receiptsUnavailable: boolean
 }
 
 /**
@@ -100,6 +105,8 @@ export class GatewayBillingCoordinator {
     private readonly activePublications = new Map<string, Promise<void>>()
     private activePull: Promise<void> | null = null
     private pullRequested = false
+    private pullsStarted = 0
+    private lastSuccessfulPull = 0
     private lastFeedError: Error | null = null
     private closed = false
 
@@ -242,6 +249,11 @@ export class GatewayBillingCoordinator {
      */
     async drain(): Promise<GatewayBillingDrainResult> {
         const deadline = Date.now() + this.drainTimeoutMs
+        // Only a pass started inside drain() can vouch that nothing more is coming.
+        const firstDrainPull = this.pullsStarted + 1
+        const receiptsUnavailable = () =>
+            this.lastSuccessfulPull >= firstDrainPull &&
+            this.feed.authoritativeReceipts === false
         do {
             if (Date.now() >= deadline) {
                 this.feed.abort("billing reconciliation deadline reached")
@@ -263,8 +275,8 @@ export class GatewayBillingCoordinator {
                 break
             }
             if (
-                this.pendingInvocations.size === 0 &&
-                this.measurementOutbox.size === 0
+                this.measurementOutbox.size === 0 &&
+                (this.pendingInvocations.size === 0 || receiptsUnavailable())
             ) {
                 break
             }
@@ -286,6 +298,8 @@ export class GatewayBillingCoordinator {
                 this.pendingInvocations.size === 0 &&
                 this.measurementOutbox.size === 0,
             feedError: this.lastFeedError?.message ?? null,
+            // Only when the receipts are all that's missing: a measurement still in the outbox is a real loss.
+            receiptsUnavailable: receiptsUnavailable() && this.measurementOutbox.size === 0,
         })
     }
 
@@ -298,6 +312,7 @@ export class GatewayBillingCoordinator {
     private async runRequestedPulls(): Promise<void> {
         while (this.pullRequested && !this.closed) {
             this.pullRequested = false
+            const pull = ++this.pullsStarted
             try {
                 await this.flushDetachedOutbox()
                 await this.feed.drain(async (receipt) => {
@@ -326,6 +341,7 @@ export class GatewayBillingCoordinator {
                     // Await its acknowledgement before the feed commits cursor.
                     await this.publishOutboxEntry(measurementId)
                 })
+                this.lastSuccessfulPull = pull
                 this.lastFeedError = null
             } catch (error) {
                 this.lastFeedError = safeError(error)
