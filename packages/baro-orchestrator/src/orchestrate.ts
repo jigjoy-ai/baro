@@ -109,6 +109,7 @@ import {
     runPlannerBusSession,
 } from "./planning/adapters/planner-bus-session.js"
 import { provesOnlyHygiene } from "./verification/hygiene-command.js"
+import { jvmToolchainGap } from "./verification/jvm-commands.js"
 import { RunVerifier } from "./verification/run-verifier.js"
 import { Sentry } from "./execution/sentry.js"
 import { StoryFactory } from "./market/story-factory.js"
@@ -868,6 +869,11 @@ export async function orchestrate(
         const line = `warn: could not reuse host dependencies: ${error instanceof Error ? error.message : String(error)}`
         process.stderr.write(`${line}\n`)
         if (emitTui) emit({ type: "story_log", id: "_git", line })
+    }
+    const toolchainGap = jvmToolchainGap(integrationRoot)
+    if (toolchainGap) {
+        process.stderr.write(`warn: ${toolchainGap}\n`)
+        if (emitTui) emit({ type: "activity", id: "plan", kind: "warn", text: toolchainGap })
     }
     const worktrees =
         useGit && worktreesEnabled

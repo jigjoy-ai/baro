@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, it } from "node:test"
 
-import { detectJvmCommands } from "../../src/verification/jvm-commands.js"
+import { detectJvmCommands, jvmToolchainGap } from "../../src/verification/jvm-commands.js"
 import { translateDeclaredTests } from "../../src/verification/declared-verification.js"
 import { createVerifyPlan, verifyBuild } from "../../src/verification/verify.js"
 import { withTempDir } from "../execution/helpers.js"
@@ -123,6 +123,71 @@ describe("detectJvmCommands (#210)", () => {
             })
             assert.deepEqual(commands, [])
             assert.equal(probed, false)
+        })
+    })
+
+    describe("jvmToolchainGap (#219)", () => {
+        it("names the missing JDK and every gate the verifier will skip", async () => {
+            await withTempDir("baro-jvm-", async (root) => {
+                writeFileSync(join(root, "pom.xml"), "<project/>")
+                writeFileSync(join(root, "settings.gradle"), "")
+                executable(root, "mvnw")
+                const gap = jvmToolchainGap(root, {
+                    platform: "linux",
+                    env: { PATH: "" },
+                    javaRuns: () => false,
+                })
+                assert.match(gap ?? "", /^no JDK runs on this host \(`java -version` failed\)/)
+                assert.match(gap ?? "", /will skip `mvn test` and `gradle test`/)
+                assert.match(
+                    jvmToolchainGap(root, {
+                        platform: "linux",
+                        env: { PATH: "", JAVA_HOME: "/opt/jdk" },
+                        javaRuns: () => false,
+                    }) ?? "",
+                    /^no JDK runs from JAVA_HOME \(\/opt\/jdk\)/,
+                )
+            })
+        })
+
+        it("names only the build tool that does not resolve when a JDK runs", async () => {
+            await withTempDir("baro-jvm-", async (root) => {
+                writeFileSync(join(root, "pom.xml"), "<project/>")
+                writeFileSync(join(root, "build.gradle"), "")
+                executable(root, "mvnw")
+                const gap = jvmToolchainGap(root, {
+                    platform: "linux",
+                    env: { PATH: "" },
+                    javaRuns: () => true,
+                })
+                assert.equal(
+                    gap,
+                    "neither ./gradlew nor `gradle` on PATH, so the run verifier will skip `gradle test`. " +
+                        "Install the toolchain on the host (or set JAVA_HOME / commit the build wrapper) " +
+                        "for the merged result to be test-verified.",
+                )
+            })
+        })
+
+        it("is silent when the verifier can run every gate, and for non-JVM repositories", async () => {
+            await withTempDir("baro-jvm-", async (root) => {
+                let probed = false
+                const probe = {
+                    platform: "linux" as const,
+                    env: { PATH: join(root, "bin") },
+                    javaRuns: () => {
+                        probed = true
+                        return true
+                    },
+                }
+                assert.equal(jvmToolchainGap(root, probe), null)
+                assert.equal(probed, false)
+
+                writeFileSync(join(root, "pom.xml"), "<project/>")
+                executable(join(root, "bin"), "mvn")
+                assert.equal(jvmToolchainGap(root, probe), null)
+                assert.equal(detectJvmCommands(root, probe).length, 1)
+            })
         })
     })
 

@@ -95,6 +95,52 @@ export function resolveJvmBuildTool(
         : wrapperOrTool(cwd, windows ? "gradlew.bat" : "gradlew", "gradle", env, windows)
 }
 
+/**
+ * Why the run verifier will skip a JVM gate on this host, or null. Said
+ * before any story runs (#219): a story can fetch a JDK into its own scratch,
+ * the verifier on the merged tree cannot.
+ */
+export function jvmToolchainGap(
+    cwd: string,
+    probe: JvmToolchainProbe = {},
+): string | null {
+    const builds = JVM_BUILDS.filter((build) => build.present(cwd))
+    if (builds.length === 0) return null
+    const env = probe.env ?? process.env
+    let missing: string
+    let skipped = builds
+    if (!(probe.javaRuns ?? javaRuns)(env)) {
+        missing = env.JAVA_HOME
+            ? `no JDK runs from JAVA_HOME (${env.JAVA_HOME})`
+            : "no JDK runs on this host (`java -version` failed)"
+    } else {
+        const jdk = { ...probe, javaRuns: () => true }
+        skipped = builds.filter((build) => !resolveJvmBuildTool(cwd, build.kind, jdk))
+        if (skipped.length === 0) return null
+        missing = skipped.map((build) => build.noTool).join(" and ")
+    }
+    return (
+        `${missing}, so the run verifier will skip ${skipped.map((build) => build.gate).join(" and ")}. ` +
+        "Install the toolchain on the host (or set JAVA_HOME / commit the build wrapper) " +
+        "for the merged result to be test-verified."
+    )
+}
+
+const JVM_BUILDS = [
+    {
+        kind: "maven",
+        present: isMavenRepository,
+        gate: "`mvn test`",
+        noTool: "neither ./mvnw nor `mvn` on PATH",
+    },
+    {
+        kind: "gradle",
+        present: isGradleRepository,
+        gate: "`gradle test`",
+        noTool: "neither ./gradlew nor `gradle` on PATH",
+    },
+] as const
+
 export function isMavenRepository(cwd: string): boolean {
     return MAVEN_FILES.some((name) => existsSync(join(cwd, name)))
 }
