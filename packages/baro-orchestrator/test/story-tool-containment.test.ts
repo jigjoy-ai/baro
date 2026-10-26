@@ -590,10 +590,14 @@ setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_0
             chmodSync(join(story, "scripts", "cat"), 0o755)
             await withPortableShellGuard(async () => {
                 const bash = namedTool(createStoryTools(story), "bash")
-                const result = await invoke(bash, {
-                    command: "scripts/cat node_modules/fixture/index.js",
-                })
-                assert.match(result, /rejected by project containment guard/)
+                for (const command of [
+                    "scripts/cat node_modules/fixture/index.js",
+                    "PATH=scripts cat node_modules/fixture/index.js",
+                    "LD_PRELOAD=./evil.so cat node_modules/fixture/index.js",
+                ]) {
+                    const result = await invoke(bash, { command })
+                    assert.match(result, /rejected by project containment guard/, command)
+                }
             })
         })
     })

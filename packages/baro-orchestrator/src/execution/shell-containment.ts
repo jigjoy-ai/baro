@@ -340,6 +340,7 @@ function containmentRejection(
     let opaqueInterpreter: OpaqueInterpreter | null = null
     let collaborationInvocation = false
     let dependencyRead = false
+    let environmentPrefixed = false
     const canSandboxOpaqueCode = access.writeSandbox
 
     for (const token of parsed) {
@@ -365,6 +366,7 @@ function containmentRejection(
             opaqueInterpreter = null
             collaborationInvocation = false
             dependencyRead = false
+            environmentPrefixed = false
             continue
         }
 
@@ -386,7 +388,10 @@ function containmentRejection(
             continue
         }
 
-        if (commandStart && isEnvironmentAssignment(word)) continue
+        if (commandStart && isEnvironmentAssignment(word)) {
+            environmentPrefixed = true
+            continue
+        }
 
         if (commandStart) {
             commandStart = false
@@ -431,8 +436,10 @@ function containmentRejection(
                 commandName,
             )
             opaqueInterpreter = classifyOpaqueInterpreter(commandName)
-            // A bare name only: a project-local `scripts/cat` is not the system tool.
-            dependencyRead = word === commandName && isDependencyReadCommand(word)
+            // A bare name only: a project-local `scripts/cat` is not the system tool. Nor is a
+            // bare name whose lookup or loading the prefix rewires (PATH=, LD_PRELOAD=, ...).
+            dependencyRead =
+                !environmentPrefixed && word === commandName && isDependencyReadCommand(word)
             cdAwaitingPath = commandName === "cd"
             continue
         }
