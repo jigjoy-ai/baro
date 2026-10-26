@@ -110,6 +110,29 @@ describe("coalesceNodeTestScripts", () => {
         ])
     })
 
+    it("keeps the values of warning, coverage-threshold and watch flags out of the globs", () => {
+        const result = coalesceNodeTestScripts(
+            [{ label: "npm run test", tool: "npm", args: ["run", "test"] }],
+            () => ({
+                scripts: {
+                    test: "node --test --disable-warning ExperimentalWarning --test-coverage-lines 80 --watch-path src test/*.test.ts",
+                },
+            }),
+        )
+        assert.deepEqual(result[0]!.args, [
+            "--import",
+            "tsx",
+            "--disable-warning",
+            "ExperimentalWarning",
+            "--test-coverage-lines",
+            "80",
+            "--watch-path",
+            "src",
+            "--test",
+            "test/*.test.ts",
+        ])
+    })
+
     it("does not import tsx twice for an inline --import=tsx", () => {
         const result = coalesceNodeTestScripts(
             [{ label: "npm run test", tool: "npm", args: ["run", "test"] }],
