@@ -227,6 +227,33 @@ describe("GatewayBillingCoordinator", () => {
         gateway.close()
     })
 
+    it("does not let missing receipts hide a runner measurement that failed to publish", async () => {
+        const gateway = new GatewayBillingCoordinator({
+            runId: "run-publish-fails",
+            gatewayBaseUrl: "https://gateway.example/v1",
+            apiKey: "tenant-a",
+            drainTimeoutMs: 300,
+            feedMaxRetries: 0,
+            publishMeasurement: () => {
+                throw new Error("cloud unavailable")
+            },
+            fetchImpl: async () => jsonResponse(page(gateway.billingSessionId, [], "cursor-1")),
+        })
+        const dispatch = gateway.prepareDispatch(
+            "https://gateway.example/v1",
+            "tenant-a",
+            invocationContext,
+        )
+        assert.ok(dispatch)
+        await gateway.observeRunner(dispatch, { status: "succeeded", durationMs: 1 })
+
+        const result = await gateway.drain()
+
+        assert.equal(result.complete, false)
+        assert.equal(result.receiptsUnavailable, false)
+        gateway.close()
+    })
+
     it("still ingests receipts from a gateway that does not advertise them", async () => {
         let receipt: CloudBillingReceipt | null = null
         const gateway = new GatewayBillingCoordinator({

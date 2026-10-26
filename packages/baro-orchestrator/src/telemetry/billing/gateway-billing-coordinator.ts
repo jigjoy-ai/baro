@@ -298,7 +298,8 @@ export class GatewayBillingCoordinator {
                 this.pendingInvocations.size === 0 &&
                 this.measurementOutbox.size === 0,
             feedError: this.lastFeedError?.message ?? null,
-            receiptsUnavailable: receiptsUnavailable(),
+            // Only when the receipts are all that's missing: a measurement still in the outbox is a real loss.
+            receiptsUnavailable: receiptsUnavailable() && this.measurementOutbox.size === 0,
         })
     }
 
