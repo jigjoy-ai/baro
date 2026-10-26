@@ -75,6 +75,17 @@ worker's story retry budget; the Board owns the next lease/reroute and honors
 inside one inference round. Permanent capacity rerouting is bounded by the
 finite set of eligible routes rather than by the operational retry counter.
 
+An `infrastructure` or `transport` attempt was never judged, so its retry
+offer carries `resume: { preservedBranch, reverify: true }`. Before spawning
+an agent, StoryFactory replays only the agent's own commits from the
+preserved branch onto the latest run branch (the host's leftover-preservation
+commit is excluded) and runs the story's gate on them. A green gate settles
+the lease without an agent attempt: the gate commands become the attempt's
+command evidence and a terminal turn describes the commit, so Critic and
+integration judge it exactly as an agent's. A red or inconclusive gate, a
+conflicting replay, or no agent commits falls back to a fresh worktree and
+the ordinary recovery prompt.
+
 ## Distributed autonomy and runtime graph changes
 
 Mozaik transports typed events and model/tool items. Baro participants own the

@@ -507,6 +507,35 @@ export class WorktreeManager {
         }
     }
 
+    /**
+     * Resume the story at the run branch with only the commits its agent made
+     * on a preserved attempt; the host's preservation commit of leftover
+     * files is not the agent's answer and is left out. Null when the agent
+     * committed nothing the run branch lacks.
+     */
+    async restoreAgentCommits(
+        storyId: string,
+        preservedRef: string,
+    ): Promise<{ path: string; head: string } | null> {
+        const tip = await this.resolveRestorePoint(storyId, preservedRef)
+        const { stdout: subject } = await exec(
+            "git",
+            ["log", "-1", "--format=%s", tip],
+            { cwd: this.repoRoot },
+        )
+        const agentTip = subject.trim() === preservationSubject(storyId)
+            ? await this.resolveRestorePoint(storyId, `${tip}^`)
+            : tip
+        const { baseSha } = await this.resumeFromSuspension(storyId, {
+            restoreFrom: agentTip,
+        })
+        const path = this.paths.get(storyId)
+        if (!path) return null
+        const { stdout } = await exec("git", ["rev-parse", "HEAD"], { cwd: path })
+        const head = stdout.trim()
+        return head === baseSha ? null : { path, head }
+    }
+
     /** A restore point is pinned to a commit SHA before it is replayed, so the
      * rebase can never move the immutable recovery ref it names. */
     private async resolveRestorePoint(
@@ -1411,11 +1440,7 @@ export class WorktreeManager {
 
             await exec(
                 "git",
-                [
-                    "commit",
-                    "-m",
-                    `baro: preserve failed work for story ${storyId}`,
-                ],
+                ["commit", "-m", preservationSubject(storyId)],
                 { cwd: worktreePath },
             )
             const { stdout: remaining } = await exec(
@@ -1597,6 +1622,10 @@ function sanitize(storyId: string): string {
     if (safe === storyId) return safe
     const identity = createHash("sha256").update(storyId).digest("hex").slice(0, 12)
     return `${safe.slice(0, 80)}-${identity}`
+}
+
+function preservationSubject(storyId: string): string {
+    return `baro: preserve failed work for story ${storyId}`
 }
 
 function meaningfulStatusLines(status: string): string[] {

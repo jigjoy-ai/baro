@@ -1390,6 +1390,11 @@ describe("CollectiveBoard", () => {
             const offers = await waitForCount(env.events, WorkOffered.is, 2)
             assert.equal(offers[1]?.data.request.recovery?.kind, "execution")
             assert.equal(offers[1]?.data.request.recovery?.branch, preservedBranch)
+            assert.equal(
+                offers[1]?.data.request.resume,
+                undefined,
+                "a judged-and-rejected attempt is never re-verified",
+            )
             assert.match(
                 offers[1]?.data.request.prompt ?? "",
                 /acceptance gate failed: required behavior is missing/,
@@ -1399,6 +1404,43 @@ describe("CollectiveBoard", () => {
                 offers[1]?.data.request.prompt ?? "",
                 /baro-recovery\/forged\/stale/,
             )
+
+            // The next attempt dies before writing anything: the branch it inherits is still
+            // the rejected one, which must not be re-submitted as if nobody had judged it.
+            env.deliverSemanticEvent(
+                source("broker"),
+                WorkLeaseGranted.create({
+                    runId: "run-quality-fail",
+                    offerId: offers[1]!.data.offerId,
+                    leaseId: "lease-quality-2",
+                    workerId: "worker",
+                    generation: offers[1]!.data.generation,
+                    request: offers[1]!.data.request,
+                }),
+            )
+            env.deliverSemanticEvent(
+                source("S1"),
+                StoryResult.create({
+                    runId: "run-quality-fail",
+                    storyId: "S1",
+                    leaseId: "lease-quality-2",
+                    generation: offers[1]!.data.generation,
+                    success: false,
+                    attempts: 1,
+                    durationSecs: 5,
+                    error: "network dropped",
+                    failure: { kind: "transport", code: "connection_reset" },
+                }),
+            )
+            const cleanups = await waitForCount(env.events, WorkspaceCleanupRequested.is, 2)
+            env.deliverSemanticEvent(
+                source("repo"),
+                WorkspaceCleanupCompleted.create({ ...cleanups[1]!.data }),
+            )
+            await provideContext(env, "run-quality-fail", 3)
+            const third = (await waitForCount(env.events, WorkOffered.is, 3))[2]!
+            assert.equal(third.data.request.recovery?.kind, "transport")
+            assert.equal(third.data.request.resume, undefined)
         })
     })
 
@@ -2069,6 +2111,10 @@ describe("CollectiveBoard", () => {
             const retry = (await waitForCount(env.events, WorkOffered.is, 2))[1]!
             assert.deepEqual(retry.data.excludedRouteIds, ["route-a"])
             assert.equal(retry.data.request.recovery?.kind, "transport")
+            assert.deepEqual(retry.data.request.resume, {
+                preservedBranch: `${runId}/recovery/S1/transport`,
+                reverify: true,
+            })
             assert.equal(env.events.filter(RecoveryEvaluationStarted.is).length, 0)
             assert.equal(
                 env.events
@@ -2132,6 +2178,74 @@ describe("CollectiveBoard", () => {
             await provideContext(env, runId, 2)
             const retry = (await waitForCount(env.events, WorkOffered.is, 2))[1]!
             assert.equal(retry.data.request.recovery?.kind, "infrastructure")
+            assert.equal(
+                retry.data.request.resume,
+                undefined,
+                "nothing was preserved, so there is no commit to re-verify",
+            )
+            assert.equal(env.events.filter(RecoveryEvaluationStarted.is).length, 0)
+        })
+    })
+
+    it("re-offers an unjudged infrastructure failure with a re-verify directive on its preserved commit", async () => {
+        await withTempDir("collective-infra-reverify-", async (dir) => {
+            const runId = "run-infra-reverify"
+            const prdPath = join(dir, "prd.json")
+            writeFileSync(prdPath, JSON.stringify(prd(), null, 2) + "\n")
+            const board = new CollectiveBoard({
+                runId,
+                prdPath,
+                cwd: dir,
+                timeoutSecs: 60,
+                expectRecoveryDecisions: true,
+            })
+            const env = joinWithCapture(board)
+
+            env.deliverSemanticEvent(source("operator"), RunStartRequest.create({ reason: "test" }))
+            env.deliverSemanticEvent(source("repo"), RunPrepared.create({ runId, baseSha: null }))
+            await provideContext(env, runId, 1)
+            const offer = await waitFor(env.events, WorkOffered.is)
+            assert.equal(offer.data.request.resume, undefined)
+            env.deliverSemanticEvent(
+                source("broker"),
+                WorkLeaseGranted.create({
+                    runId,
+                    offerId: offer.data.offerId,
+                    leaseId: "lease-silent",
+                    workerId: "worker",
+                    generation: offer.data.generation,
+                    request: offer.data.request,
+                }),
+            )
+            env.deliverSemanticEvent(
+                source("S1"),
+                StoryResult.create({
+                    runId,
+                    storyId: "S1",
+                    leaseId: "lease-silent",
+                    generation: offer.data.generation,
+                    success: false,
+                    attempts: 1,
+                    durationSecs: 600,
+                    error: "attempt 1 produced no output for 600s",
+                    failure: { kind: "infrastructure", code: "command_timeout" },
+                }),
+            )
+            const cleanup = await waitFor(env.events, WorkspaceCleanupRequested.is)
+            assert.equal(cleanup.data.preserveForRecovery, true)
+            const preservedBranch = `baro-recovery/${runId}/S1/1`
+            env.deliverSemanticEvent(
+                source("repo"),
+                WorkspaceCleanupCompleted.create({ ...cleanup.data, preservedBranch }),
+            )
+            await waitFor(env.events, RecoveryStarted.is)
+            await provideContext(env, runId, 2)
+            const retry = (await waitForCount(env.events, WorkOffered.is, 2))[1]!
+            assert.equal(retry.data.request.recovery?.kind, "infrastructure")
+            assert.deepEqual(retry.data.request.resume, {
+                preservedBranch,
+                reverify: true,
+            })
             assert.equal(env.events.filter(RecoveryEvaluationStarted.is).length, 0)
         })
     })

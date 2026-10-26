@@ -337,6 +337,9 @@ export class CollectiveBoard extends SerializedObserver {
         }
     >()
     private readonly recoveryAborted = new Set<string>()
+    /** Stories whose recovery branch an earlier attempt left (a later one failed without
+     *  preserving anything): that branch was already judged, so it is not re-verified. */
+    private readonly inheritedRecoveryBranch = new Set<string>()
     /** Capacity recovery is deterministic routing, not a Surgeon decision. */
     private readonly capacityRecoveryPending = new Set<string>()
     /** Non-work incidents are retried/rescheduled independently of Surgeon
@@ -745,6 +748,7 @@ export class CollectiveBoard extends SerializedObserver {
                     reason: event.data.error,
                     branch: event.data.branch,
                 })
+                this.inheritedRecoveryBranch.delete(event.data.storyId)
                 this.failStory(
                     event.data.storyId,
                     event.data.error,
@@ -839,6 +843,7 @@ export class CollectiveBoard extends SerializedObserver {
                         ...recovery,
                         branch: event.data.preservedBranch,
                     })
+                    this.inheritedRecoveryBranch.delete(event.data.storyId)
                 }
             }
             this.pendingCleanup.delete(event.data.cleanupId)
@@ -892,6 +897,7 @@ export class CollectiveBoard extends SerializedObserver {
                     ? { branch: event.data.retainedBranch }
                     : {}),
             })
+            this.inheritedRecoveryBranch.delete(event.data.storyId)
             this.emit(
                 ConductorState.create({
                     phase: "running_level",
@@ -1651,6 +1657,10 @@ export class CollectiveBoard extends SerializedObserver {
                 reason: error,
                 ...(previousBranch ? { branch: previousBranch } : {}),
             })
+            // Until this attempt's cleanup preserves a branch of its own, the one above is an
+            // earlier attempt's.
+            if (previousBranch) this.inheritedRecoveryBranch.add(storyId)
+            else this.inheritedRecoveryBranch.delete(storyId)
         }
         this.wave.pending.delete(storyId)
         addUnique(this.wave.failed, storyId)
@@ -3059,12 +3069,21 @@ export class CollectiveBoard extends SerializedObserver {
                     : {}),
                 ...(surface ? { surface } : {}),
                 ...(recovery ? { recovery } : {}),
-                // Only a host-suspended story is resumed: the spawn must
-                // re-base through the host-owned step rather than start from
-                // a fresh worktree that abandons the preserved attempt.
+                // A host-suspended or unjudged story re-bases through the
+                // host-owned step rather than starting from a fresh worktree
+                // that abandons the preserved attempt.
                 ...(recovery?.kind === "dependency"
                     ? { resume: { preservedBranch: recovery.branch ?? null } }
-                    : {}),
+                    : recovery?.branch &&
+                        isUnjudgedRecovery(recovery.kind) &&
+                        !this.inheritedRecoveryBranch.has(story.id)
+                      ? {
+                            resume: {
+                                preservedBranch: recovery.branch,
+                                reverify: true as const,
+                            },
+                        }
+                      : {}),
             },
         })
         this.offers.recordOffer(offered.data)
@@ -3911,6 +3930,12 @@ function isOperationalFailure(
     // in the operational lane.
     return failure.code !== "acceptance_not_met" &&
         failure.code !== "canonical_check_failed"
+}
+
+/** An attempt that died here was never judged, so its commits may already be
+ * the answer: the next offer re-runs the gate on them before an agent. */
+function isUnjudgedRecovery(kind: string): boolean {
+    return kind === "infrastructure" || kind === "transport"
 }
 
 function failureImplicatesWorkerRoute(failure: StoryFailureData): boolean {

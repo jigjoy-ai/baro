@@ -140,7 +140,11 @@ of the exact active lease/candidate, without another WorkOffer. Exhaustion
 preserves the candidate and fails closed without an implementation recovery
 wave; an evaluated rejection remains a semantic quality failure. This is
 re-evaluation only: a trusted per-story CandidateVerifier that can create new
-command evidence in the isolated worktree is still future work.
+command evidence in the isolated worktree is still future work. The one
+exception is an unjudged (`infrastructure`/`transport`) attempt: its retry
+replays the agent's commits and StoryFactory runs the story's gate on them
+before spending an agent; a green gate's commands become the evidence
+([commit-reverification.ts](./commit-reverification.ts)).
 
 ### Runtime replan and recovery
 

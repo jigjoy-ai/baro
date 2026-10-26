@@ -63,6 +63,11 @@ import {
 import { isValidWorkBidEstimate } from "./work-market.js"
 import type { WorktreeManager } from "../integration/worktree.js"
 import {
+    ReverifiedCommitExecutor,
+    commitGatePassed,
+    type ReverifiedGateCommand,
+} from "../execution/commit-reverification.js"
+import {
     StoryOutcomeAuthority,
     type StoryResultAuthorityCorrelation,
 } from "../runtime/story-outcome-authority.js"
@@ -129,6 +134,12 @@ export interface StoryFactoryOptions {
     worktrees?: WorktreeManager
     /** Fail the lease when an isolated worktree cannot be created. */
     requireWorktree?: boolean
+    /** The story's gate, run on an unjudged attempt's restored commits; null
+     * means inconclusive. Absent disables re-verification. */
+    commitGate?(
+        cwd: string,
+        signal: AbortSignal,
+    ): Promise<readonly ReverifiedGateCommand[] | null>
     /**
      * Which LLM provider every story uses.
      *   "claude"  — StoryAgent wrapping a `claude` CLI subprocess
@@ -193,6 +204,12 @@ export interface StoryFactoryOptions {
     bid?: StoryFactoryBidOptions
 }
 
+interface ReverifiedSpawn {
+    path: string
+    head: string
+    gate: readonly ReverifiedGateCommand[]
+}
+
 export interface StoryFactoryBidOptions {
     routeId: string
     /** Existing backend:model@endpoint route syntax. */
@@ -234,6 +251,7 @@ export class StoryFactory extends BaseObserver {
     private readonly uncertifiedWorktreeIds = new Set<string>()
     /** One-way stop boundary set before repository cleanup. */
     private shuttingDown = false
+    private readonly reverification = new AbortController()
     private readonly leases = new Map<string, WorkLeaseGrantedData>()
     /** Retained until run completion so delayed authoritative billing for a
      * released lease cannot be attributed to a newer retry. */
@@ -700,6 +718,7 @@ export class StoryFactory extends BaseObserver {
             throw new RangeError("shutdown quiescence timeout must be non-negative")
         }
         this.shuttingDown = true
+        this.reverification.abort()
         // An abort callback may synchronously emit StoryResult and move its
         // execution out of `active`. Retain that pre-abort identity unless a
         // cooperative suspension below supplies the stronger certificate.
@@ -956,8 +975,13 @@ export class StoryFactory extends BaseObserver {
         // Legacy may fall back to cwd; collective treats missing isolation as failure.
         const worktrees = this.opts.worktrees
         let createdWorktree: string | null = null
+        let reverified: ReverifiedSpawn | null = null
         if (worktrees) {
-            if (req.resume) {
+            if (req.resume?.reverify) {
+                reverified = await this.reverifyPreservedCommits(req, worktrees)
+                createdWorktree =
+                    reverified?.path ?? (await worktrees.create(req.storyId))
+            } else if (req.resume) {
                 // The host owns re-basing a suspended story: it moves the
                 // recorded creation SHA in the same critical section, so the
                 // lineage gate later compares against the base this attempt
@@ -1060,7 +1084,10 @@ export class StoryFactory extends BaseObserver {
         const collectiveCorrelation = this.opts.coordinationMode === "collective"
             ? this.resultCorrelation(req)
             : null
-        const exec = this.executor.start(executionRequest, route, storyCwd, this.envRef, {
+        const executor = reverified
+            ? new ReverifiedCommitExecutor(reverified.head, reverified.gate)
+            : this.executor
+        const exec = executor.start(executionRequest, route, storyCwd, this.envRef, {
             openaiModel: this.opts.openaiModel,
             effort: this.opts.effort,
             ...(this.opts.coordinationMode === "collective"
@@ -1161,6 +1188,47 @@ export class StoryFactory extends BaseObserver {
             this,
             StorySpawned.create({ storyId: req.storyId }),
         )
+    }
+
+    /** Null sends the spawn down the fresh-worktree path, which is what every
+     * unjudged attempt got before re-verification existed. */
+    private async reverifyPreservedCommits(
+        req: StorySpawnRequestData,
+        worktrees: WorktreeManager,
+    ): Promise<ReverifiedSpawn | null> {
+        const preserved = req.resume?.preservedBranch
+        if (!this.opts.commitGate || !preserved) return null
+        const log = (line: string) =>
+            process.stderr.write(`[story-factory] ${req.storyId} ${line}\n`)
+        try {
+            const restored = await worktrees.restoreAgentCommits(
+                req.storyId,
+                preserved,
+            )
+            if (!restored) {
+                log(`has no committed work on ${preserved}; starting a fresh attempt`)
+                return null
+            }
+            if (this.shuttingDown) return null
+            const gate = await this.opts.commitGate(
+                restored.path,
+                this.reverification.signal,
+            )
+            if (commitGatePassed(gate)) {
+                log(`gate is green on ${restored.head} from ${preserved}; no agent attempt spent`)
+                return { ...restored, gate }
+            }
+            log(
+                `gate is ${gate === null ? "inconclusive" : "red"} on ${restored.head} ` +
+                    `from ${preserved}; starting a fresh attempt`,
+            )
+        } catch (error) {
+            log(
+                `could not re-verify ${preserved}: ` +
+                    `${(error as Error)?.message ?? String(error)}; starting a fresh attempt`,
+            )
+        }
+        return null
     }
 
     private resolveRoute(model: string) {
