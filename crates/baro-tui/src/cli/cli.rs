@@ -39,6 +39,13 @@ pub struct Cli {
     #[arg(long, default_value = ".")]
     pub cwd: String,
 
+    /// Linked git repository the goal also spans (repeatable; relative to --cwd). Planning-aware only: PRs open in --cwd.
+    #[arg(long = "repo", value_name = "PATH")]
+    pub repo: Vec<String>,
+
+    #[arg(skip)]
+    pub linked_repositories: Vec<crate::linked_repos::LinkedRepository>,
+
     /// Resume execution from existing prd.json
     #[arg(long)]
     pub resume: bool,
@@ -330,6 +337,8 @@ pub fn parse() -> Result<(Cli, Option<SessionLock>), Error> {
     .map_err(|msg| cmd.error(ErrorKind::ValueValidation, msg))?;
 
     let cwd = crate::canonical_path::canonicalize(&cli.cwd)?;
+    cli.linked_repositories = crate::linked_repos::resolve(&cwd, &cli.repo)
+        .map_err(|msg| cmd.error(ErrorKind::ValueValidation, msg))?;
 
     // A --base run never touches the checkout, so it must not hold the checkout's lock.
     let lock_dir = match cli.base.as_deref() {
@@ -432,6 +441,16 @@ mod tests {
         let cli = Cli::try_parse_from(["baro", "--base", "main", "goal"]).unwrap();
         assert_eq!(cli.base.as_deref(), Some("main"));
         assert_eq!(Cli::try_parse_from(["baro", "goal"]).unwrap().base, None);
+    }
+
+    #[test]
+    fn repo_is_repeatable_and_defaults_to_none() {
+        let cli =
+            Cli::try_parse_from(["baro", "--repo", "../engine", "--repo", "../schema", "goal"])
+                .unwrap();
+        assert_eq!(cli.repo, vec!["../engine", "../schema"]);
+        assert!(cli.linked_repositories.is_empty());
+        assert!(Cli::try_parse_from(["baro", "goal"]).unwrap().repo.is_empty());
     }
 
     #[test]

@@ -725,6 +725,39 @@ describe("Finalizer", () => {
         })
     })
 
+    it("states in the PR body that linked repositories received no branch, commit or PR (#46)", async () => {
+        await withTempDir("baro-finalizer-", async (dir) => {
+            const prdContents = JSON.stringify({
+                project: "Verify gate",
+                branchName: "baro/verify",
+                description: "Exercise the verify gate",
+                userStories: [],
+                linkedRepositories: [
+                    {
+                        name: "bedem",
+                        path: "/work/bedem",
+                        package: "@kornelija-hse-project/bedem-core",
+                        dependency: 'package.json dependencies "@kornelija-hse-project/bedem-core": "^0.6.89"',
+                    },
+                ],
+            })
+            const { body } = await runFinalizerWithVerify(
+                dir,
+                { name: "v", scripts: { lint: "true" } },
+                true,
+                undefined,
+                true,
+                undefined,
+                [],
+                prdContents,
+            )
+            assert.match(body, /## Linked repositories/)
+            assert.match(body, /- \*\*bedem\*\* — `\/work\/bedem`/)
+            assert.ok(body.indexOf("## Goal") < body.indexOf("## Linked repositories"))
+            assert.ok(body.indexOf("## Linked repositories") < body.indexOf("## Stories"))
+        })
+    })
+
     it("delivers a run verified only by git diff --check as not test-verified, not as a checkpoint (#215)", async () => {
         await withTempDir("baro-finalizer-", async (dir) => {
             const { title, body } = await runFinalizerWithVerify(dir, null, true, {

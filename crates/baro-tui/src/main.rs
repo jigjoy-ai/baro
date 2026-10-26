@@ -24,6 +24,7 @@ mod git;
 mod headless_transport;
 mod highlight;
 mod intake_runner;
+mod linked_repos;
 mod notification;
 mod operator_client;
 mod orchestrator_client;
@@ -948,6 +949,8 @@ async fn run_app(
     let critic_backend_explicitly_set = cli.critic_llm.is_some();
     let mut app = App::new();
     let cwd = canonical_path::canonicalize(&cli.cwd)?;
+    app.linked_repositories_context = linked_repos::render_context(&cwd, &cli.linked_repositories);
+    app.linked_repositories = cli.linked_repositories.clone();
 
     let rc = config::load_config(&cwd);
 
@@ -1401,6 +1404,11 @@ async fn run_app(
                     app.description = prd.description.clone();
                     app.decision_document = prd.decision_document.clone();
                     app.execution_mode = prd.execution_mode.clone();
+                    if app.linked_repositories.is_empty() {
+                        app.linked_repositories = prd.linked_repositories.clone();
+                        app.linked_repositories_context =
+                            linked_repos::render_context(&cwd, &app.linked_repositories);
+                    }
                     restore_conversation_from_prd(&mut app, &prd, &cwd);
                     let stories = review_stories_from_prd(&prd);
                     entered_resume = true;
@@ -2904,6 +2912,7 @@ async fn run_app(
                                         );
                                         attach_conversation_metadata(&mut prd, &app);
                                         stamp_goal_fingerprint(&mut prd, launch_goal.as_deref());
+                                        prd.linked_repositories = app.linked_repositories.clone();
                                         if let Err(message) =
                                             prd_write_guard::guard_fresh_plan_write(app.is_resume)
                                         {
@@ -4175,7 +4184,7 @@ fn spawn_planner(
     let cwd = cwd.to_path_buf();
     let model = app.model_for_phase("planning");
     let architect_model = app.model_for_phase("architect");
-    let context = app.claude_md_content.clone();
+    let context = app.planning_context();
     let quick = app.quick;
     let mode = app.mode.clone();
     let confirm_mode = app.confirm_mode;
@@ -4335,7 +4344,7 @@ fn spawn_planner_stage_b(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>, mode
     let goal = app.goal_input.clone();
     let cwd = cwd.to_path_buf();
     let model = app.model_for_phase("planning");
-    let context = app.claude_md_content.clone();
+    let context = app.planning_context();
     let decision_doc = app.decision_document.clone();
     let planner_llm = app.planner_llm;
     let openai_api_key = app.openai_api_key.clone();
@@ -4487,6 +4496,7 @@ fn confirm_and_execute(
     );
     attach_conversation_metadata(&mut prd, app);
     stamp_goal_fingerprint(&mut prd, launch_goal);
+    prd.linked_repositories = app.linked_repositories.clone();
     // A resumed run already has its plan on disk; writing it again here is
     // exactly the fresh-plan overwrite the guard exists to refuse (#177). The
     // branch step below persists the same plan once the branch is verified.
@@ -4666,6 +4676,7 @@ async fn begin_progressive_execution(
     .map_err(|error| error.to_string())?;
     attach_conversation_metadata(&mut bootstrap, app);
     stamp_goal_fingerprint(&mut bootstrap, launch_goal);
+    bootstrap.linked_repositories = app.linked_repositories.clone();
 
     let actual_branch = git::create_fresh_branch(cwd, &bootstrap.branch_name)
         .await

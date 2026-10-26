@@ -146,6 +146,18 @@ export interface PrdFile {
     executionMode?: PrdExecutionMode
     /** Durable collective control-plane metadata. Planners may omit it. */
     runtimeGraph?: PrdRuntimeGraphState
+    /** `--repo` topology written by Rust; this run never executes in these repos. */
+    linkedRepositories?: PrdLinkedRepository[]
+}
+
+export interface PrdLinkedRepository {
+    name: string
+    path: string
+    package?: string
+    /** How the primary repository consumes it, e.g. a manifest dependency entry. */
+    dependency?: string
+    branch?: string
+    headSha?: string
 }
 
 /** Progressive plan construction vs. genuine post-plan runtime adaptation. */
@@ -299,6 +311,11 @@ export function persistPrdPreserving(
         ) {
             out.goalFingerprint = disk.goalFingerprint
         }
+        // Rust-owned like `goalFingerprint`; a planner-built snapshot never carries it.
+        if (out.linkedRepositories === undefined) {
+            const linked = normalizeLinkedRepositories(disk.linkedRepositories)
+            if (linked.length > 0) out.linkedRepositories = linked
+        }
 
         const diskStories = new Map<string, Record<string, unknown>>()
         if (Array.isArray(disk.userStories)) {
@@ -367,6 +384,7 @@ export function normalizePrd(input: Partial<PrdFile>, source: string): PrdFile {
         source,
         goalContract,
     )
+    const linkedRepositories = normalizeLinkedRepositories(input.linkedRepositories)
     const userStories = stories.map((s, i) => normalizeStory(s, i, source))
     // Pre-governance focused PRDs had a GoalEnvelope but no explicit coverage
     // map. One story necessarily owns the whole focused goal, so this exact
@@ -390,7 +408,27 @@ export function normalizePrd(input: Partial<PrdFile>, source: string): PrdFile {
         decisionDocument,
         executionMode,
         ...(runtimeGraph ? { runtimeGraph } : {}),
+        ...(linkedRepositories.length > 0 ? { linkedRepositories } : {}),
     }
+}
+
+const LINKED_REPOSITORY_OPTIONAL_FIELDS = ["package", "dependency", "branch", "headSha"] as const
+
+/** Report-only metadata: malformed entries are dropped, never fatal. */
+export function normalizeLinkedRepositories(value: unknown): PrdLinkedRepository[] {
+    if (!Array.isArray(value)) return []
+    return value.flatMap((entry): PrdLinkedRepository[] => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return []
+        const record = entry as Record<string, unknown>
+        if (typeof record.name !== "string" || !record.name.trim()) return []
+        if (typeof record.path !== "string" || !record.path.trim()) return []
+        const repo: PrdLinkedRepository = { name: record.name, path: record.path }
+        for (const field of LINKED_REPOSITORY_OPTIONAL_FIELDS) {
+            const fieldValue = record[field]
+            if (typeof fieldValue === "string" && fieldValue.trim()) repo[field] = fieldValue
+        }
+        return [repo]
+    })
 }
 
 function normalizeConversationMetadata(

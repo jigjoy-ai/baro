@@ -39,6 +39,12 @@ import { formatDeclaredBudgetEvidence } from "../verification/declared-test-budg
 import { provesOnlyHygiene } from "../verification/hygiene-command.js"
 import { renderRuntimeAmendments } from "../planning/domain/runtime-amendments.js"
 import { runRepositoryCommand as execFileAsync } from "./repository-command.js"
+import {
+    buildLinkedRepositoryReports,
+    linkedRepositoryLogLines,
+    renderLinkedRepositoriesSection,
+    type LinkedRepositoryReport,
+} from "./linked-repositories.js"
 import type { StoryOutcomeAuthority } from "../runtime/story-outcome-authority.js"
 import {
     FinalizeStarted,
@@ -476,6 +482,11 @@ export class Finalizer extends BaseObserver {
         const { passed, failed } = this.partition(orderedStories)
         const filesStats = await this.collectFileStats()
         const totalSecs = run.totalDurationSecs
+        const linkedRepositories = await buildLinkedRepositoryReports(
+            prd?.linkedRepositories ?? [],
+            filesStats.paths,
+        )
+        for (const line of linkedRepositoryLogLines(linkedRepositories)) this.log(line)
 
         // Objective gate: build + run tests on the fully-merged branch. A run
         // the Critic judged "green" can still merge with tests actually failing;
@@ -562,6 +573,7 @@ export class Finalizer extends BaseObserver {
             totalSecs,
             sequentialSecs: this.sequentialSeconds(),
             mergeFailed: this.mergeFailed,
+            linkedRepositories,
         })
 
         // The per-story merge-back push (gitPushWithRetry) is async and can still
@@ -749,8 +761,9 @@ export class Finalizer extends BaseObserver {
     private async collectFileStats(): Promise<{
         created: number
         modified: number
+        paths: string[]
     }> {
-        if (!this.baseSha) return { created: 0, modified: 0 }
+        if (!this.baseSha) return { created: 0, modified: 0, paths: [] }
         try {
             const { stdout } = await execFileAsync(
                 "git",
@@ -759,14 +772,18 @@ export class Finalizer extends BaseObserver {
             )
             let created = 0
             let modified = 0
+            const paths: string[] = []
             for (const line of stdout.split("\n")) {
                 const ch = line.charAt(0)
                 if (ch === "A") created++
                 else if (ch === "M" || ch === "R") modified++
+                const path = line.split("\t").pop()
+                // A deleted path no longer patches anything.
+                if (ch !== "D" && line.includes("\t") && path) paths.push(path)
             }
-            return { created, modified }
+            return { created, modified, paths }
         } catch {
-            return { created: 0, modified: 0 }
+            return { created: 0, modified: 0, paths: [] }
         }
     }
 
@@ -871,6 +888,7 @@ export class Finalizer extends BaseObserver {
         totalSecs: number
         sequentialSecs: number
         mergeFailed?: Map<string, string>
+        linkedRepositories?: LinkedRepositoryReport[]
     }): string {
         const { prd, run, orderedStories, passed, failed, commits, filesStats } =
             args
@@ -948,6 +966,8 @@ export class Finalizer extends BaseObserver {
             lines.push(prd.description.trim())
             lines.push("")
         }
+
+        lines.push(...renderLinkedRepositoriesSection(args.linkedRepositories ?? []))
 
         // DAG plan
         if (this.levels.size > 0) {
