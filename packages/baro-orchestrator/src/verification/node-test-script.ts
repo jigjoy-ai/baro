@@ -52,19 +52,57 @@ interface ParsedNodeTestScript {
     globs: readonly string[]
 }
 
+// After `--test` a bare token is a glob unless it is one of these flags' value;
+// `node --test --import tsx test/*.ts` must not lose `tsx` to the globs.
+const SEPARATE_VALUE_FLAGS = new Set([
+    "--import",
+    "--require",
+    "-r",
+    "--loader",
+    "--experimental-loader",
+    "--conditions",
+    "-C",
+    "--disable-warning",
+    "--input-type",
+    "--redirect-warnings",
+    "--unhandled-rejections",
+    "--watch-path",
+    "--env-file",
+    "--env-file-if-exists",
+    "--test-concurrency",
+    "--test-coverage-branches",
+    "--test-coverage-exclude",
+    "--test-coverage-functions",
+    "--test-coverage-include",
+    "--test-coverage-lines",
+    "--test-global-setup",
+    "--test-isolation",
+    "--test-name-pattern",
+    "--test-reporter",
+    "--test-reporter-destination",
+    "--test-shard",
+    "--test-skip-pattern",
+    "--test-timeout",
+])
+
 function parseNodeTestScript(tokens: readonly string[]): ParsedNodeTestScript | null {
     if (tokens[0] !== "node") return null
     const testIndex = tokens.indexOf("--test", 1)
     if (testIndex < 0) return null
     const flags = [...tokens.slice(1, testIndex)]
     const globs: string[] = []
-    for (const token of tokens.slice(testIndex + 1)) {
-        if (token.startsWith("-")) flags.push(token)
-        else globs.push(token)
+    const rest = tokens.slice(testIndex + 1)
+    for (let i = 0; i < rest.length; i++) {
+        const token = rest[i]!
+        if (!token.startsWith("-")) globs.push(token)
+        else if (SEPARATE_VALUE_FLAGS.has(token) && i + 1 < rest.length) {
+            flags.push(token, rest[++i]!)
+        } else flags.push(token)
     }
     if (globs.length === 0) return null
     const otherFlags: string[] = []
     for (let i = 0; i < flags.length; i++) {
+        if (flags[i] === "--import=tsx") continue
         if (flags[i] === "--import" && flags[i + 1] === "tsx") {
             i += 1
             continue

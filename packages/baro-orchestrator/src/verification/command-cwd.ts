@@ -35,13 +35,17 @@ function sameDirectory(a: string, b: string): boolean {
     return a === b || pathAliases(a).includes(b)
 }
 
-/** `<tmpdir>/baro-worktrees/<runId>/<agentId>`, only when it is runCwd's sibling. */
-function siblingWorktreeRoot(runCwd: string, candidate: string): string | null {
+/**
+ * `<tmpdir>/baro-worktrees/<runId>/<agentId>`, when it is runCwd's sibling or
+ * has vanished — e.g. a workspace under a removed `__run` after the run cwd
+ * fell back to the host checkout.
+ */
+function remappableWorktreeRoot(runCwd: string, candidate: string): string | null {
     const parts = candidate.split(sep)
     const at = parts.lastIndexOf("baro-worktrees")
     if (at < 0 || parts.length < at + 3) return null
     const root = parts.slice(0, at + 3).join(sep)
-    return sameDirectory(dirname(root), dirname(runCwd)) ? root : null
+    return sameDirectory(dirname(root), dirname(runCwd)) || !existsSync(root) ? root : null
 }
 
 /** Re-read at spawn time, so a root removed since planning is never reused. */
@@ -92,7 +96,7 @@ export function resolveCommandCwd(
     if (sameDirectory(runCanonical, canonical) || strictlyUnder(runCanonical, canonical)) {
         return commandCwd
     }
-    const worktreeRoot = siblingWorktreeRoot(runCanonical, canonical)
+    const worktreeRoot = remappableWorktreeRoot(runCanonical, canonical)
     if (worktreeRoot) {
         const remapped = join(runCwd, relative(worktreeRoot, canonical))
         if (existsSync(remapped)) return remapped

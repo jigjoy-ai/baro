@@ -85,4 +85,59 @@ describe("coalesceNodeTestScripts", () => {
         ])
         assert.equal(result[0]!.cwd, "/repo")
     })
+
+    it("keeps a value-taking flag's argument out of the globs when it follows --test", () => {
+        const commands = [
+            { label: "npm run test", tool: "npm", args: ["run", "test"], cwd: "/repo" },
+        ]
+        const result = coalesceNodeTestScripts(
+            commands,
+            () => ({
+                scripts: {
+                    test: "node --test --import tsx --test-reporter spec --import ./setup.ts test/*.test.ts",
+                },
+            }),
+        )
+        assert.deepEqual(result[0]!.args, [
+            "--import",
+            "tsx",
+            "--test-reporter",
+            "spec",
+            "--import",
+            "./setup.ts",
+            "--test",
+            "test/*.test.ts",
+        ])
+    })
+
+    it("keeps the values of warning, coverage-threshold and watch flags out of the globs", () => {
+        const result = coalesceNodeTestScripts(
+            [{ label: "npm run test", tool: "npm", args: ["run", "test"] }],
+            () => ({
+                scripts: {
+                    test: "node --test --disable-warning ExperimentalWarning --test-coverage-lines 80 --watch-path src test/*.test.ts",
+                },
+            }),
+        )
+        assert.deepEqual(result[0]!.args, [
+            "--import",
+            "tsx",
+            "--disable-warning",
+            "ExperimentalWarning",
+            "--test-coverage-lines",
+            "80",
+            "--watch-path",
+            "src",
+            "--test",
+            "test/*.test.ts",
+        ])
+    })
+
+    it("does not import tsx twice for an inline --import=tsx", () => {
+        const result = coalesceNodeTestScripts(
+            [{ label: "npm run test", tool: "npm", args: ["run", "test"] }],
+            () => ({ scripts: { test: "node --import=tsx --test test/*.test.ts" } }),
+        )
+        assert.deepEqual(result[0]!.args, ["--import", "tsx", "--test", "test/*.test.ts"])
+    })
 })
