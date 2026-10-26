@@ -1404,6 +1404,43 @@ describe("CollectiveBoard", () => {
                 offers[1]?.data.request.prompt ?? "",
                 /baro-recovery\/forged\/stale/,
             )
+
+            // The next attempt dies before writing anything: the branch it inherits is still
+            // the rejected one, which must not be re-submitted as if nobody had judged it.
+            env.deliverSemanticEvent(
+                source("broker"),
+                WorkLeaseGranted.create({
+                    runId: "run-quality-fail",
+                    offerId: offers[1]!.data.offerId,
+                    leaseId: "lease-quality-2",
+                    workerId: "worker",
+                    generation: offers[1]!.data.generation,
+                    request: offers[1]!.data.request,
+                }),
+            )
+            env.deliverSemanticEvent(
+                source("S1"),
+                StoryResult.create({
+                    runId: "run-quality-fail",
+                    storyId: "S1",
+                    leaseId: "lease-quality-2",
+                    generation: offers[1]!.data.generation,
+                    success: false,
+                    attempts: 1,
+                    durationSecs: 5,
+                    error: "network dropped",
+                    failure: { kind: "transport", code: "connection_reset" },
+                }),
+            )
+            const cleanups = await waitForCount(env.events, WorkspaceCleanupRequested.is, 2)
+            env.deliverSemanticEvent(
+                source("repo"),
+                WorkspaceCleanupCompleted.create({ ...cleanups[1]!.data }),
+            )
+            await provideContext(env, "run-quality-fail", 3)
+            const third = (await waitForCount(env.events, WorkOffered.is, 3))[2]!
+            assert.equal(third.data.request.recovery?.kind, "transport")
+            assert.equal(third.data.request.resume, undefined)
         })
     })
 
