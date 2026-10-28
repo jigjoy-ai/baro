@@ -198,7 +198,7 @@ describe("script entrypoints run their main()", () => {
         assert.equal(invalidBackend.code, 2)
         assert.match(
             invalidBackend.stderr,
-            /must be 'claude', 'openai', 'codex', 'opencode', or 'pi'/,
+            /must be 'claude', 'openai', 'codex', 'opencode', 'pi', or 'devin'/,
         )
 
         const help = await runScript("cli.ts", ["--help"])

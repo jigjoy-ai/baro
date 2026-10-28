@@ -121,9 +121,10 @@ function parseArgs(argv: readonly string[]): Args {
         llm !== "openai" &&
         llm !== "codex" &&
         llm !== "opencode" &&
-        llm !== "pi"
+        llm !== "pi" &&
+        llm !== "devin"
     ) {
-        fatal(`--llm must be claude, openai, codex, opencode, or pi; got ${llm}`)
+        fatal(`--llm must be claude, openai, codex, opencode, pi, or devin; got ${llm}`)
     }
     const timeoutRaw = values.get("--timeout-ms")
     const timeoutMs = timeoutRaw === undefined ? undefined : Number(timeoutRaw)

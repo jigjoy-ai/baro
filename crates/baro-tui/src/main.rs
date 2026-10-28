@@ -168,6 +168,7 @@ fn apply_primary_provider_choice(
         app::LlmProvider::Codex => app::Planner::Codex,
         app::LlmProvider::OpenCode => app::Planner::OpenCode,
         app::LlmProvider::Pi => app::Planner::Pi,
+        app::LlmProvider::Devin => app::Planner::Devin,
     };
 }
 
@@ -963,6 +964,7 @@ async fn run_app(
         Some("codex") => Planner::Codex,
         Some("opencode") => Planner::OpenCode,
         Some("pi") => Planner::Pi,
+        Some("devin") => Planner::Devin,
         _ => Planner::Claude,
     };
 
@@ -984,6 +986,7 @@ async fn run_app(
             "codex" => Planner::Codex,
             "opencode" => Planner::OpenCode,
             "pi" => Planner::Pi,
+            "devin" => Planner::Devin,
             _ => Planner::Claude,
         };
     }
@@ -995,6 +998,7 @@ async fn run_app(
         "codex" => app.planner = Planner::Codex,
         "opencode" => app.planner = Planner::OpenCode,
         "pi" => app.planner = Planner::Pi,
+        "devin" => app.planner = Planner::Devin,
         _ => {} // claude/hybrid keep the default or explicit --planner
     }
 
@@ -5418,6 +5422,7 @@ mod tests {
             crate::app::LlmProvider::Codex,
             crate::app::LlmProvider::OpenCode,
             crate::app::LlmProvider::Pi,
+            crate::app::LlmProvider::Devin,
         ] {
             let mut app = App::new();
             app.critic_llm = critic_backend;

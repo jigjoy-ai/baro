@@ -752,6 +752,7 @@ mod tests {
         assert!(!planner_on_bus(LlmProvider::Codex));
         assert!(!planner_on_bus(LlmProvider::OpenCode));
         assert!(!planner_on_bus(LlmProvider::Pi));
+        assert!(!planner_on_bus(LlmProvider::Devin));
     }
 
     #[test]

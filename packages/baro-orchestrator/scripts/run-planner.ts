@@ -18,6 +18,7 @@ import { runPlannerCodex } from "../src/planning/adapters/planner-codex.js"
 import { runPlannerOpenAI } from "../src/planning/adapters/planner-openai.js"
 import { runPlannerOpenCode } from "../src/planning/adapters/planner-opencode.js"
 import { runPlannerPi } from "../src/planning/adapters/planner-pi.js"
+import { runPlannerDevin } from "../src/planning/adapters/planner-devin.js"
 import {
     currentPlannerMcpServerCommand,
     parseProgressivePlannerMcpInvocation,
@@ -49,7 +50,7 @@ import { plainWindowsPath } from "../src/runtime/windows-path.js"
 interface Args {
     goal: string
     cwd: string
-    llm: "claude" | "openai" | "codex" | "opencode" | "pi"
+    llm: "claude" | "openai" | "codex" | "opencode" | "pi" | "devin"
     model?: string
     effort?: string
     contextFile?: string
@@ -71,7 +72,7 @@ let activeProgressiveLifecycle: ProgressivePlannerLifecycle | undefined
 function parseArgs(argv: string[]): Args {
     let goal: string | undefined
     let cwd: string | undefined
-    let llm: "claude" | "openai" | "codex" | "opencode" | "pi" | undefined
+    let llm: "claude" | "openai" | "codex" | "opencode" | "pi" | "devin" | undefined
     let model: string | undefined
     let effort: string | undefined
     let contextFile: string | undefined
@@ -95,10 +96,10 @@ function parseArgs(argv: string[]): Args {
                 break
             case "--llm": {
                 const v = required(argv, ++i, "--llm")
-                if (v !== "claude" && v !== "openai" && v !== "codex" && v !== "opencode" && v !== "pi") {
-                    fatal(`--llm must be 'claude' | 'openai' | 'codex' | 'opencode' | 'pi', got '${v}'`)
+                if (v !== "claude" && v !== "openai" && v !== "codex" && v !== "opencode" && v !== "pi" && v !== "devin") {
+                    fatal(`--llm must be 'claude' | 'openai' | 'codex' | 'opencode' | 'pi' | 'devin', got '${v}'`)
                 }
-                llm = v as "claude" | "openai" | "codex" | "opencode" | "pi"
+                llm = v as "claude" | "openai" | "codex" | "opencode" | "pi" | "devin"
                 break
             }
             case "--model":
@@ -378,6 +379,16 @@ async function main(): Promise<void> {
             })
         } else if (args.llm === "opencode") {
             prdJson = await runPlannerOpenCode({
+                goal: args.goal,
+                cwd: args.cwd,
+                model: args.model,
+                projectContext,
+                decisionDocument,
+                quick: args.quick,
+                modeContract,
+            })
+        } else if (args.llm === "devin") {
+            prdJson = await runPlannerDevin({
                 goal: args.goal,
                 cwd: args.cwd,
                 model: args.model,

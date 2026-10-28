@@ -54,6 +54,7 @@ import {
 import { installAwakeGapReporter } from "../src/runtime/awake-clock-log.js"
 import { runArchitectOpenCode } from "../src/planning/adapters/architect-opencode.js"
 import { runArchitectPi } from "../src/planning/adapters/architect-pi.js"
+import { runArchitectDevin } from "../src/planning/adapters/architect-devin.js"
 import { providerCallTimeoutError } from "../src/harness/openai/runtime.js"
 import { emitPlanLine } from "../src/planning/application/plan-events.js"
 import { extractModelJsonObject } from "../src/model-json.js"
@@ -86,7 +87,7 @@ interface Args {
     goal: string
     cwd: string
     /** Native architect backend selected for this isolated planning turn. */
-    llm: "claude" | "openai" | "codex" | "opencode" | "pi"
+    llm: "claude" | "openai" | "codex" | "opencode" | "pi" | "devin"
     model?: string
     effort?: string
     /** Host-owned wall-clock budget for the provider/harness call. */
@@ -112,7 +113,7 @@ interface Args {
 function parseArgs(argv: string[]): Args {
     let goal: string | undefined
     let cwd: string | undefined
-    let llm: "claude" | "openai" | "codex" | "opencode" | "pi" | undefined
+    let llm: "claude" | "openai" | "codex" | "opencode" | "pi" | "devin" | undefined
     let model: string | undefined
     let effort: string | undefined
     let timeoutMs: number | undefined
@@ -140,10 +141,10 @@ function parseArgs(argv: string[]): Args {
                 break
             case "--llm": {
                 const v = required(argv, ++i, "--llm")
-                if (v !== "claude" && v !== "openai" && v !== "codex" && v !== "opencode" && v !== "pi") {
-                    fatal(`--llm must be 'claude' | 'openai' | 'codex' | 'opencode' | 'pi', got '${v}'`)
+                if (v !== "claude" && v !== "openai" && v !== "codex" && v !== "opencode" && v !== "pi" && v !== "devin") {
+                    fatal(`--llm must be 'claude' | 'openai' | 'codex' | 'opencode' | 'pi' | 'devin', got '${v}'`)
                 }
-                llm = v as "claude" | "openai" | "codex" | "opencode" | "pi"
+                llm = v as "claude" | "openai" | "codex" | "opencode" | "pi" | "devin"
                 break
             }
             case "--model":
@@ -662,6 +663,19 @@ async function runInitialArchitect(
             onInvocation,
         })
     }
+    if (args.llm === "devin") {
+        return await runArchitectDevin({
+            goal: args.goal,
+            cwd: args.cwd,
+            model: args.model,
+            projectContext,
+            modeContract,
+            timeoutMs,
+            outcomeMode: args.outcomeFile !== undefined,
+            outcomeContractMode,
+            onInvocation,
+        })
+    }
     if (args.llm === "pi") {
         return await runArchitectPi({
             goal: args.goal,
@@ -927,6 +941,7 @@ function architectDecisionModel(
     if (args.llm === "codex") return args.model ?? "codex-default"
     if (args.llm === "opencode") return args.model ?? "opencode-default"
     if (args.llm === "pi") return args.model ?? "pi-default"
+    if (args.llm === "devin") return args.model ?? "devin-default"
     return architectCompilerModel(args, modeContract) ?? null
 }
 

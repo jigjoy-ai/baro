@@ -212,11 +212,13 @@ pub struct Cli {
     ///                      (needs OPENAI_API_KEY or the picker screen).
     ///   codex            — all phases via the OpenAI Codex CLI
     ///                      (ChatGPT Plus/Pro billing).
+    ///   devin            — all phases via the Devin CLI over ACP
+    ///                      (your Devin account; `devin auth login`).
     ///   hybrid           — Architect/Planner/Critic/Surgeon on Claude,
     ///                      Story on Codex; phase overrides win.
     ///   jigjoy           — hosted baro gateway holding the upstream keys
     ///                      (JIGJOY_API_KEY; URL via BARO_JIGJOY_URL).
-    #[arg(long, default_value="claude", value_parser=["claude", "openai", "codex", "opencode", "pi", "hybrid", "jigjoy"])]
+    #[arg(long, default_value="claude", value_parser=["claude", "openai", "codex", "opencode", "pi", "devin", "hybrid", "jigjoy"])]
     pub llm: String,
 
     /// Base URL for all OpenAI-routed calls instead of api.openai.com,
@@ -226,15 +228,15 @@ pub struct Cli {
 
     /// Per-phase backend overrides; each wins over `--llm` (including
     /// the `hybrid` preset) for that one phase.
-    #[arg(long, value_parser=["claude", "openai", "codex", "opencode", "pi"])]
+    #[arg(long, value_parser=["claude", "openai", "codex", "opencode", "pi", "devin"])]
     pub architect_llm: Option<String>,
-    #[arg(long, value_parser=["claude", "openai", "codex", "opencode", "pi"])]
+    #[arg(long, value_parser=["claude", "openai", "codex", "opencode", "pi", "devin"])]
     pub planner_llm: Option<String>,
-    #[arg(long, value_parser=["claude", "openai", "codex", "opencode", "pi"])]
+    #[arg(long, value_parser=["claude", "openai", "codex", "opencode", "pi", "devin"])]
     pub story_llm: Option<String>,
-    #[arg(long, value_parser=["claude", "openai", "codex", "opencode", "pi"])]
+    #[arg(long, value_parser=["claude", "openai", "codex", "opencode", "pi", "devin"])]
     pub critic_llm: Option<String>,
-    #[arg(long, value_parser=["claude", "openai", "codex", "opencode", "pi"])]
+    #[arg(long, value_parser=["claude", "openai", "codex", "opencode", "pi", "devin"])]
     pub surgeon_llm: Option<String>,
 
     /// Disable semantic memory (ONNX-embedding MemoryLibrarian); falls
@@ -376,7 +378,10 @@ pub fn falls_back_to_legacy_coordination(
         return false;
     }
     let story_backend = story_llm.unwrap_or(if llm == "hybrid" { "codex" } else { llm });
-    matches!(story_backend, "claude" | "codex" | "opencode" | "pi")
+    matches!(
+        story_backend,
+        "claude" | "codex" | "opencode" | "pi" | "devin"
+    )
 }
 
 #[cfg(test)]
@@ -528,7 +533,7 @@ mod tests {
     #[test]
     fn windows_cli_story_lanes_start_on_legacy_unless_chosen() {
         use super::falls_back_to_legacy_coordination as falls_back;
-        for llm in ["claude", "codex", "opencode", "pi", "hybrid"] {
+        for llm in ["claude", "codex", "opencode", "pi", "devin", "hybrid"] {
             assert!(falls_back(true, false, "collective", llm, None), "{llm}");
         }
         // Native lanes prove their own quiescence.

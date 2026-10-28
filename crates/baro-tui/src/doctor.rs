@@ -43,6 +43,7 @@ pub async fn run() -> i32 {
     results.push(check_codex_on_path().await);
     results.push(check_opencode_on_path().await);
     results.push(check_pi_on_path().await);
+    results.push(check_devin_on_path().await);
     results.push(check_gh_on_path().await);
     results.push(check_audit_dir_writable().await);
 
@@ -214,6 +215,21 @@ async fn check_pi_on_path() -> CheckResult {
             "pi on PATH (optional, used for --llm pi)",
             "binary not found",
             "Install pi if you want the `--llm pi` multi-provider path; otherwise this check is informational and other routes still work.",
+        ),
+    }
+}
+
+/// Optional — only needed for `--llm devin`.
+async fn check_devin_on_path() -> CheckResult {
+    match which::which("devin") {
+        Ok(path) => CheckResult::pass(
+            "devin on PATH (optional, used for --llm devin)",
+            format!("{}", path.display()),
+        ),
+        Err(_) => CheckResult::fail(
+            "devin on PATH (optional, used for --llm devin)",
+            "binary not found",
+            "Install the Devin CLI (https://docs.devin.ai/cli) and run `devin auth login` if you want the `--llm devin` path; otherwise this check is informational and other routes still work.",
         ),
     }
 }

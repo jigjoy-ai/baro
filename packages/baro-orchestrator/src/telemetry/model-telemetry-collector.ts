@@ -9,11 +9,13 @@ import {
     ModelInvocationMeasured,
     OpenCodeSystem,
     PiTurnEvent,
+    DevinTurnEvent,
     StoryRouted,
     type AgentResultData,
     type CodexTurnEventData,
     type OpenCodeSystemData,
     type PiTurnEventData,
+    type DevinTurnEventData,
 } from "../semantic-events.js"
 import {
     knownMetric,
@@ -194,6 +196,19 @@ export class ModelTelemetryCollector extends SerializedObserver {
             )
             return
         }
+        if (DevinTurnEvent.is(event) && event.data.turnType === "turn_end") {
+            const correlation = this.terminalCorrelation(
+                context,
+                event.data.agentId,
+            )
+            if (this.opts.outcomeAuthority && !correlation) return
+            this.publishOnce(
+                event,
+                this.fromDevin(event.data, correlation),
+                correlation,
+            )
+            return
+        }
         if (PiTurnEvent.is(event) && event.data.turnType === "message_end") {
             const message = record(event.data.raw.message)
             if (message.role !== "assistant") return
@@ -353,6 +368,28 @@ export class ModelTelemetryCollector extends SerializedObserver {
         }
     }
 
+    private fromDevin(
+        item: DevinTurnEventData,
+        correlation: StoryResultAuthorityCorrelation | null,
+    ): InvocationObservation {
+        const route = this.route(item.agentId, "devin", correlation)
+        const model = item.raw.model
+        return {
+            agentId: item.agentId,
+            backend: route.backend,
+            model: typeof model === "string" && model.trim() ? model : route.model,
+            requestedModel: requestedOf(route),
+            status: "succeeded",
+            granularity: "turn",
+            durationMs: unknownMetric("not_reported"),
+            tokens: tokenMetrics(record(item.raw.usage), "devin"),
+            // Devin bills in credits, not dollars.
+            cost: localCostMetrics("devin", unknownMetric("not_reported")),
+            provider: "devin",
+            providerRequestId: null,
+        }
+    }
+
     private fromPi(
         item: PiTurnEventData,
         correlation: StoryResultAuthorityCorrelation | null,
@@ -470,9 +507,12 @@ function tokenMetrics(usage: Record<string, unknown>, backend: string): ModelTok
         ["reasoning_output_tokens", "reasoning_tokens", "reasoning"],
         "provider_response",
     )
-    const inputTotal = ["claude", "opencode", "pi"].includes(backend)
-        ? sumKnown([rawInput, cached, cacheWrite])
-        : rawInput
+    // Devin reports uncached and cached input separately, and no cache writes.
+    const inputTotal = backend === "devin"
+        ? sumKnown([rawInput, cached])
+        : ["claude", "opencode", "pi"].includes(backend)
+          ? sumKnown([rawInput, cached, cacheWrite])
+          : rawInput
     const outputTotal = backend === "opencode"
         ? sumKnown([output, reasoning])
         : output
@@ -564,7 +604,7 @@ function firstMetric(metrics: readonly (Metric | null)[]): Metric {
 }
 
 function supportsCachedInput(backend: string): boolean {
-    return ["claude", "openai", "codex", "opencode", "pi"].includes(backend)
+    return ["claude", "openai", "codex", "opencode", "pi", "devin"].includes(backend)
 }
 
 function supportsCacheWrite(backend: string): boolean {

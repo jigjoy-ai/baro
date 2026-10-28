@@ -9,6 +9,7 @@ import {
     AgentResult,
     AgentTurnCompleted,
     CodexTurnEvent,
+    DevinTurnEvent,
     OneShotAttemptFinalized,
     OpenCodeSystem,
     PiTurnEvent,
@@ -237,6 +238,12 @@ export class AgentTurnProjector extends BaseObserver {
             else if (event.data.subtype === "step_finish") {
                 this.complete(event.data.agentId, "opencode", false)
             }
+            return
+        }
+        if (DevinTurnEvent.is(event)) {
+            if (!this.acceptsNativeSource(source, event.data.agentId)) return
+            this.selectNativeSource(source, event.data.agentId)
+            if (event.data.turnType === "turn_end") this.complete(event.data.agentId, "devin", false)
             return
         }
         if (PiTurnEvent.is(event)) {

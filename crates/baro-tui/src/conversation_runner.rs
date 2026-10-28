@@ -348,6 +348,7 @@ fn conversation_backend(provider: LlmProvider) -> &'static str {
         LlmProvider::Codex => "codex",
         LlmProvider::OpenCode => "opencode",
         LlmProvider::Pi => "pi",
+        LlmProvider::Devin => "devin",
     }
 }
 

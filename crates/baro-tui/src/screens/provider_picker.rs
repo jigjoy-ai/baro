@@ -7,6 +7,7 @@
 //!   - Codex            — shown when `codex` is on PATH
 //!   - OpenCode         — shown when `opencode` is on PATH
 //!   - Pi               — shown when `pi` is on PATH
+//!   - Devin            — shown when `devin` is on PATH
 //!
 //! Up/Down to highlight, Enter to confirm. The picked
 //! `LlmProvider` lands in `app.llm`; the next screen is decided in
@@ -51,6 +52,11 @@ fn provider_description(provider: LlmProvider) -> &'static [&'static str] {
             "model you configured in pi (any provider). No extra",
             "API keys needed, pi manages its own credentials.",
         ],
+        LlmProvider::Devin => &[
+            "Devin CLI, driven over ACP. Uses the model and plan of",
+            "your Devin account (`devin auth login`). Critic and other",
+            "text-only phases run with every Devin tool denied.",
+        ],
     }
 }
 
@@ -61,6 +67,7 @@ fn provider_title(provider: LlmProvider) -> &'static str {
         LlmProvider::Codex => "Codex CLI",
         LlmProvider::OpenCode => "OpenCode",
         LlmProvider::Pi => "Pi",
+        LlmProvider::Devin => "Devin",
     }
 }
 

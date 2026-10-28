@@ -425,6 +425,7 @@ mod tests {
             LlmProvider::OpenAI,
             LlmProvider::OpenCode,
             LlmProvider::Pi,
+            LlmProvider::Devin,
         ] {
             assert!(!should_forward_live_architect_diagnostic(llm, diagnostic));
         }

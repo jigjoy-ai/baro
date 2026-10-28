@@ -50,6 +50,8 @@ export interface CliParticipantSpec {
     closeDrainTimeoutMs: number
     /** Retain a bounded stderr tail for terminal failure classification. */
     captureStderrTail: boolean
+    /** Variables layered over the harness child environment. */
+    env?: Readonly<Record<string, string>>
 }
 
 export abstract class CliParticipant<
@@ -246,7 +248,7 @@ export abstract class CliParticipant<
         try {
             proc = spawn(this.spec.binary, args, {
                 cwd: this.spec.cwd,
-                env: harnessChildEnvironment(),
+                env: { ...harnessChildEnvironment(), ...this.spec.env },
                 stdio: [this.spec.stdinMode, "pipe", "pipe"],
                 detached: POSIX_PROCESS_GROUPS_SUPPORTED,
             })

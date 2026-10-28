@@ -880,7 +880,8 @@ export class DialogueAgent extends SerializedObserver {
             backend === "openai" ||
             backend === "codex" ||
             backend === "opencode" ||
-            backend === "pi"
+            backend === "pi" ||
+            backend === "devin"
         ) {
             this.feedbackCapableWorkers.add(storyId)
         } else {

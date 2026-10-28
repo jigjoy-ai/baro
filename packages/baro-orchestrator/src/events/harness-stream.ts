@@ -233,3 +233,32 @@ export interface PiUnknownEventData {
 
 export const PiUnknownEvent =
     defineSemanticEvent<PiUnknownEventData>("pi_unknown_event")
+
+// Devin CLI (`devin acp`) passthrough types — see docs/stream-protocols.md ("Devin").
+
+export interface DevinSystemData {
+    agentId: string
+    /** "session" | "stopped" | "finished" | "failed" | "permission" */
+    subtype: string
+    raw: Readonly<Record<string, unknown>>
+}
+
+export const DevinSystem = defineSemanticEvent<DevinSystemData>("devin_system")
+
+export interface DevinTurnEventData {
+    agentId: string
+    /** "turn_end": `raw.usage` holds input_tokens (uncached), cached_input_tokens, output_tokens. */
+    turnType: string
+    raw: Readonly<Record<string, unknown>>
+}
+
+export const DevinTurnEvent = defineSemanticEvent<DevinTurnEventData>("devin_turn_event")
+
+export interface DevinItemEventData {
+    agentId: string
+    /** The ACP `sessionUpdate` discriminator. */
+    itemType: string
+    raw: Readonly<Record<string, unknown>>
+}
+
+export const DevinItemEvent = defineSemanticEvent<DevinItemEventData>("devin_item_event")

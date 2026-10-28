@@ -60,7 +60,7 @@ baro stop <run-id>                              # stop one
 ## The flags that matter
 
 ```bash
---llm claude|codex|openai|opencode|pi|hybrid|jigjoy   # backend for all phases
+--llm claude|codex|openai|opencode|pi|devin|hybrid|jigjoy   # backend for all phases
 -m opus|sonnet|haiku          # model override (verbatim pass-through on other backends)
 --effort low..max             # thinking per turn (default: high)
 --parallel N                  # max parallel story agents (0 = unlimited)

@@ -21,12 +21,13 @@ import { runCodexIntake } from "../src/planning/adapters/planner-codex.js"
 import { runOpenAIIntake } from "../src/planning/adapters/planner-openai.js"
 import { runOpenCodeIntake } from "../src/planning/adapters/planner-opencode.js"
 import { runPiIntake } from "../src/planning/adapters/planner-pi.js"
+import { runDevinIntake } from "../src/planning/adapters/planner-devin.js"
 import { plainWindowsPath } from "../src/runtime/windows-path.js"
 
 interface Args {
     goal: string
     cwd: string
-    llm: "claude" | "openai" | "codex" | "opencode" | "pi"
+    llm: "claude" | "openai" | "codex" | "opencode" | "pi" | "devin"
     model?: string
     contextFile?: string
     decisionFile?: string
@@ -46,8 +47,8 @@ function parseArgs(argv: string[]): Args {
                 break
             case "--llm": {
                 const v = required(argv, ++i, "--llm")
-                if (v !== "claude" && v !== "openai" && v !== "codex" && v !== "opencode" && v !== "pi") {
-                    fatal(`--llm must be 'claude' | 'openai' | 'codex' | 'opencode' | 'pi', got '${v}'`)
+                if (v !== "claude" && v !== "openai" && v !== "codex" && v !== "opencode" && v !== "pi" && v !== "devin") {
+                    fatal(`--llm must be 'claude' | 'openai' | 'codex' | 'opencode' | 'pi' | 'devin', got '${v}'`)
                 }
                 args.llm = v
                 break
@@ -141,6 +142,8 @@ async function main(): Promise<void> {
             contract = await runOpenCodeIntake(opts)
         } else if (args.llm === "pi") {
             contract = await runPiIntake(opts)
+        } else if (args.llm === "devin") {
+            contract = await runDevinIntake(opts)
         } else {
             contract = await runClaudeIntake(opts)
         }

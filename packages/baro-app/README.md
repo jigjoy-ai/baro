@@ -77,6 +77,7 @@ baro --cwd ~/projects/myapp "Add REST API"
 - `--llm openai` — Mozaik-native OpenAI Responses API. Bills per token retail.
 - `--llm opencode` — shells out to OpenCode (`opencode run --format json`), using the provider and model configured in OpenCode.
 - `--llm pi` — shells out to Pi (`pi --mode json -p`), using the provider and model configured in Pi.
+- `--llm devin` — drives the Devin CLI over ACP (`devin acp`), using your Devin account and its default model (`devin auth login`). Text-only phases run in Devin's read-only mode with every tool denied.
 - `--llm hybrid` — Claude on Architect/Planner/Critic/Surgeon (where upstream decisions and review matter), Codex on Story (the parallel work that dominates the budget). Recommended for serious runs.
 
 Per-phase overrides exist (`--architect-llm`, `--planner-llm`, `--story-llm`, `--critic-llm`, `--surgeon-llm`) if you want to mix anything yourself.
@@ -141,7 +142,7 @@ Arguments:
 
 Options:
   --llm <name>                 Backend for every phase: claude | codex | openai |
-                               opencode | pi | hybrid
+                               opencode | pi | devin | hybrid
                                (default: claude)
   --architect-llm <name>       Override LLM for Architect only
   --planner-llm <name>         Override LLM for Planner only
@@ -172,6 +173,7 @@ Options:
   - [OpenAI Codex CLI](https://github.com/openai/codex) authenticated (for `--llm codex`)
   - [OpenCode CLI](https://opencode.ai) with a provider configured (for `--llm opencode`)
   - Pi CLI with a provider configured (for `--llm pi`)
+  - [Devin CLI](https://docs.devin.ai/cli), signed in (for `--llm devin`)
   - `OPENAI_API_KEY` exported (for `--llm openai`)
   - Both Claude CLI **and** Codex CLI authenticated (for `--llm hybrid`)
 - macOS (arm64/x64), Linux (x64/arm64), or Windows (x64)

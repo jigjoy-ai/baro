@@ -272,6 +272,22 @@ export {
 
 export { runPiOneShot, type RunPiOneShotOptions } from "./harness/pi/one-shot.js"
 
+export {
+    DevinCliParticipant,
+    type DevinCliParticipantOptions,
+    type DevinRunSummary,
+} from "./harness/devin/cli-participant.js"
+
+export {
+    DevinStoryAgent,
+    type DevinStorySpec,
+    type DevinStoryOutcome,
+} from "./harness/devin/story-agent.js"
+
+export { DevinStreamMapper, type MappedDevinItem } from "./harness/devin/stream-mapper.js"
+
+export { runDevinOneShot, type RunDevinOneShotOptions } from "./harness/devin/one-shot.js"
+
 export { Auditor, type AuditorOptions } from "./execution/auditor.js"
 
 export {

@@ -25,6 +25,7 @@ import { execFileCli } from "../harness/exec-file-cli.js"
 import { harnessChildEnvironment } from "../harness/environment.js"
 import { runOpenCodeOneShot } from "../harness/opencode/one-shot.js"
 import { runPiOneShot } from "../harness/pi/one-shot.js"
+import { runDevinOneShot } from "../harness/devin/one-shot.js"
 import {
     createOpenAIModel,
     GenericOpenAIModel,
@@ -61,6 +62,7 @@ export type DialogueBackend =
     | "codex"
     | "opencode"
     | "pi"
+    | "devin"
 
 export type DialogueEffort = "low" | "medium" | "high" | "xhigh" | "max"
 
@@ -79,6 +81,7 @@ export interface CreateDialogueResponderOptions {
     codexBin?: string
     opencodeBin?: string
     piBin?: string
+    devinBin?: string
     /** Allow an explicitly isolated caller to run Codex outside a git checkout. */
     codexSkipGitRepoCheck?: boolean
     /** Harden a prompt-only runtime evaluator beyond ordinary dialogue isolation. */
@@ -100,6 +103,7 @@ export function createDialogueResponder(
     if (opts.backend === "codex") return createCodexResponder(opts)
     if (opts.backend === "opencode") return createOpenCodeResponder(opts)
     if (opts.backend === "pi") return createPiResponder(opts)
+    if (opts.backend === "devin") return createDevinResponder(opts)
     return createClaudeResponder(opts)
 }
 
@@ -230,6 +234,74 @@ function createPiResponder(
                     observation?.status === failure.status
                     ? localHarnessInvocation(
                           "pi",
+                          requestedModel,
+                          observation,
+                      )
+                    : telemetry.failureInvocation(
+                          failure.status,
+                          failure.reason,
+                      ),
+                { cause: error },
+            )
+        }
+    }
+    return Object.assign(responder, { telemetry })
+}
+
+function createDevinResponder(
+    opts: CreateDialogueResponderOptions,
+): DialogueResponder {
+    const requestedModel = opts.model ?? "devin-default"
+    const diagnosticLabel = resolvedDiagnosticLabel(
+        opts.diagnosticLabel,
+        "devin-dialogue",
+    )
+    const telemetry = localHarnessTelemetryDescriptor("devin", requestedModel)
+    const responder: DialogueResponder = async (input, signal) => {
+        let observation: RunnerInvocationObservation | undefined
+        try {
+            const text = await withIsolatedHarnessCwd(
+                "baro-devin-dialogue-",
+                (cwd) => runDevinOneShot({
+                    prompt: input.userPrompt,
+                    cwd,
+                    model: opts.model,
+                    devinBin: opts.devinBin,
+                    timeoutMs: opts.timeoutMs ?? 60_000,
+                    label: diagnosticLabel,
+                    safeEvaluatorSystemPrompt: input.systemPrompt,
+                    signal,
+                    onInvocation: (item) => {
+                        observation = item
+                    },
+                }),
+            )
+            return {
+                text,
+                invocation: localHarnessInvocation(
+                    "devin",
+                    requestedModel,
+                    observation ?? unknownLocalHarnessObservation(
+                        "succeeded",
+                        "not_reported",
+                        "devin",
+                        requestedModel,
+                    ),
+                ),
+            }
+        } catch (error) {
+            if (isProcessLaunchFailure(error)) {
+                throw new DialogueResponderNotDispatchedError(
+                    "Devin dialogue process could not start",
+                )
+            }
+            const failure = dialogueFailureAttribution(error, signal)
+            throw new DialogueResponderInvocationError(
+                "Devin dialogue provider failed",
+                failure.status !== "cancelled" &&
+                    observation?.status === failure.status
+                    ? localHarnessInvocation(
+                          "devin",
                           requestedModel,
                           observation,
                       )
@@ -592,7 +664,7 @@ function codexTelemetryDescriptor(
 }
 
 function localHarnessTelemetryDescriptor(
-    backend: "opencode" | "pi",
+    backend: "opencode" | "pi" | "devin",
     requestedModel: string,
 ): DialogueResponderTelemetry {
     return Object.freeze({
@@ -642,7 +714,7 @@ function codexInvocation(
 }
 
 function localHarnessInvocation(
-    backend: "opencode" | "pi",
+    backend: "opencode" | "pi" | "devin",
     requestedModel: string,
     observation: RunnerInvocationObservation,
 ): DialogueResponderInvocation {
@@ -652,7 +724,7 @@ function localHarnessInvocation(
 function unknownLocalHarnessObservation(
     status: ModelInvocationStatus,
     reason: UnknownMetricReason,
-    backend: "opencode" | "pi",
+    backend: "opencode" | "pi" | "devin",
     requestedModel: string,
 ): RunnerInvocationObservation {
     const missing = unknownMetric(reason)
@@ -669,7 +741,7 @@ function unknownLocalHarnessObservation(
             cacheWriteInput: missing,
             outputTotal: missing,
             reasoningOutput:
-                backend === "pi" ? notApplicableMetric() : missing,
+                backend !== "opencode" ? notApplicableMetric() : missing,
             total: missing,
         },
         cost: {
