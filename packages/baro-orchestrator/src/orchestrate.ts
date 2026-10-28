@@ -73,6 +73,7 @@ import { CriticCodex } from "./harness/codex/critic.js"
 import { CriticOpenAI } from "./harness/openai/critic.js"
 import { CriticOpenCode } from "./harness/opencode/critic.js"
 import { CriticPi } from "./harness/pi/critic.js"
+import { CriticDevin } from "./harness/devin/critic.js"
 import { activityIdleTimeoutMs } from "./harness/liveness.js"
 import {
     DialogueAgent,
@@ -130,6 +131,7 @@ import { SurgeonCodex } from "./harness/codex/surgeon.js"
 import { SurgeonOpenAI } from "./harness/openai/surgeon.js"
 import { SurgeonOpenCode } from "./harness/opencode/surgeon.js"
 import { SurgeonPi } from "./harness/pi/surgeon.js"
+import { SurgeonDevin } from "./harness/devin/surgeon.js"
 import { Supervisor } from "./execution/supervisor.js"
 import { resolveEffectiveParallel } from "./planning/domain/mode-enforcement.js"
 import { ALL_GATES } from "./execution/gate-registry.js"
@@ -360,14 +362,14 @@ export interface OrchestrateConfig {
      * Planner are routed by the Rust TUI layer — orchestrate.ts never sees
      * them.
      */
-    llm?: "claude" | "openai" | "codex" | "opencode" | "pi"
+    llm?: "claude" | "openai" | "codex" | "opencode" | "pi" | "devin"
     /**
      * Per-phase overrides; win over `llm`. Used by the `--llm hybrid` preset
      * (Story on the alternate backend; Critic/Surgeon may stay tool-less).
      */
-    storyLlm?: "claude" | "openai" | "codex" | "opencode" | "pi"
-    criticLlm?: "claude" | "openai" | "codex" | "opencode" | "pi"
-    surgeonLlm?: "claude" | "openai" | "codex" | "opencode" | "pi"
+    storyLlm?: "claude" | "openai" | "codex" | "opencode" | "pi" | "devin"
+    criticLlm?: "claude" | "openai" | "codex" | "opencode" | "pi" | "devin"
+    surgeonLlm?: "claude" | "openai" | "codex" | "opencode" | "pi" | "devin"
     /**
      * StoryAgent model override (`--story-model`). Wins over each story's
      * own `model` field in the PRD as well as over the OpenAI default.
@@ -566,7 +568,7 @@ export async function orchestrate(
         )
     }
     const publishRemote = config.publishRemote ?? true
-    const llm: "claude" | "openai" | "codex" | "opencode" | "pi" = config.llm ?? "claude"
+    const llm: "claude" | "openai" | "codex" | "opencode" | "pi" | "devin" = config.llm ?? "claude"
     // Downstream factories branch on these per-phase values, never on the
     // global `llm`.
     const storyLlm = config.storyLlm ?? llm
@@ -662,6 +664,11 @@ export async function orchestrate(
         process.stderr.write(
             "[orchestrate] llm=pi: Story, Critic, Surgeon all shelling out to " +
                 "`pi --mode json -p` (Pi CLI path).\n",
+        )
+    } else if (llm === "devin") {
+        process.stderr.write(
+            "[orchestrate] llm=devin: Story, Critic, Surgeon all driving " +
+                "`devin acp` (Devin CLI path).\n",
         )
     } else {
         process.stderr.write(
@@ -1019,7 +1026,7 @@ export async function orchestrate(
 
     // Surgeon joins early so it sees StoryResultItems from the moment the
     // Conductor starts running.
-    let surgeon: Surgeon | SurgeonOpenAI | SurgeonCodex | SurgeonOpenCode | SurgeonPi | null = null
+    let surgeon: Surgeon | SurgeonOpenAI | SurgeonCodex | SurgeonOpenCode | SurgeonPi | SurgeonDevin | null = null
     if (config.withSurgeon) {
         const snapshot = (): PrdSnapshot => {
             const current = loadPrd(config.prdPath)
@@ -1108,6 +1115,17 @@ export async function orchestrate(
                 emitRecoveryDecisions: coordinationMode === "collective",
                 outcomeAuthority,
             })
+        } else if (surgeonLlm === "devin") {
+            surgeon = new SurgeonDevin({
+                snapshot,
+                resolveRoute,
+                escalationRoute,
+                useLlm: config.surgeonUseLlm ?? true,
+                model: config.surgeonModel,
+                runId,
+                emitRecoveryDecisions: coordinationMode === "collective",
+                outcomeAuthority,
+            })
         } else if (surgeonLlm === "pi") {
             surgeon = new SurgeonPi({
                 snapshot,
@@ -1134,7 +1152,7 @@ export async function orchestrate(
         surgeon.join(env)
     }
 
-    let critic: Critic | CriticOpenAI | CriticCodex | CriticOpenCode | CriticPi | null = null
+    let critic: Critic | CriticOpenAI | CriticCodex | CriticOpenCode | CriticPi | CriticDevin | null = null
     let criticTargetRegistry: CriticTargetRegistry | null = null
     let criticTargets = new Map<string, readonly string[]>()
     if (config.withCritic) {
@@ -1239,6 +1257,16 @@ export async function orchestrate(
             })
         } else if (criticLlm === "opencode") {
             critic = new CriticOpenCode({
+                targets: criticTargets,
+                timeoutMs: criticCallTimeoutMs(config.parallel),
+                model: config.criticModel,
+                runId,
+                evidence: criticEvidence,
+                outcomeAuthority,
+                terminalProjectorAuthority: agentTurnProjector,
+            })
+        } else if (criticLlm === "devin") {
+            critic = new CriticDevin({
                 targets: criticTargets,
                 timeoutMs: criticCallTimeoutMs(config.parallel),
                 model: config.criticModel,

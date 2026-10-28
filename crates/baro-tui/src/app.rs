@@ -47,6 +47,7 @@ pub enum Planner {
     Codex,
     OpenCode,
     Pi,
+    Devin,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -170,6 +171,8 @@ pub enum LlmProvider {
     OpenCode,
     /// Pi CLI subprocess, similar to OpenCode.
     Pi,
+    /// Devin CLI driven over ACP (`devin acp`).
+    Devin,
 }
 
 impl LlmProvider {
@@ -180,6 +183,7 @@ impl LlmProvider {
             Self::Codex => "codex",
             Self::OpenCode => "opencode",
             Self::Pi => "pi",
+            Self::Devin => "devin",
         }
     }
 
@@ -198,6 +202,7 @@ impl LlmProvider {
             "codex" => Some(Self::Codex),
             "opencode" => Some(Self::OpenCode),
             "pi" => Some(Self::Pi),
+            "devin" => Some(Self::Devin),
             _ => None,
         }
     }
@@ -648,6 +653,9 @@ impl App {
                 if which::which("pi").is_ok() {
                     opts.push(LlmProvider::Pi);
                 }
+                if which::which("devin").is_ok() {
+                    opts.push(LlmProvider::Devin);
+                }
                 opts
             },
             api_key_input: String::new(),
@@ -924,7 +932,8 @@ impl App {
             Planner::OpenAI => Planner::Codex,
             Planner::Codex => Planner::OpenCode,
             Planner::OpenCode => Planner::Pi,
-            Planner::Pi => Planner::Claude,
+            Planner::Pi => Planner::Devin,
+            Planner::Devin => Planner::Claude,
         };
         let provider = match self.planner {
             Planner::Claude => LlmProvider::Claude,
@@ -932,6 +941,7 @@ impl App {
             Planner::Codex => LlmProvider::Codex,
             Planner::OpenCode => LlmProvider::OpenCode,
             Planner::Pi => LlmProvider::Pi,
+            Planner::Devin => LlmProvider::Devin,
         };
         self.llm = provider;
         self.architect_llm = provider;
@@ -2220,6 +2230,7 @@ impl App {
                 // the CLI uses the user's own configured default.
                 (LlmProvider::OpenCode, _) => None,
                 (LlmProvider::Pi, _) => None,
+                (LlmProvider::Devin, _) => None,
                 _ => None,
             };
         }
@@ -2269,6 +2280,7 @@ mod tests {
         assert!(!LlmProvider::Codex.has_bus_lane());
         assert!(!LlmProvider::OpenCode.has_bus_lane());
         assert!(!LlmProvider::Pi.has_bus_lane());
+        assert!(!LlmProvider::Devin.has_bus_lane());
     }
 
     #[test]

@@ -78,7 +78,7 @@ interface CliArgs {
     surgeonUseLlm: boolean
     withSupervisor: boolean
     withDialogue: boolean
-    dialogueLlm?: "claude" | "openai" | "codex" | "opencode" | "pi"
+    dialogueLlm?: "claude" | "openai" | "codex" | "opencode" | "pi" | "devin"
     dialogueModel?: string
     conversationContextFile?: string
     surgeonModel?: string
@@ -88,13 +88,13 @@ interface CliArgs {
     tierMap?: TierMap
     /** Raw `--openai-endpoint name=url` specs, resolved to a map later. */
     endpointSpecs: string[]
-    llm: "claude" | "openai" | "codex" | "opencode" | "pi"
+    llm: "claude" | "openai" | "codex" | "opencode" | "pi" | "devin"
     /** Optional per-phase overrides; each defaults to `llm`. */
-    storyLlm?: "claude" | "openai" | "codex" | "opencode" | "pi"
-    criticLlm?: "claude" | "openai" | "codex" | "opencode" | "pi"
-    surgeonLlm?: "claude" | "openai" | "codex" | "opencode" | "pi"
+    storyLlm?: "claude" | "openai" | "codex" | "opencode" | "pi" | "devin"
+    criticLlm?: "claude" | "openai" | "codex" | "opencode" | "pi" | "devin"
+    surgeonLlm?: "claude" | "openai" | "codex" | "opencode" | "pi" | "devin"
     /** Route for the bus-hosted progressive planner; the host resolves it per phase. */
-    plannerLlm?: "claude" | "openai" | "codex" | "opencode" | "pi"
+    plannerLlm?: "claude" | "openai" | "codex" | "opencode" | "pi" | "devin"
     plannerModel?: string
     help: boolean
 }
@@ -256,10 +256,11 @@ function parseArgs(argv: string[]): CliArgs {
                     value !== "openai" &&
                     value !== "codex" &&
                     value !== "opencode" &&
-                    value !== "pi"
+                    value !== "pi" &&
+                    value !== "devin"
                 ) {
                     process.stderr.write(
-                        `[cli] --dialogue-llm must be 'claude', 'openai', 'codex', 'opencode', or 'pi', got '${value}'\n`,
+                        `[cli] --dialogue-llm must be 'claude', 'openai', 'codex', 'opencode', 'pi', or 'devin', got '${value}'\n`,
                     )
                     process.exit(2)
                 }
@@ -304,9 +305,9 @@ function parseArgs(argv: string[]): CliArgs {
                 break
             case "--llm": {
                 const v = required(argv, ++i, "--llm")
-                if (v !== "claude" && v !== "openai" && v !== "codex" && v !== "opencode" && v !== "pi") {
+                if (v !== "claude" && v !== "openai" && v !== "codex" && v !== "opencode" && v !== "pi" && v !== "devin") {
                     process.stderr.write(
-                        `[cli] --llm must be 'claude' | 'openai' | 'codex' | 'opencode' | 'pi', got '${v}'\n`,
+                        `[cli] --llm must be 'claude' | 'openai' | 'codex' | 'opencode' | 'pi' | 'devin', got '${v}'\n`,
                     )
                     process.exit(2)
                 }
@@ -321,9 +322,9 @@ function parseArgs(argv: string[]): CliArgs {
             case "--surgeon-llm":
             case "--planner-llm": {
                 const v = required(argv, ++i, a)
-                if (v !== "claude" && v !== "openai" && v !== "codex" && v !== "opencode" && v !== "pi") {
+                if (v !== "claude" && v !== "openai" && v !== "codex" && v !== "opencode" && v !== "pi" && v !== "devin") {
                     process.stderr.write(
-                        `[cli] ${a} must be 'claude' | 'openai' | 'codex' | 'opencode' | 'pi', got '${v}'\n`,
+                        `[cli] ${a} must be 'claude' | 'openai' | 'codex' | 'opencode' | 'pi' | 'devin', got '${v}'\n`,
                     )
                     process.exit(2)
                 }
@@ -913,17 +914,18 @@ async function main(): Promise<void> {
 function parseDialogueBackend(
     value: string | undefined,
     label: string,
-): "claude" | "openai" | "codex" | "opencode" | "pi" | undefined {
+): "claude" | "openai" | "codex" | "opencode" | "pi" | "devin" | undefined {
     if (value === undefined || value === "") return undefined
     if (
         value === "claude" ||
         value === "openai" ||
         value === "codex" ||
         value === "opencode" ||
-        value === "pi"
+        value === "pi" ||
+        value === "devin"
     ) return value
     process.stderr.write(
-        `[cli] ${label} must be 'claude', 'openai', 'codex', 'opencode', or 'pi', got '${value}'\n`,
+        `[cli] ${label} must be 'claude', 'openai', 'codex', 'opencode', 'pi', or 'devin', got '${value}'\n`,
     )
     process.exit(2)
 }

@@ -52,7 +52,7 @@ export interface OneShotCriticCoreOptions extends TerminalTurnAuthorityOptions {
 
 export interface OneShotCriticBackendSpec {
     /** Telemetry backend tag. */
-    backend: "claude" | "codex" | "opencode" | "pi"
+    backend: "claude" | "codex" | "opencode" | "pi" | "devin"
     /** Critique `modelUsed` when no explicit model was requested. */
     defaultModelLabel: string
     /** Human-facing prefix for evaluator failure reasons. */

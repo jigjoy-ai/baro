@@ -150,10 +150,11 @@ export interface StoryFactoryOptions {
      *   "opencode" — OpenCodeStoryAgent wrapping an `opencode run --format json`
      *               subprocess
      *   "pi"      — PiStoryAgent wrapping a `pi --mode json -p` subprocess
+     *   "devin"   — DevinStoryAgent driving one `devin acp` turn
      * Same bus contract for all — Conductor, Critic, Surgeon,
      * Sentry, Librarian, Cartographer don't notice the swap.
      */
-    llm?: "claude" | "openai" | "codex" | "opencode" | "pi"
+    llm?: "claude" | "openai" | "codex" | "opencode" | "pi" | "devin"
     /**
      * Optional model name to pass to OpenAI agents. Default
      * `gpt-5.5` — StoryAgent's coding loop benefits from the largest
@@ -1440,7 +1441,7 @@ export class StoryFactory extends BaseObserver {
 function collaborationDeliveryMode(
     backend: StoryRoute["backend"],
 ): CollaborationDeliveryMode {
-    return backend === "codex" || backend === "opencode" || backend === "pi"
+    return backend === "codex" || backend === "opencode" || backend === "pi" || backend === "devin"
         ? "poll"
         : "live"
 }

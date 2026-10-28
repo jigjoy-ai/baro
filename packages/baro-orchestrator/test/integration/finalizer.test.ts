@@ -752,7 +752,8 @@ describe("Finalizer", () => {
                 prdContents,
             )
             assert.match(body, /## Linked repositories/)
-            assert.match(body, /- \*\*bedem\*\* — `\/work\/bedem`/)
+            assert.match(body, /- \*\*bedem\*\* \(package `@kornelija-hse-project\/bedem-core`/)
+            assert.doesNotMatch(body, /\/work\/bedem/, "a local path is the operator's, not the PR reader's")
             assert.ok(body.indexOf("## Goal") < body.indexOf("## Linked repositories"))
             assert.ok(body.indexOf("## Linked repositories") < body.indexOf("## Stories"))
         })

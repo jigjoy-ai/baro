@@ -79,6 +79,7 @@ pub fn render(f: &mut Frame, app: &App) {
         crate::app::LlmProvider::Codex => "Codex",
         crate::app::LlmProvider::OpenCode => "OpenCode",
         crate::app::LlmProvider::Pi => "Pi",
+        crate::app::LlmProvider::Devin => "Devin",
     };
 
     if let Some(ref err) = app.planning_error {

@@ -57,7 +57,7 @@ export interface OneShotSurgeonCoreOptions {
 
 export interface OneShotSurgeonBackendSpec {
     /** Lowercase telemetry backend tag and fallback-reason label. */
-    backend: "codex" | "opencode" | "pi"
+    backend: "codex" | "opencode" | "pi" | "devin"
     /** RecoveryDecision source identity, e.g. "surgeon:codex". */
     sourceTag: string
 }

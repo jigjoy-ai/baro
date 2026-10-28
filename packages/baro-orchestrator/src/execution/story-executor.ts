@@ -18,6 +18,7 @@ import { CodexStoryAgent } from "../harness/codex/story-agent.js"
 import { OpenAIStoryAgent } from "../harness/openai/story-agent.js"
 import { OpenCodeStoryAgent } from "../harness/opencode/story-agent.js"
 import { PiStoryAgent } from "../harness/pi/story-agent.js"
+import { DevinStoryAgent } from "../harness/devin/story-agent.js"
 import { StoryAgent } from "../harness/claude/story-agent.js"
 import { materializeStoryHooks } from "../harness/claude/hook-bridge.js"
 import { tmpdir } from "node:os"
@@ -121,6 +122,7 @@ type AnyStoryAgent =
     | CodexStoryAgent
     | OpenCodeStoryAgent
     | PiStoryAgent
+    | DevinStoryAgent
 
 interface TerminalSourceRegistrant {
     setTerminalSourceRegistrar(
@@ -162,7 +164,26 @@ export class LocalStoryExecutor implements StoryExecutor {
             generation: req.generation,
         }
         const agent: AnyStoryAgent =
-            route.backend === "pi"
+            route.backend === "devin"
+                ? new DevinStoryAgent({
+                      id: req.storyId,
+                      prompt: req.prompt,
+                      cwd,
+                      model: route.model,
+                      retries: req.retries,
+                      timeoutSecs: req.timeoutSecs,
+                      requiresQualityReview: req.requiresQualityReview,
+                      terminalTurnAuthority: opts.terminalTurnAuthority,
+                      turnReviewAuthority: opts.turnReviewAuthority,
+                      turnReviewTimeoutMs: opts.turnReviewTimeoutMs,
+                      handoffInconclusiveToAcceptanceGate:
+                          opts.handoffInconclusiveToAcceptanceGate,
+                      requireProcessQuiescenceCertification:
+                          opts.requireProcessQuiescenceCertification,
+                      targetedMessageAuthority: opts.targetedMessageAuthority,
+                      ...correlation,
+                  })
+                : route.backend === "pi"
                 ? new PiStoryAgent({
                       id: req.storyId,
                       prompt: req.prompt,

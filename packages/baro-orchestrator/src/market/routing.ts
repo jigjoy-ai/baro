@@ -7,9 +7,9 @@
  * old phase-level wiring did.
  */
 
-export type Backend = "claude" | "openai" | "codex" | "opencode" | "pi"
+export type Backend = "claude" | "openai" | "codex" | "opencode" | "pi" | "devin"
 
-const BACKENDS: readonly Backend[] = ["claude", "openai", "codex", "opencode", "pi"]
+const BACKENDS: readonly Backend[] = ["claude", "openai", "codex", "opencode", "pi", "devin"]
 
 export function isBackend(s: string): s is Backend {
     return (BACKENDS as readonly string[]).includes(s)

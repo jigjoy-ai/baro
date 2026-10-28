@@ -185,3 +185,52 @@ Notes:
 - Pi's `session` envelope carries an ISO-8601 *string* timestamp (unlike
   OpenCode's numeric one) and `message_end` carries none at all — synthetic-id
   fallbacks accept both.
+
+## Devin (`harness/devin/`)
+
+Drives `devin acp` (Agent Client Protocol, JSON-RPC 2.0, one message per
+line over stdio). Unlike the print-mode CLIs, baro is the ACP client and
+stdin stays open for the whole turn. Observed against Devin CLI 3000.11.92.
+
+One turn (`acp-turn.ts`):
+
+```jsonl
+→ {"id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false}}}
+→ {"id":2,"method":"session/new","params":{"cwd":"/abs/worktree","mcpServers":[]}}
+← {"id":2,"result":{"sessionId":"stellar-opera","modes":{"currentModeId":"accept-edits",…}}}
+→ {"id":3,"method":"session/set_mode","params":{"sessionId":"…","modeId":"bypass"}}
+→ {"id":4,"method":"session/prompt","params":{"sessionId":"…","prompt":[{"type":"text","text":"…"}]}}
+← {"method":"session/update","params":{"update":{"sessionUpdate":"tool_call","toolCallId":"exec:0#…","kind":"execute","rawInput":{"command":"…"},…}}}
+← {"method":"_cognition.ai/turn_stats","params":{"responseDimensions":[{"uid":"input_tokens","kind":{"value":28965}},…]}}
+← {"id":4,"result":{"stopReason":"end_turn","usage":{"inputTokens":19816,"outputTokens":14,"cachedReadTokens":6592}}}
+```
+
+Closing stdin after the prompt result ends the process with exit 0.
+
+- Modes: `accept-edits` (default), `smart`, `ask` (read-only), `plan`, `bypass`.
+  Story workers use `bypass`; text-only evaluators use `ask`.
+- The prompt result's `usage` covers only the last model call. Turn totals
+  come from `_cognition.ai/turn_stats`: `input_tokens` excludes cached reads,
+  `cached_input_tokens` is separate, cache writes are not reported. Devin
+  bills in credits, so cost stays `not_reported`.
+- A `session/new` error carries Devin's reason (e.g. an expired login:
+  "Service key has expired"); it surfaces as `DevinSystem` subtype `failed`.
+- Devin has no switch that removes its tools. A safe evaluator runs in an
+  empty temp directory whose `.devin/config.json` denies `read`, `edit`,
+  `grep`, `glob`, `exec`, `mcp__*`, `Read(**)`, `Write(**)`, `Exec(*)` and
+  `Fetch(*)`, in `ask` mode, with permission requests rejected; any
+  `tool_call` aborts the turn and fails the call. User-level MCP servers load
+  even with `mcpServers: []`, hence `mcp__*`.
+- `RUST_LOG=error` is set unless the user set one: Devin logs every startup
+  step at INFO on stderr.
+
+Mapping (`stream-mapper.ts`):
+
+| ACP `sessionUpdate`     | Mapped to                                                   |
+| ----------------------- | ----------------------------------------------------------- |
+| `agent_message_chunk`   | buffered; one `ModelMessageItem` on the next tool call or at turn end |
+| `tool_call`             | `FunctionCallItem` (callId `toolCallId`, name `_meta["cognition.ai/inferenceToolName"]` or `kind`, args `rawInput`) |
+| `tool_call_update` `completed` / `failed` | one `FunctionCallOutputItem` per call (`[error] …` on failure) |
+| every update            | `DevinItemEvent` itemType = the discriminator                |
+| prompt result           | `DevinTurnEvent` turnType `turn_end` (`raw.usage`: `input_tokens`, `cached_input_tokens`, `output_tokens`) + `DevinSystem` `finished` |
+| session opened / `agent_stopped` / permission / error | `DevinSystem` `session` / `stopped` / `permission` / `failed` |

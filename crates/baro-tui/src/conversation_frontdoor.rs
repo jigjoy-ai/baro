@@ -88,6 +88,7 @@ pub(crate) fn supports_preaccept_architect_outcome(provider: LlmProvider) -> boo
             | LlmProvider::OpenAI
             | LlmProvider::OpenCode
             | LlmProvider::Pi
+            | LlmProvider::Devin
     )
 }
 

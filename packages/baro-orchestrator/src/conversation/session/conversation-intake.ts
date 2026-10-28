@@ -65,6 +65,7 @@ export type ConversationResponderBackend =
     | "openai"
     | "opencode"
     | "pi"
+    | "devin"
     | (string & {})
 
 /**

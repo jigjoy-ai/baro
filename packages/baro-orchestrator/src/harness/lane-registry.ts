@@ -65,6 +65,7 @@ export const ONE_SHOT_ONLY_BACKENDS: ReadonlySet<string> = new Set([
     "codex",
     "opencode",
     "pi",
+    "devin",
 ])
 
 /** True when this backend is held by a model we call inside our own loop. */
