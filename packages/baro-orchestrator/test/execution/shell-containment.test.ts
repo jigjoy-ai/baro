@@ -156,6 +156,8 @@ describe("shell containment — one rule, the native lane and the Claude hook", 
                 "ls node_modules/.bin",
                 "cat node_modules/fx/index.js",
                 "grep -r ok node_modules/fx",
+                "if test -f README.md; then cat node_modules/fx/index.js; fi",
+                "{ cat README.md; ls node_modules/.bin; }",
             ]) {
                 assert.equal(shellContainmentRefusal(story, command, access), null, command)
             }
@@ -163,6 +165,15 @@ describe("shell containment — one rule, the native lane and the Claude hook", 
                 ["cp README.md node_modules/fx/index.js", /escapes the project/],
                 ["cat README.md > node_modules/fx/index.js", /redirection target/],
                 ["node -e 'process.exit(0)'", /inline code flags require a process write sandbox/],
+                // A function body is not cat's operands, and runs later.
+                ["cat () { cp README.md node_modules/fx/index.js; }; cat README.md", /function definitions are not allowed/],
+                ["cat(){ cp README.md node_modules/fx/index.js; }; cat README.md", /function definitions are not allowed/],
+                ["function cat { cp README.md node_modules/fx/index.js; }", /function definitions are not allowed/],
+                // Grouping and keywords do not hide the command behind them.
+                ["{ node -e 'process.exit(0)'; }", /inline code flags require a process write sandbox/],
+                ["! node -e 'process.exit(0)'", /inline code flags require a process write sandbox/],
+                ["if true; then node -e 'process.exit(0)'; fi", /inline code flags require a process write sandbox/],
+                ["cat README.md { cp README.md node_modules/fx/index.js", /escapes the project/],
             ] as const) {
                 assert.match(shellContainmentRefusal(story, command, access) ?? "", reason, command)
             }
