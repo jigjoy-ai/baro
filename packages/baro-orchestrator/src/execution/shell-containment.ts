@@ -394,6 +394,11 @@ function containmentRejection(
         }
 
         if (commandStart) {
+            // `{ cmd`, `! cmd`, `( cmd`, `if cmd`: the next word is still the command.
+            if (isCommandPrefixWord(word)) continue
+            if (isFunctionDefinitionWord(word)) {
+                return "shell function definitions are not allowed"
+            }
             commandStart = false
             commandName = path.basename(word)
 
@@ -519,6 +524,12 @@ function containmentRejection(
             continue
         }
 
+        if (isFunctionDefinitionWord(word) && word !== "function") {
+            return "shell function definitions are not allowed"
+        }
+        // Past grouping or a keyword the words are no longer this command's operands.
+        if (dependencyRead && isShellGrammarWord(word)) dependencyRead = false
+
         const rejected = rejectPathOperand(
             cwd,
             currentDir,
@@ -534,6 +545,22 @@ function containmentRejection(
     if (expectRedirectTarget) return "redirection is missing its target"
     if (cdAwaitingPath) return "cd without an explicit project-relative target is not allowed"
     return null
+}
+
+/** `{ cmd`, `! cmd`, `( cmd`, `if cmd`: the word after one of these is still the command. */
+function isCommandPrefixWord(word: string): boolean {
+    return ["{", "!", "(", "if", "then", "else", "elif", "do", "while", "until"].includes(word)
+}
+
+function isFunctionDefinitionWord(word: string): boolean {
+    return word === "()" || word === "function" || /^[A-Za-z_][\w.-]*\(\)/.test(word)
+}
+
+function isShellGrammarWord(word: string): boolean {
+    return [
+        "{", "}", "!", "if", "then", "else", "elif", "fi", "for", "while", "until",
+        "do", "done", "case", "esac", "in", "function", "select", "[[", "]]",
+    ].includes(word) || word.includes("(") || word.includes(")")
 }
 
 /**
@@ -1011,6 +1038,9 @@ const HOOK_SOURCE_GRAPH: ReadonlyArray<(...args: never[]) => unknown> = [
     isGitMessageFlag,
     isEnvironmentAssignment,
     isSedAwkScriptOperand,
+    isCommandPrefixWord,
+    isFunctionDefinitionWord,
+    isShellGrammarWord,
     withDependencyToolHint,
     isDependencyReadCommand,
     hasMacosWriteSandbox,
