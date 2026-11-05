@@ -100,6 +100,8 @@ export interface OneShotStoryRunner<TSummary> extends BusMember {
     abortAndWait(): Promise<boolean>
     hasOwnedProcessGroup(): boolean
     hasSpawnedProcess(): boolean
+    /** Story CLIs run their tools unprompted: confine the whole process. */
+    confineToWorktree(): unknown
 }
 
 export interface OneShotStoryBackend<TSummary extends OneShotRunSummaryBase> {
@@ -550,6 +552,7 @@ export abstract class OneShotStoryAgent<
         this.currentFailureSignals = []
 
         const runner = this.backend.createRunner(prompt)
+        runner.confineToWorktree()
         this.currentRunner = runner
         this.terminalSourceRegistrar?.(runner)
         runner.join(this.envRef)

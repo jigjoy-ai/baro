@@ -28,6 +28,7 @@ import {
 } from "./process-tree.js"
 import { AgentState, type AgentPhase } from "../semantic-events.js"
 import { appendCliDiagnosticTail } from "./cli-story-failure.js"
+import { confinedSpawn, storyCredentialEnv } from "./os-sandbox.js"
 
 export interface CliRunSummaryCore {
     exitCode: number | null
@@ -237,17 +238,50 @@ export abstract class CliParticipant<
         this.rejectReady(error)
     }
 
+    private confinement: "none" | "credentials" | "worktree" = "none"
+
+    /**
+     * Run this story's CLI inside the OS sandbox (os-sandbox.ts) and without
+     * publish credentials. A lane with no sandbox on this platform fails to
+     * start instead of running unconfined.
+     */
+    confineToWorktree(): this {
+        this.confinement = "worktree"
+        return this
+    }
+
+    /** Strip publish credentials only, for a CLI that sandboxes itself. */
+    withoutPublishCredentials(): this {
+        if (this.confinement === "none") this.confinement = "credentials"
+        return this
+    }
+
     /** Idempotent: subsequent calls are a no-op. */
     start(environment: CoordinationBus): void {
         if (this.proc) return
         this.envRef = environment
 
-        const args = this.buildArgs()
+        let binary = this.spec.binary
+        let args = this.buildArgs()
+        let env: NodeJS.ProcessEnv = { ...harnessChildEnvironment(), ...this.spec.env }
+        if (this.confinement === "worktree") {
+            const confined = confinedSpawn(this.spec.name, binary, args, this.spec.cwd, env)
+            if ("refusal" in confined) {
+                this.spawnError = new Error(confined.refusal)
+                this.transition("failed", this.spawnError.message)
+                this.failReady(this.spawnError)
+                this.settleDone(this.summarize())
+                return
+            }
+            ;({ binary, args, env } = confined)
+        } else if (this.confinement === "credentials") {
+            env = storyCredentialEnv(env)
+        }
         let proc: ChildProcess
         try {
-            proc = spawn(this.spec.binary, args, {
+            proc = spawn(binary, args, {
                 cwd: this.spec.cwd,
-                env: { ...harnessChildEnvironment(), ...this.spec.env },
+                env,
                 stdio: [this.spec.stdinMode, "pipe", "pipe"],
                 detached: POSIX_PROCESS_GROUPS_SUPPORTED,
             })

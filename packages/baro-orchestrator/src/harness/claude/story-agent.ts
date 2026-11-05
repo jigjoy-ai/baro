@@ -463,6 +463,9 @@ export class StoryAgent extends BusMember {
                   }
                 : {}),
         })
+        // Claude Code sandboxes its own Bash; the process still carries no
+        // publish credentials.
+        claude.withoutPublishCredentials()
         this.currentClaude = claude
         this.terminalSourceRegistrar?.(claude)
         claude.join(this.envRef)
