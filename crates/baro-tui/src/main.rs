@@ -447,12 +447,16 @@ async fn run_main() -> Result<(), Box<dyn std::error::Error>> {
         return run_with_terminal(cli, None).await;
     }
 
+    let (mut cli, _lock) = cli::cli::parse()?;
+
     // Update notice: the network check runs in the JS layer (no HTTP dep
     // here); this reads its cache. Printed AFTER the TUI restores the
     // terminal (below) — the alternate screen purges it.
-    let update_notice = notify_update();
-
-    let (mut cli, _lock) = cli::cli::parse()?;
+    let update_notice = if update_check_enabled(cli.headless, std::env::var_os("CI").is_some()) {
+        notify_update()
+    } else {
+        None
+    };
 
     if !cli.operator && cli.base.is_none() {
         let cwd = std::path::Path::new(&cli.cwd);
@@ -646,6 +650,14 @@ fn semver_lt(a: &str, b: &str) -> bool {
         }
     }
     false
+}
+
+/// The update notice and its background npm check are for a person at a
+/// terminal. A headless run is automation (a host such as a Hermes plugin
+/// pins the exact version) and makes no network call of its own; neither
+/// does CI, matching the JS launcher's self-update rules.
+fn update_check_enabled(headless: bool, ci: bool) -> bool {
+    !headless && !ci
 }
 
 /// Read the update cache the JS layer maintains (`~/.baro/update-check.json`)
@@ -4957,6 +4969,14 @@ fn message_command_line(id: &str, text: &str, message_id: Option<&str>) -> Strin
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn update_check_skips_headless_and_ci_runs() {
+        assert!(super::update_check_enabled(false, false));
+        assert!(!super::update_check_enabled(true, false));
+        assert!(!super::update_check_enabled(false, true));
+        assert!(!super::update_check_enabled(true, true));
+    }
+
     use clap::Parser;
 
     use super::{
