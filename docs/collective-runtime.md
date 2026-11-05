@@ -167,6 +167,22 @@ messages that owner or blocks on it. The decision is in the broker receipt and
 in a `claim_answer` message, and the bus records it as `paths_claimed`. A claim
 ends when its claimant integrates, exactly like a declared write.
 
+A Claude story's Bash runs inside Claude Code's own OS sandbox (Seatbelt on
+macOS, bubblewrap and socat on Linux), configured by Baro in the story's
+`--settings`: writes only to the worktree, the exact git metadata a commit
+needs (`objects`, the story's branch ref and log, its worktree git dir; never
+the shared config) and Claude's temp; reads everywhere except credential
+stores (`~/.ssh`, `~/.aws`, gh, git and package-manager credentials); network
+only to package registries and the lease's loopback broker
+(`BARO_SANDBOX_ALLOWED_DOMAINS` adds hosts). `allowUnsandboxedCommands` is off
+and `failIfUnavailable` is on, so a story whose sandbox cannot start does not
+run; `permissions.blockWritesOutsideWorkingDirectories` holds Write and Edit to
+the worktree. This is what holds a script the agent writes and runs, which the
+command-level hook cannot see. `BARO_UNSAFE_NO_SANDBOX=1` turns it off.
+Verified against Claude Code 2.1.318: a commit succeeds; a script writing the
+shared `.git/config` or a sibling story's worktree gets `Operation not
+permitted`; `~/.ssh` is unreadable; github.com is unreachable; the broker is.
+
 A dependency is a merge order, not a start barrier. A running story whose
 dependents need only part of its work (an interface, fixtures, a schema)
 commits that part and publishes it (`--kind checkpoint --reason "..."`). The

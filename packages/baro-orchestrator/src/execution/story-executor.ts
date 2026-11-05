@@ -23,6 +23,7 @@ import { PiStoryAgent } from "../harness/pi/story-agent.js"
 import { DevinStoryAgent } from "../harness/devin/story-agent.js"
 import { StoryAgent } from "../harness/claude/story-agent.js"
 import {
+    materializePublishGuardHooks,
     materializeStoryHooks,
     refreshStoryHookSurface,
 } from "../harness/claude/hook-bridge.js"
@@ -172,6 +173,7 @@ export class LocalStoryExecutor implements StoryExecutor {
         const hookCollab = {
             command: opts.collaboration?.commandPath ?? "agent-collab",
             capability: "note",
+            ...(opts.collaboration?.endpoint ? { endpoint: opts.collaboration.endpoint } : {}),
         }
         const agent: AnyStoryAgent =
             route.backend === "devin"
@@ -289,12 +291,11 @@ export class LocalStoryExecutor implements StoryExecutor {
                       prompt: req.prompt,
                       cwd,
                       ...(() => {
-                          const settings = materializeStoryHooks(
-                              hookDir,
-                              req.surface,
-                              hookCollab,
-                              cwd,
-                          )
+                          // Every Claude story gets the guard hooks and the
+                          // OS sandbox, with or without a declared surface.
+                          const settings =
+                              materializeStoryHooks(hookDir, req.surface, hookCollab, cwd) ??
+                              materializePublishGuardHooks(hookDir, cwd, hookCollab.endpoint)
                           return settings ? { cliSettingsPath: settings } : {}
                       })(),
                       // undefined → StoryAgent applies its own default.

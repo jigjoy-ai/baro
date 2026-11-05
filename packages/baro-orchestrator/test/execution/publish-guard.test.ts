@@ -418,6 +418,7 @@ describe("story git policy: publishing and the repository's shared state", () =>
         "git reflog expire --expire=now --all",
         "git gc --prune=now",
         "git worktree remove ../S2",
+        "git worktree prune",
         "git remote set-url origin https://evil.example",
         "git symbolic-ref HEAD refs/heads/other",
         "git --config-env=core.hooksPath=X status",
@@ -436,6 +437,8 @@ describe("story git policy: publishing and the repository's shared state", () =>
         "git checkout -b feature/y",
         "git symbolic-ref HEAD",
         "git log --oneline",
+        "git worktree add .baro-scratch/wt main",
+        "git worktree list",
     ]
     it("refuses publishing and shared-state changes", () => {
         for (const command of refused) {

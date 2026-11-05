@@ -34,7 +34,10 @@ import {
     GUARD_REFUSALS_FILE,
     publishCommandRefusal,
 } from "../../execution/publish-guard.js"
-import { shellContainmentHookSource } from "../../execution/shell-containment.js"
+import {
+    gitSandboxPaths,
+    shellContainmentHookSource,
+} from "../../execution/shell-containment.js"
 
 export interface StoryHookSurface {
     writes: readonly string[]
@@ -48,6 +51,8 @@ interface ContainmentSettings {
     worktreeRoot?: string
     collabCommand?: string
     collabCapability?: string
+    /** This lease's loopback broker, reachable from inside the sandbox. */
+    brokerEndpoint?: string
 }
 
 // The __name shim covers bundlers that wrap serialized functions with keepNames.
@@ -258,7 +263,7 @@ process.exit(0)
 export function materializeStoryHooks(
     dir: string,
     surface: StoryHookSurface | undefined,
-    collab: { command: string; capability: string },
+    collab: { command: string; capability: string; endpoint?: string },
     worktreeRoot?: string,
 ): string | null {
     if (!surface || surface.writes.length === 0) return null
@@ -268,6 +273,7 @@ export function materializeStoryHooks(
         ...(worktreeRoot === undefined ? {} : { worktreeRoot }),
         collabCommand: collab.command,
         collabCapability: collab.capability,
+        ...(collab.endpoint ? { brokerEndpoint: collab.endpoint } : {}),
     })
 }
 
@@ -354,12 +360,96 @@ export function assertHookContainsShell(hookPath: string): void {
 export function materializePublishGuardHooks(
     dir: string,
     worktreeRoot?: string,
+    brokerEndpoint?: string,
 ): string {
     mkdirSync(dir, { recursive: true })
-    return writeHookSettings(
-        dir,
-        worktreeRoot === undefined ? {} : { worktreeRoot },
-    )
+    return writeHookSettings(dir, {
+        ...(worktreeRoot === undefined ? {} : { worktreeRoot }),
+        ...(brokerEndpoint ? { brokerEndpoint } : {}),
+    })
+}
+
+/** Registries a story may install from; nothing else is reachable. */
+const SANDBOX_REGISTRY_DOMAINS = [
+    "registry.npmjs.org",
+    "registry.yarnpkg.com",
+    "pypi.org",
+    "files.pythonhosted.org",
+    "crates.io",
+    "static.crates.io",
+    "index.crates.io",
+    "proxy.golang.org",
+    "sum.golang.org",
+    "repo.maven.apache.org",
+    "repo1.maven.org",
+    "plugins.gradle.org",
+    "services.gradle.org",
+    "rubygems.org",
+    "repo.packagist.org",
+]
+
+/**
+ * Claude Code's own OS sandbox for a story's Bash (Seatbelt on macOS,
+ * bubblewrap on Linux), so a script the agent writes and runs is held to the
+ * same boundary as the commands the hook judges. Writes: the worktree, the
+ * exact git metadata a commit needs (not the shared config), Claude's temp.
+ * Reads: everything but credential stores. Network: package registries and
+ * this lease's loopback broker. No escape hatch, and a story whose sandbox
+ * cannot start does not run (verified against Claude Code 2.1.318; see
+ * docs/collective-runtime.md). BARO_UNSAFE_NO_SANDBOX=1 opts out.
+ */
+export function claudeStorySandbox(
+    worktreeRoot: string,
+    brokerEndpoint?: string,
+    env: NodeJS.ProcessEnv = process.env,
+): Record<string, unknown> | null {
+    if (env.BARO_UNSAFE_NO_SANDBOX === "1") return null
+    const allowWrite = gitSandboxPaths(worktreeRoot).paths
+    const extra = (env.BARO_SANDBOX_ALLOWED_DOMAINS ?? "")
+        .split(",")
+        .map((domain) => domain.trim())
+        .filter(Boolean)
+    const broker = loopbackHostPort(brokerEndpoint)
+    return {
+        sandbox: {
+            enabled: true,
+            failIfUnavailable: true,
+            allowUnsandboxedCommands: false,
+            autoAllowBashIfSandboxed: true,
+            filesystem: {
+                allowWrite,
+                denyRead: [
+                    "~/.ssh",
+                    "~/.aws",
+                    "~/.gnupg",
+                    "~/.config/gh",
+                    "~/.git-credentials",
+                    "~/.netrc",
+                    "~/.npmrc",
+                    "~/.pypirc",
+                    "~/.docker/config.json",
+                    "~/.kube",
+                ],
+            },
+            network: {
+                allowedDomains: [...SANDBOX_REGISTRY_DOMAINS, ...extra, ...(broker ? [broker] : [])],
+                strictAllowlist: true,
+                // Required to reach the loopback broker on macOS.
+                allowLocalBinding: true,
+            },
+        },
+        permissions: { blockWritesOutsideWorkingDirectories: true },
+    }
+}
+
+function loopbackHostPort(endpoint: string | undefined): string | null {
+    if (!endpoint) return null
+    try {
+        const url = new URL(endpoint)
+        return url.port ? `${url.hostname}:${url.port}` : url.hostname
+    } catch {
+        return null
+    }
 }
 
 function writeHookSettings(
@@ -382,6 +472,9 @@ function writeHookSettings(
         ),
     )
     assertHookContainsShell(hookPath)
+    const sandbox = containment.worktreeRoot
+        ? claudeStorySandbox(containment.worktreeRoot, containment.brokerEndpoint)
+        : null
     const settingsPath = join(dir, "settings.json")
     const hook = (mode: string) => ({
         hooks: [
@@ -404,6 +497,7 @@ function writeHookSettings(
                         { ...hook("pre-bash"), matcher: "Bash" },
                     ],
                 },
+                ...(sandbox ?? {}),
             },
             null,
             2,

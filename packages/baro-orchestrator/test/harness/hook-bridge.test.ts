@@ -123,3 +123,41 @@ describe("a story's Claude Code tool set", () => {
         }
     })
 })
+
+describe("a Claude story's OS sandbox", () => {
+    it("confines Bash to the worktree and the git metadata a commit needs, with no escape", async () => {
+        const { claudeStorySandbox } = await import("../../src/harness/claude/hook-bridge.js")
+        const repo = mkdtempSync(join(tmpdir(), "baro-sandbox-settings-"))
+        try {
+            execFileSync("git", ["init", "-q", "-b", "main", repo])
+            execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "i"], { cwd: repo })
+            // Stories always run in a linked worktree, as here.
+            const worktree = join(repo, ".story")
+            execFileSync("git", ["worktree", "add", "-q", "-b", "s1", worktree], { cwd: repo })
+            const settings = claudeStorySandbox(worktree, "http://127.0.0.1:43123/v1", {}) as {
+                sandbox: {
+                    enabled: boolean
+                    failIfUnavailable: boolean
+                    allowUnsandboxedCommands: boolean
+                    filesystem: { allowWrite: string[]; denyRead: string[] }
+                    network: { allowedDomains: string[]; strictAllowlist: boolean }
+                }
+                permissions: { blockWritesOutsideWorkingDirectories: boolean }
+            }
+            assert.equal(settings.sandbox.enabled, true)
+            assert.equal(settings.sandbox.failIfUnavailable, true, "a story whose sandbox cannot start does not run")
+            assert.equal(settings.sandbox.allowUnsandboxedCommands, false, "no escape hatch")
+            assert.equal(settings.permissions.blockWritesOutsideWorkingDirectories, true)
+            const writes = settings.sandbox.filesystem.allowWrite
+            assert.ok(writes.some((path) => path.endsWith("/objects")))
+            assert.ok(!writes.some((path) => path.endsWith("/.git") || path.endsWith("/config")), "never the shared config")
+            assert.ok(settings.sandbox.filesystem.denyRead.includes("~/.ssh"))
+            assert.ok(settings.sandbox.network.allowedDomains.includes("127.0.0.1:43123"), "the lease's broker")
+            assert.ok(!settings.sandbox.network.allowedDomains.some((domain) => domain.includes("github")))
+            assert.equal(settings.sandbox.network.strictAllowlist, true)
+            assert.equal(claudeStorySandbox(repo, undefined, { BARO_UNSAFE_NO_SANDBOX: "1" }), null)
+        } finally {
+            rmSync(repo, { recursive: true, force: true })
+        }
+    })
+})

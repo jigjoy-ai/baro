@@ -110,7 +110,7 @@ function resolveCollaborationShellAccess(
     }
 }
 
-function gitSandboxPaths(cwd: string): {
+export function gitSandboxPaths(cwd: string): {
     paths: string[]
     commonWorktreeRoot: string | null
 } {

@@ -66,9 +66,13 @@ export function publishCommandRefusal(command: string): string | null {
         const has = (...flags: string[]) =>
             rest.some((arg) => flags.some((flag) => arg === flag || arg.startsWith(`${flag}=`)))
         if (["push", "send-pack"].includes(sub)) return publish()
-        if (["update-ref", "gc", "prune", "worktree", "filter-branch", "filter-repo", "replace"].includes(sub)) {
+        if (["update-ref", "gc", "prune", "filter-branch", "filter-repo", "replace"].includes(sub)) {
             return shared()
         }
+        // A scratch checkout (`git worktree add .baro-scratch/...`) is the
+        // sanctioned remedy, and shell containment judges where it lands;
+        // removing, moving or pruning worktrees reaches other stories'.
+        if (sub === "worktree" && !["add", "list"].includes(rest[0] ?? "")) return shared()
         if (sub === "config") {
             const reads = ["--get", "--get-all", "--get-regexp", "--list", "-l", "--get-urlmatch", "--show-origin", "--show-scope"]
             if (!rest.some((arg) => reads.includes(arg) || arg === "get" || arg === "list")) return shared()
