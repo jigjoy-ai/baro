@@ -119,7 +119,7 @@ export const runRepositoryCommand: RepositoryCommand = async (
     try {
         return await execFileCli(command, args, {
             cwd: options.cwd,
-            env: options.env,
+            env: commandEnv(command, options.env),
             signal: options.signal,
             // Idle window: git that streams progress (fetch/push/checkout)
             // may run longer; only a silent, likely lock-wedged command dies.
@@ -154,7 +154,7 @@ export const runRepositoryCommandBuffer: RepositoryBufferCommand = async (
     try {
         return await execFileCliBuffer(command, args, {
             cwd: options.cwd,
-            env: options.env,
+            env: commandEnv(command, options.env),
             signal: options.signal,
             idleTimeoutMs: timeoutMs,
             maxBuffer,
@@ -168,6 +168,37 @@ export const runRepositoryCommandBuffer: RepositoryBufferCommand = async (
             error,
         )
     }
+}
+
+/**
+ * Every git the orchestrator runs ignores repository hooks and fsmonitor. A
+ * story can write the repository's shared config (or commit a hooks dir), and
+ * the orchestrator merges and checks out with the user's account: a planted
+ * post-merge or post-checkout hook would run as the user. Config travels in
+ * the environment (git's GIT_CONFIG_COUNT), so argv and errors are unchanged;
+ * the Critic's own git calls already pass the same settings.
+ */
+export function hardenedGitEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+    const nullDevice = process.platform === "win32" ? "NUL" : "/dev/null"
+    const settings: Array<[string, string]> = [
+        ["core.hooksPath", nullDevice],
+        ["core.fsmonitor", "false"],
+    ]
+    const existing = Number.parseInt(base.GIT_CONFIG_COUNT ?? "0", 10)
+    const offset = Number.isFinite(existing) && existing > 0 ? existing : 0
+    const env: NodeJS.ProcessEnv = { ...base, GIT_CONFIG_COUNT: String(offset + settings.length) }
+    settings.forEach(([key, value], index) => {
+        env[`GIT_CONFIG_KEY_${offset + index}`] = key
+        env[`GIT_CONFIG_VALUE_${offset + index}`] = value
+    })
+    return env
+}
+
+function commandEnv(
+    command: string,
+    env: NodeJS.ProcessEnv | undefined,
+): NodeJS.ProcessEnv | undefined {
+    return /(^|[\\/])git(\.exe)?$/u.test(command) ? hardenedGitEnv(env ?? process.env) : env
 }
 
 /** Resolve the production deadline at call time so tests need no module reset. */

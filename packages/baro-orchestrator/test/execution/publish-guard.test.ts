@@ -4,9 +4,12 @@ import {
     chmodSync,
     existsSync,
     mkdirSync,
+    mkdtempSync,
     readFileSync,
+    rmSync,
     writeFileSync,
 } from "node:fs"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, it } from "node:test"
 
@@ -395,5 +398,72 @@ describe("obligation admission rejects delivery", () => {
         assert.doesNotThrow(() =>
             validateArchitectureObligationCoverage(noDelivery(), [], "partial"),
         )
+    })
+})
+
+// An audit found the guard checked `git push` by its literal spelling: an alias,
+// send-pack or an upper-case API host went through, and nothing stopped a story
+// from rewriting the repository's shared config, refs or reflog.
+describe("story git policy: publishing and the repository's shared state", () => {
+    const refused = [
+        "git push origin HEAD",
+        "git -c alias.p=push p origin",
+        "git send-pack origin HEAD",
+        "curl https://API.GITHUB.COM/repos/x/y",
+        "git config core.hooksPath .githooks",
+        "git config --global user.name x",
+        "git update-ref -d refs/heads/main",
+        "git branch -D baro-recovery/run/S1/1",
+        "git branch --force main HEAD~1",
+        "git reflog expire --expire=now --all",
+        "git gc --prune=now",
+        "git worktree remove ../S2",
+        "git remote set-url origin https://evil.example",
+        "git symbolic-ref HEAD refs/heads/other",
+        "git --config-env=core.hooksPath=X status",
+    ]
+    const allowed = [
+        "git status",
+        "git commit -m 'git push later'",
+        "git -c user.name=baro -c user.email=b@x commit -m wip",
+        "git config --get user.email",
+        "git config --list",
+        "git remote -v",
+        "git reflog",
+        "git reflog show",
+        "git branch",
+        "git branch feature/x",
+        "git checkout -b feature/y",
+        "git symbolic-ref HEAD",
+        "git log --oneline",
+    ]
+    it("refuses publishing and shared-state changes", () => {
+        for (const command of refused) {
+            assert.ok(publishCommandRefusal(command), `${command} must be refused`)
+        }
+    })
+    it("allows a story's ordinary git work", () => {
+        for (const command of allowed) {
+            assert.equal(publishCommandRefusal(command), null, `${command} must be allowed`)
+        }
+    })
+    it("applies the same policy in the CLI lanes' git wrapper", { skip: process.platform === "win32" }, () => {
+        const dir = mkdtempSync(join(tmpdir(), "baro-git-wrapper-"))
+        try {
+            materializePublishGuardBin(join(dir, "bin"))
+            const repo = join(dir, "repo")
+            execFileSync("git", ["init", "-q", repo])
+            const git = (...args: string[]) =>
+                spawnSync(join(dir, "bin", "git"), args, { cwd: repo, encoding: "utf8" })
+            const config = git("config", "core.hooksPath", ".githooks")
+            assert.equal(config.status, 1)
+            assert.match(config.stderr, /shared state are denied/)
+            const alias = git("-c", "alias.p=push", "p")
+            assert.equal(alias.status, 1)
+            const status = git("status", "--short")
+            assert.equal(status.status, 0, status.stderr)
+        } finally {
+            rmSync(dir, { recursive: true, force: true })
+        }
     })
 })
