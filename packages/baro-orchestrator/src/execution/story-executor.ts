@@ -293,6 +293,7 @@ export class LocalStoryExecutor implements StoryExecutor {
                               hookDir,
                               req.surface,
                               hookCollab,
+                              cwd,
                           )
                           return settings ? { cliSettingsPath: settings } : {}
                       })(),

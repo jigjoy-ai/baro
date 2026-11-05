@@ -427,6 +427,7 @@ export class StoryAgent extends BusMember {
             this.spec.cliSettingsPath ??
             materializePublishGuardHooks(
                 join(tmpdir(), `baro-hooks-${this.spec.id}-${process.pid}`),
+                this.spec.cwd,
             )
         const claude = new ClaudeCliParticipant(this.spec.id, {
             cwd: this.spec.cwd,

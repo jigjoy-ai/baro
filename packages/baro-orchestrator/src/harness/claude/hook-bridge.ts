@@ -12,8 +12,18 @@
  * this orchestrator rather than to whatever bundle a machine has installed.
  */
 
-import { existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs"
-import { join } from "node:path"
+import { execFileSync } from "node:child_process"
+import {
+    copyFileSync,
+    existsSync,
+    mkdirSync,
+    mkdtempSync,
+    renameSync,
+    rmSync,
+    writeFileSync,
+} from "node:fs"
+import { tmpdir } from "node:os"
+import { dirname, join } from "node:path"
 
 import {
     SHELL_SCRATCH_DIRNAME,
@@ -130,8 +140,11 @@ if (mode === "pre-bash") {
                     : null,
             ),
         )
-    } catch {
-        process.exit(0)
+    } catch (error) {
+        // Fail closed: a containment check that cannot run must not wave
+        // every command through.
+        contained = "shell containment could not check this command (" +
+            String(error && error.message || error) + "); it was refused"
     }
     if (contained) {
         const shellContainmentRemedyLine = ${shellContainmentRemedyLine.toString()}
@@ -149,23 +162,10 @@ if (mode === "pre-bash") {
 }
 
 if (mode === "pre-write") {
-    let surface
-    try {
-        const here = dirname(fileURLToPath(import.meta.url))
-        surface = JSON.parse(readFileSync(join(here, "surface.json"), "utf8"))
-    } catch {
-        process.exit(0)
-    }
-    const target = String(toolInput.file_path ?? toolInput.path ?? "")
+    const here = dirname(fileURLToPath(import.meta.url))
+    const target = String(toolInput.file_path ?? toolInput.notebook_path ?? toolInput.path ?? "")
     if (!target) process.exit(0)
-    const owner = Object.entries(surface.ownedElsewhere ?? {}).find(
-        ([path]) => target === path || target.endsWith("/" + path),
-    )
-    if (owner) {
-        const reason = [
-            \`[gate:write-surface] \${owner[0]} belongs to story \${owner[1]}, which has not integrated yet. A diff touching it is refused at integration, however small and however right it is — this refusal now costs you one edit instead of the whole story at the gate.\`,
-            ...surface.remedy,
-        ].join("\\n")
+    const deny = (reason) => {
         process.stdout.write(JSON.stringify({
             decision: "block",
             reason,
@@ -175,6 +175,55 @@ if (mode === "pre-write") {
                 permissionDecisionReason: reason,
             },
         }))
+        process.exit(0)
+    }
+
+    // A file write must stay inside the story's worktree, like its shell.
+    let containment = null
+    try {
+        containment = JSON.parse(readFileSync(join(here, "containment.json"), "utf8"))
+    } catch {}
+    const root = containment && typeof containment.worktreeRoot === "string" && containment.worktreeRoot
+        ? containment.worktreeRoot
+        : typeof input.cwd === "string" ? input.cwd : ""
+    if (root) {
+        const real = (candidate) => {
+            let probe = path.resolve(candidate)
+            const rest = []
+            for (;;) {
+                try {
+                    return path.join(fs.realpathSync(probe), ...rest.reverse())
+                } catch {
+                    const parent = path.dirname(probe)
+                    if (parent === probe) return path.resolve(candidate)
+                    rest.push(path.basename(probe))
+                    probe = parent
+                }
+            }
+        }
+        const realRoot = real(root)
+        const realTarget = real(path.resolve(root, target))
+        if (realTarget !== realRoot && !realTarget.startsWith(realRoot + path.sep)) {
+            deny(
+                \`[gate:shell-containment] \${target} is outside your worktree (\${root}); writes there are refused. Write inside the worktree; scratch files go under \${containment && containment.scratchDir || ".baro-scratch"}/.\`,
+            )
+        }
+    }
+
+    let surface
+    try {
+        surface = JSON.parse(readFileSync(join(here, "surface.json"), "utf8"))
+    } catch {
+        process.exit(0)
+    }
+    const owner = Object.entries(surface.ownedElsewhere ?? {}).find(
+        ([path]) => target === path || target.endsWith("/" + path),
+    )
+    if (owner) {
+        deny([
+            \`[gate:write-surface] \${owner[0]} belongs to story \${owner[1]}, which has not integrated yet. A diff touching it is refused at integration, however small and however right it is — this refusal now costs you one edit instead of the whole story at the gate.\`,
+            ...surface.remedy,
+        ].join("\\n"))
     }
     process.exit(0)
 }
@@ -197,7 +246,7 @@ export function materializeStoryHooks(
     if (!surface || surface.writes.length === 0) return null
     mkdirSync(dir, { recursive: true })
     writeSurfaceFile(dir, surface, collab)
-    return writeHookSettings(dir, true, {
+    return writeHookSettings(dir, {
         ...(worktreeRoot === undefined ? {} : { worktreeRoot }),
         collabCommand: collab.command,
         collabCapability: collab.capability,
@@ -241,6 +290,48 @@ function writeSurfaceFile(
     renameSync(staged, file)
 }
 
+/**
+ * Proves the hook refuses a command that leaves the worktree before any story
+ * relies on it. The hook is serialized source, and a bundle once broke it so
+ * that it allowed everything; a story must not start behind a guard that
+ * does not hold.
+ */
+export function assertHookContainsShell(hookPath: string): void {
+    // Probe a copy: the real hook records each refusal for its story.
+    const probe = mkdtempSync(join(tmpdir(), "baro-hook-probe-"))
+    const run = (command: string): string =>
+        execFileSync(process.execPath, [join(probe, "hook.mjs"), "pre-bash"], {
+            input: JSON.stringify({ tool_input: { command }, cwd: probe }),
+            encoding: "utf8",
+            timeout: 10_000,
+        })
+    let escaping = ""
+    let inside = "unread"
+    try {
+        const dir = dirname(hookPath)
+        copyFileSync(hookPath, join(probe, "hook.mjs"))
+        copyFileSync(join(dir, "containment.json"), join(probe, "containment.json"))
+        escaping = run("cd .. && ls")
+        inside = run("ls")
+    } finally {
+        rmSync(probe, { recursive: true, force: true })
+    }
+    let refused = false
+    try {
+        const verdict = JSON.parse(escaping)
+        refused =
+            verdict.decision === "block" &&
+            !String(verdict.reason).includes("could not check")
+    } catch {
+        refused = false
+    }
+    if (!refused || inside !== "") {
+        throw new Error(
+            `the story hook at ${hookPath} does not judge shell commands (it must refuse one that leaves the worktree and allow one inside it); refusing to start a story behind it`,
+        )
+    }
+}
+
 /** Publish and containment denial alone, for a story with no write surface. */
 export function materializePublishGuardHooks(
     dir: string,
@@ -249,14 +340,12 @@ export function materializePublishGuardHooks(
     mkdirSync(dir, { recursive: true })
     return writeHookSettings(
         dir,
-        false,
         worktreeRoot === undefined ? {} : { worktreeRoot },
     )
 }
 
 function writeHookSettings(
     dir: string,
-    guardWrites: boolean,
     containment: ContainmentSettings,
 ): string {
     const hookPath = join(dir, "hook.mjs")
@@ -274,6 +363,7 @@ function writeHookSettings(
             2,
         ),
     )
+    assertHookContainsShell(hookPath)
     const settingsPath = join(dir, "settings.json")
     const hook = (mode: string) => ({
         hooks: [
@@ -290,14 +380,9 @@ function writeHookSettings(
                 hooks: {
                     PostToolUse: [{ ...hook("post-bash"), matcher: "Bash" }],
                     PreToolUse: [
-                        ...(guardWrites
-                            ? [
-                                  {
-                                      ...hook("pre-write"),
-                                      matcher: "Write|Edit|MultiEdit",
-                                  },
-                              ]
-                            : []),
+                        // Always: containment applies to every story; the
+                        // ownership half reads surface.json when there is one.
+                        { ...hook("pre-write"), matcher: "Write|Edit|MultiEdit|NotebookEdit" },
                         { ...hook("pre-bash"), matcher: "Bash" },
                     ],
                 },
