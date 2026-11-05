@@ -304,8 +304,12 @@ describe("subscription planner progressive harness adapters", () => {
                 assert.deepEqual(JSON.parse(result), JSON.parse(FINAL_PRD))
                 const argv = readArgv(argvFile)
                 if (harness === "claude") {
-                    assert.equal(argv.includes("--strict-mcp-config"), false)
-                    assert.equal(argv.includes("--mcp-config"), false)
+                    // No run-scoped server, and none of the user's either: the
+                    // final-only planner reads and answers, nothing more.
+                    assert.equal(argv[argv.indexOf("--mcp-config") + 1], '{"mcpServers":{}}')
+                    assert.equal(argv[argv.indexOf("--tools") + 1], "Read,Glob,Grep")
+                    assert.equal(argv[argv.indexOf("--permission-mode") + 1], "dontAsk")
+                    assert.equal(argv.includes("bypassPermissions"), false)
                 } else {
                     assert.equal(codexMcpOverrides(argv).length, 0)
                 }

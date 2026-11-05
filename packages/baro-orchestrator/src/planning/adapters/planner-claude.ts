@@ -5,6 +5,7 @@
  * (`PrdOutput`) so the schema has a single source of truth.
  */
 
+import { CLAUDE_READ_ONLY_ARGS } from "../../harness/claude/read-only.js"
 import { execFileCli } from "../../harness/exec-file-cli.js"
 import { llmIdleTimeoutMs } from "../../harness/liveness.js"
 import { ClaudeStreamResultCollector } from "../../harness/claude/stream-result.js"
@@ -119,11 +120,12 @@ export async function runPlannerClaude(
                           "--allowed-tools",
                           progressiveTool,
                       ]
-                    : []),
+                    : CLAUDE_READ_ONLY_ARGS.slice(0, -2)),
                 ...(opts.model ? ["--model", opts.model] : []),
                 ...(opts.effort ? ["--effort", opts.effort] : []),
+                // The planner reads and answers; nothing it runs needs approval.
                 "--permission-mode",
-                mcpConfig ? "dontAsk" : "bypassPermissions",
+                "dontAsk",
                 "--system-prompt",
                 systemPrompt,
                 "-p",

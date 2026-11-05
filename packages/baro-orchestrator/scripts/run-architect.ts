@@ -624,7 +624,8 @@ async function runInitialArchitect(
             billingCoordinator: billing ?? undefined,
             outcomeMode: args.outcomeFile !== undefined,
             outcomeContractMode,
-            readOnly: args.outcomeFile !== undefined,
+            // The architect returns its document; it never needs to write.
+            readOnly: true,
             goalEnvelope: trustedGoalEnvelope,
             timeoutMs,
             onArchitectModelResolved: (modelName) => {
@@ -645,7 +646,8 @@ async function runInitialArchitect(
             timeoutMs,
             outcomeMode: args.outcomeFile !== undefined,
             outcomeContractMode,
-            readOnly: args.outcomeFile !== undefined,
+            // The architect returns its document; it never needs to write.
+            readOnly: true,
             onInvocation,
         })
     }
@@ -701,7 +703,8 @@ async function runInitialArchitect(
         timeoutMs,
         outcomeMode: args.outcomeFile !== undefined,
         outcomeContractMode,
-        readOnly: args.outcomeFile !== undefined,
+        // The architect returns its document; it never needs to write.
+            readOnly: true,
         onInvocation,
     })
 }

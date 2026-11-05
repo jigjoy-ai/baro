@@ -1,6 +1,7 @@
 import { accessSync, constants, existsSync, mkdtempSync, realpathSync } from "node:fs"
 import { homedir, tmpdir } from "node:os"
 import { delimiter, join, resolve } from "node:path"
+import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process"
 
 import { gitSandboxPaths } from "../execution/shell-containment.js"
 
@@ -44,11 +45,25 @@ const LANE_STATE = {
 /** Package-manager caches a build may need to write. */
 const SHARED_CACHES = [".npm", ".cache", ".cargo/registry", ".cargo/git", "Library/Caches"]
 
+/**
+ * For the roles that only read and answer (architect, planner, intake,
+ * critic, surgeon, dialogue): the same confinement with no repository write
+ * access at all, wherever they run.
+ */
+export function readOnlySpawn(
+    lane: string,
+    binary: string,
+    args: readonly string[],
+    env: NodeJS.ProcessEnv = process.env,
+): ConfinedSpawn {
+    return confinedSpawn(lane, binary, args, null, env)
+}
+
 export function confinedSpawn(
     lane: string,
     binary: string,
     args: readonly string[],
-    worktreeRoot: string,
+    worktreeRoot: string | null,
     env: NodeJS.ProcessEnv = process.env,
 ): ConfinedSpawn {
     const credentialEnv = storyCredentialEnv(env)
@@ -67,8 +82,9 @@ export function confinedSpawn(
     const home = homedir()
     const scratch = realpathSync(mkdtempSync(join(tmpdir(), `baro-${lane}-tmp-`)))
     const writable = [
-        realpathSync(resolve(worktreeRoot)),
-        ...gitSandboxPaths(worktreeRoot).paths,
+        ...(worktreeRoot === null
+            ? []
+            : [realpathSync(resolve(worktreeRoot)), ...gitSandboxPaths(worktreeRoot).paths]),
         scratch,
         "/dev/null",
         ...[...(LANE_STATE[lane as keyof typeof LANE_STATE] ?? []), ...SHARED_CACHES].map((dir) =>
@@ -148,4 +164,16 @@ export function storyCredentialEnv(env: NodeJS.ProcessEnv): Record<string, strin
     out.GIT_CONFIG_COUNT = String(offset + settings.length)
     out.GIT_TERMINAL_PROMPT = "0"
     return out
+}
+
+/** spawn() for a read-only role; a refusal throws like a failed spawn. */
+export function spawnReadOnly(
+    lane: string,
+    binary: string,
+    args: readonly string[],
+    options: SpawnOptions & { env: NodeJS.ProcessEnv },
+): ChildProcess {
+    const plan = readOnlySpawn(lane, binary, args, options.env)
+    if ("refusal" in plan) throw new Error(plan.refusal)
+    return spawn(plan.binary, plan.args, { ...options, env: plan.env })
 }

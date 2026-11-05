@@ -101,7 +101,7 @@ export async function runDevinOneShot(opts: RunDevinOneShotOptions): Promise<str
 
     let summary: DevinRunSummary
     try {
-        participant.start(new CoordinationBus(`${label}-one-shot`))
+        participant.confineReadOnly().start(new CoordinationBus(`${label}-one-shot`))
         summary = await participant.done
     } finally {
         if (timer !== null) clearTimeout(timer)

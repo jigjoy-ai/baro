@@ -3,6 +3,7 @@
  * fallback) over the shared recovery leaf in execution/surgeon.ts.
  */
 
+import { CLAUDE_READ_ONLY_ARGS } from "./read-only.js"
 import { execFileCli } from "../exec-file-cli.js"
 import { ClaudeStreamResultCollector } from "./stream-result.js"
 
@@ -316,8 +317,9 @@ export class Surgeon extends BusMember {
                     "--include-partial-messages",
                     "--model",
                     this.opts.model,
-                    "--permission-mode",
-                    "bypassPermissions",
+                    // The prompt carries story-authored failure text: the
+                    // Surgeon reads, it never writes or runs anything.
+                    ...CLAUDE_READ_ONLY_ARGS,
                     "--system-prompt",
                     SURGEON_SYSTEM_PROMPT,
                     "-p",

@@ -6,6 +6,7 @@
  * trail of what Codex did with those minutes, plus a gentler SIGTERM.
  */
 
+import { spawnReadOnly } from "../os-sandbox.js"
 import { ChildProcess } from "child_process"
 import spawn from "cross-spawn"
 
@@ -239,7 +240,7 @@ export async function runCodexOneShot(
         const invocations = new RunnerInvocationTracker(opts.onInvocation)
         let proc: ChildProcess
         try {
-            proc = spawn(opts.codexBin ?? "codex", args, {
+            proc = spawnReadOnly("codex", opts.codexBin ?? "codex", args, {
                 cwd: opts.cwd,
                 env: {
                     ...harnessChildEnvironment(),

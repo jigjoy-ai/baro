@@ -5,6 +5,7 @@
  * keeps the live stderr audit trail and allows a gentler SIGTERM.
  */
 
+import { spawnReadOnly } from "../os-sandbox.js"
 import { ChildProcess } from "child_process"
 import spawn from "cross-spawn"
 
@@ -100,7 +101,7 @@ export async function runPiOneShot(
         const invocations = new RunnerInvocationTracker(opts.onInvocation)
         let proc: ChildProcess
         try {
-            proc = spawn(opts.piBin ?? "pi", args, {
+            proc = spawnReadOnly("pi", opts.piBin ?? "pi", args, {
                 cwd: opts.cwd,
                 env: harnessChildEnvironment(),
                 stdio: ["pipe", "pipe", "pipe"],

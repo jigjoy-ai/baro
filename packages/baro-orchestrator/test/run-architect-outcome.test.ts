@@ -514,7 +514,9 @@ describe("run-architect ArchitectOutcomeV1 mode", () => {
             assert.equal(run.code, 0, run.stderr)
             assert.equal(readFileSync(resultFile, "utf8"), DECISION_DOCUMENT)
             const argv = readJson<string[]>(capture)
-            assert.ok(argv.includes("bypassPermissions"))
+            // The architect only returns its document: read-only, always.
+            assert.equal(argv.includes("bypassPermissions"), false)
+            assert.equal(argv[argv.indexOf("--tools") + 1], "Read,Glob,Grep")
             assert.equal(argv.includes("--json-schema"), false)
             assert.doesNotMatch(valueAfter(argv, "--system-prompt"), /PRE-ACCEPTANCE VALIDATION/)
         })

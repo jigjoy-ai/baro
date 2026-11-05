@@ -238,7 +238,13 @@ export abstract class CliParticipant<
         this.rejectReady(error)
     }
 
-    private confinement: "none" | "credentials" | "worktree" = "none"
+    private confinement: "none" | "credentials" | "worktree" | "read-only" = "none"
+
+    /** A role that only reads and answers: OS-confined with no repo writes. */
+    confineReadOnly(): this {
+        this.confinement = "read-only"
+        return this
+    }
 
     /**
      * Run this story's CLI inside the OS sandbox (os-sandbox.ts) and without
@@ -264,8 +270,14 @@ export abstract class CliParticipant<
         let binary = this.spec.binary
         let args = this.buildArgs()
         let env: NodeJS.ProcessEnv = { ...harnessChildEnvironment(), ...this.spec.env }
-        if (this.confinement === "worktree") {
-            const confined = confinedSpawn(this.spec.name, binary, args, this.spec.cwd, env)
+        if (this.confinement === "worktree" || this.confinement === "read-only") {
+            const confined = confinedSpawn(
+                this.spec.name,
+                binary,
+                args,
+                this.confinement === "worktree" ? this.spec.cwd : null,
+                env,
+            )
             if ("refusal" in confined) {
                 this.spawnError = new Error(confined.refusal)
                 this.transition("failed", this.spawnError.message)
