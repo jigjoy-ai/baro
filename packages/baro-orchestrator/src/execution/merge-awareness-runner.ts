@@ -13,9 +13,9 @@
  * work is still in flight, not to reconcile afterwards.
  */
 
-import type { FunctionCallItem, Participant, SemanticEvent } from "../runtime/mozaik.js"
+import type { FunctionCallItem, SemanticEvent } from "../runtime/mozaik.js"
 import { AgentTargetedMessage } from "../events/collaboration.js"
-import { BaseObserver } from "../runtime/mozaik.js"
+import { BusMember } from "../runtime/coordination.js"
 import { StoryMerged } from "../events/integration.js"
 import { StoryResult } from "../semantic-events.js"
 import {
@@ -29,7 +29,7 @@ import { noticesForLanding } from "./merge-awareness.js"
 export interface MergeAwarenessRunnerOptions {
     readonly runId: string
     /** Only this participant's merges are believed. */
-    readonly integrationAuthority?: Participant
+    readonly integrationAuthority?: BusMember
     /**
      * The agent's own worktree root, used to make a path mean the same thing
      * to everyone. Agents write absolute paths inside their own worktree, so
@@ -39,7 +39,7 @@ export interface MergeAwarenessRunnerOptions {
     resolveRoot?(agentId: string): string | null
 }
 
-export class MergeAwarenessRunner extends BaseObserver {
+export class MergeAwarenessRunner extends BusMember {
     /** agentId → files it has written so far. */
     private readonly writes = new Map<string, Set<string>>()
     /** Agents that have finished; they must not be told anything. */
@@ -49,7 +49,7 @@ export class MergeAwarenessRunner extends BaseObserver {
         super()
     }
 
-    override onExternalFunctionCall(source: Participant, item: FunctionCallItem): void {
+    override onExternalFunctionCall(source: BusMember, item: FunctionCallItem): void {
         if (!isFileMutationTool(item.name)) return
         const agentId = participantAgentId(source)
         if (!agentId) return
@@ -60,7 +60,7 @@ export class MergeAwarenessRunner extends BaseObserver {
         this.writes.set(agentId, own)
     }
 
-    override onExternalEvent(source: Participant, event: SemanticEvent<unknown>): void {
+    override onExternalEvent(source: BusMember, event: SemanticEvent<string, unknown>): void {
         // See overlap-awareness: a throw here escapes the runtime uncaught.
         try {
             this.react(source, event)
@@ -71,20 +71,20 @@ export class MergeAwarenessRunner extends BaseObserver {
         }
     }
 
-    private react(source: Participant, event: SemanticEvent<unknown>): void {
-        if (StoryResult.is(event) && event.data.runId === this.opts.runId) {
+    private react(source: BusMember, event: SemanticEvent<string, unknown>): void {
+        if (StoryResult.is(event) && event.payload.runId === this.opts.runId) {
             // A finished agent cannot act on news and may already be gone.
-            this.finished.add(event.data.storyId)
+            this.finished.add(event.payload.storyId)
             return
         }
         if (!StoryMerged.is(event)) return
-        if (event.data.runId !== undefined && event.data.runId !== this.opts.runId) return
+        if (event.payload.runId !== undefined && event.payload.runId !== this.opts.runId) return
         // Integration is the one authority for "this landed". An unfenced
         // claim could otherwise make every agent drop work that never merged.
         if (this.opts.integrationAuthority && source !== this.opts.integrationAuthority) {
             return
         }
-        this.announce(event.data.storyId)
+        this.announce(event.payload.storyId)
     }
 
     /** One name per file, whichever worktree it was written in. */
@@ -112,8 +112,8 @@ export class MergeAwarenessRunner extends BaseObserver {
                     collides: notice.collides,
                 },
             })
-            for (const environment of this.getEnvironments()) {
-                environment.deliverSemanticEvent(this, event as SemanticEvent<unknown>)
+            for (const environment of this.getBuses()) {
+                environment.publish(this, event as SemanticEvent<string, unknown>)
             }
         }
     }

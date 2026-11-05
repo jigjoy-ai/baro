@@ -2,13 +2,12 @@ import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
 import {
-    AgenticEnvironment,
-    BaseObserver,
     FunctionCallItem,
 } from "../../src/runtime/mozaik.js"
+import { BusMember, CoordinationBus } from "../../src/runtime/coordination.js"
 import { ContinuousGateRunner } from "../../src/verification/continuous-gate-runner.js"
 
-class FakeStoryAgent extends BaseObserver {
+class FakeStoryAgent extends BusMember {
     constructor(readonly agentId: string) {
         super()
     }
@@ -19,7 +18,7 @@ describe("ContinuousGateRunner on a real bus", () => {
     // policy but not that mozaik ever calls it. A live run wired this in and
     // delivered nothing, so the wiring itself needs a test.
     it("receives a write from another participant and answers on the bus", async () => {
-        const env = new AgenticEnvironment("gate-probe")
+        const env = new CoordinationBus("gate-probe")
         const agent = new FakeStoryAgent("S1")
         agent.join(env)
 
@@ -32,13 +31,13 @@ describe("ContinuousGateRunner on a real bus", () => {
         runner.join(env)
 
         const delivered: unknown[] = []
-        const real = env.deliverSemanticEvent.bind(env)
-        env.deliverSemanticEvent = (source, event) => {
+        const real = env.publish.bind(env)
+        env.publish = (source, event) => {
             delivered.push(event)
             real(source, event)
         }
 
-        env.deliverFunctionCall(
+        env.publishFunctionCall(
             agent,
             FunctionCallItem.rehydrate({ callId: "c1", name: "Write", args: "{}" }),
         )

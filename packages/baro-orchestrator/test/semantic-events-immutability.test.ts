@@ -2,10 +2,9 @@ import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
 import {
-    BaseObserver,
-    type Participant,
     type SemanticEvent,
 } from "../src/runtime/mozaik.js"
+import { BusMember } from "../src/runtime/coordination.js"
 
 import {
     ConversationDelegationProposed,
@@ -14,15 +13,15 @@ import {
 import { conversationDelegationProposalId } from "../src/conversation/conversation-delegation.js"
 import { captureEnv, source } from "./execution/helpers.js"
 
-class SynchronousMutator extends BaseObserver {
+class SynchronousMutator extends BusMember {
     readonly errors: unknown[] = []
 
     override onExternalEvent(
-        _source: Participant,
-        event: SemanticEvent<unknown>,
+        _source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): void {
         if (!ConversationDelegationProposed.is(event)) return
-        const data = event.data as unknown as {
+        const data = event.payload as unknown as {
             baseGraphVersion: number
             addedStories: Array<{ id: string }>
         }
@@ -40,14 +39,14 @@ class SynchronousMutator extends BaseObserver {
     }
 }
 
-class SynchronousReceiver extends BaseObserver {
+class SynchronousReceiver extends BusMember {
     received: ConversationDelegationProposedData | null = null
 
     override onExternalEvent(
-        _source: Participant,
-        event: SemanticEvent<unknown>,
+        _source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): void {
-        if (ConversationDelegationProposed.is(event)) this.received = event.data
+        if (ConversationDelegationProposed.is(event)) this.received = event.payload
     }
 }
 
@@ -87,12 +86,12 @@ describe("Baro semantic event immutability", () => {
         // that previously let an earlier subscriber rewrite a later mailbox.
         mutator.join(env)
         receiver.join(env)
-        env.deliverSemanticEvent(source("dialogue"), event)
+        env.publish(source("dialogue"), event)
 
         assert.equal(Object.isFrozen(event), true)
-        assert.equal(Object.isFrozen(event.data), true)
-        assert.equal(Object.isFrozen(event.data.addedStories), true)
-        assert.equal(Object.isFrozen(event.data.addedStories[0]), true)
+        assert.equal(Object.isFrozen(event.payload), true)
+        assert.equal(Object.isFrozen(event.payload.addedStories), true)
+        assert.equal(Object.isFrozen(event.payload.addedStories[0]), true)
         assert.equal(mutator.errors.length, 3)
         assert.equal(receiver.received?.baseGraphVersion, 1)
         assert.equal(receiver.received?.addedStories[0]?.id, "S2")

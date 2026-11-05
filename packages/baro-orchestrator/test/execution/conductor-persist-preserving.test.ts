@@ -95,7 +95,7 @@ async function runStoryPass(
     })
     const env = joinWithCapture(conductor)
 
-    env.deliverSemanticEvent(
+    env.publish(
         source("operator"),
         RunStartRequest.create({ reason: "unit test" }),
     )
@@ -103,7 +103,7 @@ async function runStoryPass(
 
     beforePass()
 
-    env.deliverSemanticEvent(source("S1"), passResult("S1"))
+    env.publish(source("S1"), passResult("S1"))
     const summary = await conductor.done
     assert.equal(summary.success, true)
 }
@@ -180,12 +180,12 @@ describe("Conductor.persistPrd default preserves foreign-owned fields", () => {
             })
             const env = joinWithCapture(conductor)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "unit test" }),
             )
             await waitForEvents(env.events, StorySpawnRequest.is, 1)
-            env.deliverSemanticEvent(source("S1"), passResult("S1"))
+            env.publish(source("S1"), passResult("S1"))
             await conductor.done
 
             assert.deepEqual(seen, [prdPath])

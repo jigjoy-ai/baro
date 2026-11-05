@@ -1,11 +1,9 @@
 import { createHash } from "node:crypto"
 
 import {
-    AgenticEnvironment,
-    BaseObserver,
-    type Participant,
     type SemanticEvent,
 } from "../../runtime/mozaik.js"
+import { BusMember, CoordinationBus } from "../../runtime/coordination.js"
 
 import {
     FrontDoorConversationCompleted,
@@ -61,10 +59,10 @@ interface HostedTurn {
  * Caller-owned authority and terminal correlation boundary for one short-lived
  * conversation environment.
  */
-export class ConversationTurnHost extends BaseObserver {
+export class ConversationTurnHost extends BusMember {
     readonly sessionId: string
-    private environment: AgenticEnvironment | null = null
-    private conversationAuthority: Participant | null = null
+    private environment: CoordinationBus | null = null
+    private conversationAuthority: BusMember | null = null
     private readonly turns = new Map<string, HostedTurn>()
     private closed = false
 
@@ -74,14 +72,14 @@ export class ConversationTurnHost extends BaseObserver {
         this.sessionId = options.sessionId
     }
 
-    setEnvironment(environment: AgenticEnvironment): void {
+    setEnvironment(environment: CoordinationBus): void {
         if (this.environment && this.environment !== environment) {
             throw new Error("conversation host environment is already bound")
         }
         this.environment = environment
     }
 
-    setConversationAuthority(authority: Participant): void {
+    setConversationAuthority(authority: BusMember): void {
         if (this.conversationAuthority && this.conversationAuthority !== authority) {
             throw new Error("conversation host authority is already bound")
         }
@@ -132,7 +130,7 @@ export class ConversationTurnHost extends BaseObserver {
             settled: false,
         }
         this.turns.set(data.requestId, hosted)
-        this.environment.deliverSemanticEvent(
+        this.environment.publish(
             this,
             FrontDoorConversationRequested.create(data),
         )
@@ -154,12 +152,12 @@ export class ConversationTurnHost extends BaseObserver {
     }
 
     override onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): void {
         if (source !== this.conversationAuthority) return
         if (FrontDoorConversationCompleted.is(event)) {
-            const data = event.data
+            const data = event.payload
             if (!isExactRecord(data, [
                 "schemaVersion",
                 "sessionId",
@@ -187,7 +185,7 @@ export class ConversationTurnHost extends BaseObserver {
             return
         }
         if (FrontDoorConversationFailed.is(event)) {
-            const data = event.data
+            const data = event.payload
             if (!isExactRecord(data, [
                 "schemaVersion",
                 "sessionId",
@@ -220,14 +218,14 @@ interface ConversationLaneTurn {
     fingerprint: string
     phase: ConversationLanePhase
     contextRequestId?: string
-    terminal?: SemanticEvent<unknown>
+    terminal?: SemanticEvent<string, unknown>
 }
 
 /** Broker between the user-facing host, RepoScout, and the text-only model. */
 export class ConversationIntakeParticipant extends SerializedObserver {
     readonly sessionId: string
-    private hostAuthority: Participant | null = null
-    private repositoryScoutAuthority: Participant | null = null
+    private hostAuthority: BusMember | null = null
+    private repositoryScoutAuthority: BusMember | null = null
     private repositoryScoutId: string | null = null
     private readonly turns = new Map<string, ConversationLaneTurn>()
 
@@ -237,14 +235,14 @@ export class ConversationIntakeParticipant extends SerializedObserver {
         this.sessionId = options.sessionId
     }
 
-    setHostAuthority(authority: Participant): void {
+    setHostAuthority(authority: BusMember): void {
         if (this.hostAuthority && this.hostAuthority !== authority) {
             throw new Error("conversation intake host authority is already bound")
         }
         this.hostAuthority = authority
     }
 
-    setRepositoryScoutAuthority(authority: Participant, scoutId: string): void {
+    setRepositoryScoutAuthority(authority: BusMember, scoutId: string): void {
         assertCorrelationId(scoutId, "scoutId")
         if (
             this.repositoryScoutAuthority &&
@@ -269,16 +267,16 @@ export class ConversationIntakeParticipant extends SerializedObserver {
             source === this.hostAuthority &&
             FrontDoorConversationRequested.is(event)
         ) {
-            this.handleConversationRequest(event.data, context)
+            this.handleConversationRequest(event.payload, context)
             return
         }
         if (source !== this.repositoryScoutAuthority) return
         if (RepositoryContextProvided.is(event)) {
-            this.handleContextProvided(event.data, context)
+            this.handleContextProvided(event.payload, context)
             return
         }
         if (RepositoryContextFailed.is(event)) {
-            this.handleContextFailed(event.data, context)
+            this.handleContextFailed(event.payload, context)
         }
     }
 
@@ -502,7 +500,7 @@ export interface RepositoryScoutParticipantOptions {
 interface ScoutRequest {
     request: RepositoryContextRequestedData
     fingerprint: string
-    terminal?: SemanticEvent<unknown>
+    terminal?: SemanticEvent<string, unknown>
     controller?: AbortController
 }
 
@@ -514,7 +512,7 @@ const DEFAULT_REPOSITORY_RESEARCH_TIMEOUT_MS = 30 * 60 * 1_000
 export class RepositoryScoutParticipant extends SerializedObserver {
     readonly sessionId: string
     readonly scoutId: string
-    private requestAuthority: Participant | null = null
+    private requestAuthority: BusMember | null = null
     private readonly timeoutMs: number
     private readonly requests = new Map<string, ScoutRequest>()
     private readonly controllers = new Set<AbortController>()
@@ -536,7 +534,7 @@ export class RepositoryScoutParticipant extends SerializedObserver {
         }
     }
 
-    setRequestAuthority(authority: Participant): void {
+    setRequestAuthority(authority: BusMember): void {
         if (this.requestAuthority && this.requestAuthority !== authority) {
             throw new Error("repository scout request authority is already bound")
         }
@@ -555,7 +553,7 @@ export class RepositoryScoutParticipant extends SerializedObserver {
         ) return
         let request: RepositoryContextRequestedData
         try {
-            request = normalizeRepositoryRequest(context.event.data, this.sessionId)
+            request = normalizeRepositoryRequest(context.event.payload, this.sessionId)
         } catch {
             return
         }
@@ -700,7 +698,7 @@ export async function runFrontDoorConversationTurn(
     const turnTimeoutMs = options.turnTimeoutMs === undefined
         ? undefined
         : boundedPositiveInteger(options.turnTimeoutMs, "turnTimeoutMs")
-    const environment = new AgenticEnvironment(
+    const environment = new CoordinationBus(
         `conversation-frontdoor:${options.sessionId}:${options.turn.requestId}`,
     )
     const host = new ConversationTurnHost({ sessionId: options.sessionId })
@@ -751,7 +749,6 @@ export async function runFrontDoorConversationTurn(
         conversation.leave(environment)
         host.leave(environment)
         await Promise.all([conversation.idle(), scout.idle()])
-        environment.stop()
         host.close()
     }
 }

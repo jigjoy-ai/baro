@@ -29,8 +29,8 @@ describe("CollectiveBoard resume directive", () => {
         await withTempDir("collective-resume-directive-", async (dir) => {
             const { firstOffer, resumedOffer } = await driveSuspension(dir, PRESERVED)
 
-            assert.equal(firstOffer.data.request.resume, undefined)
-            assert.deepEqual(resumedOffer.data.request.resume, {
+            assert.equal(firstOffer.payload.request.resume, undefined)
+            assert.deepEqual(resumedOffer.payload.request.resume, {
                 preservedBranch: PRESERVED,
             })
         })
@@ -40,7 +40,7 @@ describe("CollectiveBoard resume directive", () => {
         await withTempDir("collective-resume-directive-empty-", async (dir) => {
             const { resumedOffer } = await driveSuspension(dir, null)
 
-            assert.deepEqual(resumedOffer.data.request.resume, {
+            assert.deepEqual(resumedOffer.payload.request.resume, {
                 preservedBranch: null,
             })
         })
@@ -79,60 +79,60 @@ async function driveSuspension(
         contextAuthority: context,
     })
     const env = joinWithCapture(board)
-    env.deliverSemanticEvent(operator, RunStartRequest.create({ reason: "test" }))
-    env.deliverSemanticEvent(repo, RunPrepared.create({ runId, baseSha: null }))
+    env.publish(operator, RunStartRequest.create({ reason: "test" }))
+    env.publish(repo, RunPrepared.create({ runId, baseSha: null }))
     await answerNewContexts(env, context, runId)
     const initialOffers = await waitForCount(env.events, WorkOffered.is, 2)
     const byStory = new Map(
-        initialOffers.map((offer) => [offer.data.request.storyId, offer]),
+        initialOffers.map((offer) => [offer.payload.request.storyId, offer]),
     )
     for (const storyId of ["S1", "S2"]) {
         const offer = byStory.get(storyId)!
-        env.deliverSemanticEvent(
+        env.publish(
             broker,
             WorkLeaseGranted.create({
                 runId,
-                offerId: offer.data.offerId,
+                offerId: offer.payload.offerId,
                 leaseId: `lease-${storyId}-1`,
                 workerId: "worker",
-                generation: offer.data.generation,
-                request: offer.data.request,
+                generation: offer.payload.generation,
+                request: offer.payload.request,
                 supportsCooperativeSuspend: true,
             }),
         )
     }
 
-    env.deliverSemanticEvent(
+    env.publish(
         bridge,
         WorkBlocked.create({
             runId,
             blockId: "block-S1-S2",
             storyId: "S1",
             leaseId: "lease-S1-1",
-            generation: byStory.get("S1")!.data.generation,
+            generation: byStory.get("S1")!.payload.generation,
             requiredStoryIds: ["S2"],
             reason: "S2 provides the shared helper",
         }),
     )
     await waitFor(env.events, WorkBlockAccepted.is)
-    env.deliverSemanticEvent(
+    env.publish(
         source("S1-agent"),
         StoryResult.create({
             runId,
             storyId: "S1",
             leaseId: "lease-S1-1",
-            generation: byStory.get("S1")!.data.generation,
+            generation: byStory.get("S1")!.payload.generation,
             success: false,
             attempts: 1,
             durationSecs: 3,
             error: "cooperative suspension",
         }),
     )
-    env.deliverSemanticEvent(
+    env.publish(
         broker,
         WorkLeaseReleased.create({
             runId,
-            offerId: byStory.get("S1")!.data.offerId,
+            offerId: byStory.get("S1")!.payload.offerId,
             leaseId: "lease-S1-1",
             storyId: "S1",
             workerId: "worker",
@@ -142,32 +142,32 @@ async function driveSuspension(
         }),
     )
     const cleanup = await waitFor(env.events, WorkspaceCleanupRequested.is)
-    env.deliverSemanticEvent(
+    env.publish(
         repo,
         WorkspaceCleanupCompleted.create({
             runId,
-            cleanupId: cleanup.data.cleanupId,
+            cleanupId: cleanup.payload.cleanupId,
             storyId: "S1",
             leaseId: "lease-S1-1",
-            generation: byStory.get("S1")!.data.generation,
+            generation: byStory.get("S1")!.payload.generation,
             ...(preservedBranch ? { preservedBranch } : {}),
         }),
     )
 
-    env.deliverSemanticEvent(
+    env.publish(
         source("S2-agent"),
         StoryResult.create({
             runId,
             storyId: "S2",
             leaseId: "lease-S2-1",
-            generation: byStory.get("S2")!.data.generation,
+            generation: byStory.get("S2")!.payload.generation,
             success: true,
             attempts: 1,
             durationSecs: 2,
             error: null,
         }),
     )
-    env.deliverSemanticEvent(
+    env.publish(
         repo,
         StoryMerged.create({
             runId,
@@ -179,7 +179,7 @@ async function driveSuspension(
 
     await answerNewContexts(env, context, runId)
     const resumedOffer = (await waitForCount(env.events, WorkOffered.is, 3))[2]!
-    assert.equal(resumedOffer.data.request.storyId, "S1")
+    assert.equal(resumedOffer.payload.request.storyId, "S1")
     return { firstOffer: byStory.get("S1")!, resumedOffer }
 }
 
@@ -213,21 +213,21 @@ async function answerNewContexts(
     const answered = new Set(
         env.events
             .filter(WorkContextProvided.is)
-            .map((event) => event.data.requestId),
+            .map((event) => event.payload.requestId),
     )
     for (let attempt = 0; attempt < 200; attempt += 1) {
         const requests = env.events
             .filter(WorkContextRequested.is)
-            .filter((event) => !answered.has(event.data.requestId))
+            .filter((event) => !answered.has(event.payload.requestId))
         if (requests.length > 0) {
             for (const request of requests) {
-                answered.add(request.data.requestId)
-                env.deliverSemanticEvent(
+                answered.add(request.payload.requestId)
+                env.publish(
                     authority,
                     WorkContextProvided.create({
                         runId,
-                        requestId: request.data.requestId,
-                        storyId: request.data.storyId,
+                        requestId: request.payload.requestId,
+                        storyId: request.payload.storyId,
                         context: null,
                     }),
                 )

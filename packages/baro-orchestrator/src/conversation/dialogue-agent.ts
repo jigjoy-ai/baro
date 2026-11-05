@@ -9,7 +9,7 @@
  * participants and source-bound by the collective control plane.
  */
 
-import { type Participant } from "../runtime/mozaik.js"
+import { type BusMember } from "../runtime/coordination.js"
 
 import {
     AgentState,
@@ -164,25 +164,25 @@ export interface DialogueAgentOptions {
     runId: string
     responder: DialogueResponder
     /** Only this live participant may originate ConversationRequested. */
-    operatorAuthority: Participant
+    operatorAuthority: BusMember
     /** When supplied, only this participant may update active-lease state. */
-    leaseAuthority?: Participant
+    leaseAuthority?: BusMember
     /** Exact workerId→StoryFactory bindings allowed to confirm a lease's
      * backend when the Broker grant did not already carry a market route. */
-    routeAuthoritiesByWorker?: ReadonlyMap<string, Participant>
+    routeAuthoritiesByWorker?: ReadonlyMap<string, BusMember>
     /** Exact Board allowed to publish graph lifecycle and replan decisions.
      * Delegation remains disabled when this authority is absent. */
-    controlAuthority?: Participant
+    controlAuthority?: BusMember
     /** When present, every observation capable of influencing a worker
      * message is source-bound. Do not authorize Dialogue as a collective
      * message producer without this complete topology. */
     observationAuthorities?: {
         outcomeAuthority: StoryOutcomeAuthority
-        criticAuthority?: Participant
-        qualityAuthority?: Participant
-        repositoryAuthority?: Participant
-        verificationAuthority?: Participant
-        collaborationAuthority?: Participant
+        criticAuthority?: BusMember
+        qualityAuthority?: BusMember
+        repositoryAuthority?: BusMember
+        verificationAuthority?: BusMember
+        collaborationAuthority?: BusMember
     }
     /** Ephemeral, validated continuity from the front-door session. This is
      * prompt context only and grants no event-bus or control-plane authority. */
@@ -242,7 +242,7 @@ export class DialogueAgent extends SerializedObserver {
             routeLocked: boolean
         }
     >()
-    private readonly routeAuthoritiesByWorker: ReadonlyMap<string, Participant>
+    private readonly routeAuthoritiesByWorker: ReadonlyMap<string, BusMember>
     private readonly knownStoryIds = new Set<string>()
     private readonly timeline: string[] = []
     private readonly history: DialogueHistoryEntry[] = []
@@ -289,13 +289,13 @@ export class DialogueAgent extends SerializedObserver {
         if (ConversationRequested.is(event)) {
             if (
                 source !== this.opts.operatorAuthority ||
-                event.data.runId !== this.opts.runId ||
-                this.seenMessageIds.has(event.data.messageId)
+                event.payload.runId !== this.opts.runId ||
+                this.seenMessageIds.has(event.payload.messageId)
             ) {
                 return
             }
-            this.seenMessageIds.add(event.data.messageId)
-            const request = Object.freeze({ ...event.data })
+            this.seenMessageIds.add(event.payload.messageId)
+            const request = Object.freeze({ ...event.payload })
             const snapshot = this.requestSnapshot()
             const prompt = this.buildUserPrompt(request.text, snapshot)
             this.remember("user", request.text)
@@ -599,12 +599,12 @@ export class DialogueAgent extends SerializedObserver {
         const { event } = context
         if (RunStarted.is(event)) {
             this.runActive = true
-            this.currentGraphVersion = validGraphVersion(event.data.graphVersion)
-                ? event.data.graphVersion
+            this.currentGraphVersion = validGraphVersion(event.payload.graphVersion)
+                ? event.payload.graphVersion
                 : null
             this.appliedGraphVersion = this.currentGraphVersion
             this.knownStoryIds.clear()
-            for (const storyId of event.data.storyIds ?? []) {
+            for (const storyId of event.payload.storyIds ?? []) {
                 if (typeof storyId === "string" && storyId.trim()) {
                     this.knownStoryIds.add(storyId)
                 }
@@ -616,10 +616,10 @@ export class DialogueAgent extends SerializedObserver {
         }
         if (
             RuntimeReplanApplied.is(event) &&
-            event.data.runId === this.opts.runId
+            event.payload.runId === this.opts.runId
         ) {
             const deliveredVersion =
-                event.data.currentGraphVersion ?? event.data.graphVersion
+                event.payload.currentGraphVersion ?? event.payload.graphVersion
             if (validGraphVersion(deliveredVersion)) {
                 this.currentGraphVersion = Math.max(
                     this.currentGraphVersion ?? 0,
@@ -627,41 +627,41 @@ export class DialogueAgent extends SerializedObserver {
                 )
             }
             if (
-                validGraphVersion(event.data.graphVersion) &&
+                validGraphVersion(event.payload.graphVersion) &&
                 (this.appliedGraphVersion === null ||
-                    event.data.graphVersion > this.appliedGraphVersion)
+                    event.payload.graphVersion > this.appliedGraphVersion)
             ) {
-                for (const storyId of event.data.mutation.removedStoryIds) {
+                for (const storyId of event.payload.mutation.removedStoryIds) {
                     this.knownStoryIds.delete(storyId)
                 }
-                for (const story of event.data.mutation.addedStories) {
+                for (const story of event.payload.mutation.addedStories) {
                     this.knownStoryIds.add(story.id)
                 }
-                this.appliedGraphVersion = event.data.graphVersion
+                this.appliedGraphVersion = event.payload.graphVersion
             }
             this.pushObservation(
-                `runtime graph proposal ${event.data.proposalId} applied at v${event.data.graphVersion}`,
+                `runtime graph proposal ${event.payload.proposalId} applied at v${event.payload.graphVersion}`,
             )
             return
         }
         if (
             RuntimeReplanRejected.is(event) &&
-            event.data.runId === this.opts.runId
+            event.payload.runId === this.opts.runId
         ) {
-            if (validGraphVersion(event.data.currentGraphVersion)) {
+            if (validGraphVersion(event.payload.currentGraphVersion)) {
                 this.currentGraphVersion = Math.max(
                     this.currentGraphVersion ?? 0,
-                    event.data.currentGraphVersion,
+                    event.payload.currentGraphVersion,
                 )
             }
             this.pushObservation(
-                `runtime graph proposal ${event.data.proposalId} rejected (${event.data.code}): ${event.data.reason}`,
+                `runtime graph proposal ${event.payload.proposalId} rejected (${event.payload.code}): ${event.payload.reason}`,
             )
             return
         }
         if (
             RunCompleted.is(event) &&
-            (event.data.runId === undefined || event.data.runId === this.opts.runId)
+            (event.payload.runId === undefined || event.payload.runId === this.opts.runId)
         ) {
             this.runActive = false
         }
@@ -669,93 +669,93 @@ export class DialogueAgent extends SerializedObserver {
 
     private observe(context: SerializedEventContext): void {
         const { event, source } = context
-        if (WorkLeaseGranted.is(event) && event.data.runId === this.opts.runId) {
+        if (WorkLeaseGranted.is(event) && event.payload.runId === this.opts.runId) {
             if (!this.opts.leaseAuthority || source === this.opts.leaseAuthority) {
-                const storyId = event.data.request.storyId
+                const storyId = event.payload.request.storyId
                 const previous = this.activeLeases.get(storyId)
                 if (
                     previous &&
-                    (event.data.generation < previous.generation ||
-                        (event.data.generation === previous.generation &&
-                            event.data.leaseId !== previous.leaseId))
+                    (event.payload.generation < previous.generation ||
+                        (event.payload.generation === previous.generation &&
+                            event.payload.leaseId !== previous.leaseId))
                 ) return
                 if (
                     previous &&
-                    event.data.generation === previous.generation &&
-                    event.data.leaseId === previous.leaseId
+                    event.payload.generation === previous.generation &&
+                    event.payload.leaseId === previous.leaseId
                 ) return
                 this.activeLeases.set(storyId, {
-                    leaseId: event.data.leaseId,
-                    generation: event.data.generation,
-                    workerId: event.data.workerId,
-                    routeLocked: event.data.route !== undefined,
+                    leaseId: event.payload.leaseId,
+                    generation: event.payload.generation,
+                    workerId: event.payload.workerId,
+                    routeLocked: event.payload.route !== undefined,
                 })
                 this.activeWorkers.add(storyId)
-                if (event.data.route) {
+                if (event.payload.route) {
                     this.setFeedbackCapability(
                         storyId,
-                        event.data.route.backend,
+                        event.payload.route.backend,
                     )
                 } else {
                     this.feedbackCapableWorkers.delete(storyId)
                 }
                 this.pushObservation(
-                    `lease granted: ${storyId} → ${event.data.workerId}`,
+                    `lease granted: ${storyId} → ${event.payload.workerId}`,
                 )
             }
             return
         }
-        if (WorkLeaseReleased.is(event) && event.data.runId === this.opts.runId) {
+        if (WorkLeaseReleased.is(event) && event.payload.runId === this.opts.runId) {
             if (!this.opts.leaseAuthority || source === this.opts.leaseAuthority) {
-                const active = this.activeLeases.get(event.data.storyId)
+                const active = this.activeLeases.get(event.payload.storyId)
                 if (
                     !active ||
-                    active.leaseId !== event.data.leaseId ||
-                    active.workerId !== event.data.workerId
+                    active.leaseId !== event.payload.leaseId ||
+                    active.workerId !== event.payload.workerId
                 ) return
-                this.activeLeases.delete(event.data.storyId)
-                this.activeWorkers.delete(event.data.storyId)
-                this.feedbackCapableWorkers.delete(event.data.storyId)
+                this.activeLeases.delete(event.payload.storyId)
+                this.activeWorkers.delete(event.payload.storyId)
+                this.feedbackCapableWorkers.delete(event.payload.storyId)
                 this.pushObservation(
-                    `lease released: ${event.data.storyId} (${event.data.reason})`,
+                    `lease released: ${event.payload.storyId} (${event.payload.reason})`,
                 )
             }
             return
         }
         if (LevelStarted.is(event)) {
             if (!this.acceptsObservation(source, this.opts.controlAuthority)) return
-            this.pushObservation(`level ${event.data.ordinal} started: ${event.data.storyIds.join(", ")}`)
+            this.pushObservation(`level ${event.payload.ordinal} started: ${event.payload.storyIds.join(", ")}`)
         } else if (LevelCompleted.is(event)) {
             if (!this.acceptsObservation(source, this.opts.controlAuthority)) return
-            const blocked = event.data.blocked?.join(",") || "none"
+            const blocked = event.payload.blocked?.join(",") || "none"
             this.pushObservation(
-                `level ${event.data.ordinal} completed: passed=${event.data.passed.join(",") || "none"}; failed=${event.data.failed.join(",") || "none"}; blocked=${blocked}`,
+                `level ${event.payload.ordinal} completed: passed=${event.payload.passed.join(",") || "none"}; failed=${event.payload.failed.join(",") || "none"}; blocked=${blocked}`,
             )
         } else if (StoryRouted.is(event)) {
-            const active = this.activeLeases.get(event.data.storyId)
+            const active = this.activeLeases.get(event.payload.storyId)
             if (
                 !active ||
                 active.routeLocked ||
                 this.routeAuthoritiesByWorker.get(active.workerId) !== source ||
-                event.data.runId !== this.opts.runId ||
-                event.data.leaseId !== active.leaseId ||
-                event.data.generation !== active.generation
+                event.payload.runId !== this.opts.runId ||
+                event.payload.leaseId !== active.leaseId ||
+                event.payload.generation !== active.generation
             ) return
             this.setFeedbackCapability(
-                event.data.storyId,
-                event.data.backend,
+                event.payload.storyId,
+                event.payload.backend,
             )
-            this.activeLeases.set(event.data.storyId, {
+            this.activeLeases.set(event.payload.storyId, {
                 ...active,
                 routeLocked: true,
             })
             this.pushObservation(
-                `${event.data.storyId} routed to ${event.data.backend}:${event.data.model}`,
+                `${event.payload.storyId} routed to ${event.payload.backend}:${event.payload.model}`,
             )
         } else if (AgentState.is(event)) {
-            if (!this.acceptsStoryObservation(source, event.data.agentId)) return
+            if (!this.acceptsStoryObservation(source, event.payload.agentId)) return
             this.pushObservation(
-                `${event.data.agentId} is ${event.data.phase}${event.data.detail ? ` (${event.data.detail})` : ""}`,
+                `${event.payload.agentId} is ${event.payload.phase}${event.payload.detail ? ` (${event.payload.detail})` : ""}`,
             )
         } else if (Critique.is(event)) {
             if (!this.acceptsObservation(
@@ -763,67 +763,67 @@ export class DialogueAgent extends SerializedObserver {
                 this.opts.observationAuthorities?.criticAuthority,
             )) return
             this.pushObservation(
-                `critic ${event.data.status === "inconclusive" ? "inconclusive" : event.data.verdict} for ${event.data.agentId}: ${event.data.reasoning}`,
+                `critic ${event.payload.status === "inconclusive" ? "inconclusive" : event.payload.verdict} for ${event.payload.agentId}: ${event.payload.reasoning}`,
             )
-        } else if (StoryQualityCompleted.is(event) && event.data.runId === this.opts.runId) {
+        } else if (StoryQualityCompleted.is(event) && event.payload.runId === this.opts.runId) {
             if (!this.acceptsObservation(
                 source,
                 this.opts.observationAuthorities?.qualityAuthority,
-            ) || !this.acceptsActiveStoryCorrelation(event.data)) return
+            ) || !this.acceptsActiveStoryCorrelation(event.payload)) return
             this.pushObservation(
-                `quality ${event.data.status} for ${event.data.storyId}: ${event.data.reason}`,
+                `quality ${event.payload.status} for ${event.payload.storyId}: ${event.payload.reason}`,
             )
-        } else if (StoryMerged.is(event) && event.data.runId === this.opts.runId) {
+        } else if (StoryMerged.is(event) && event.payload.runId === this.opts.runId) {
             if (!this.acceptsObservation(
                 source,
                 this.opts.observationAuthorities?.repositoryAuthority,
-            ) || !this.acceptsActiveStoryCorrelation(event.data)) return
-            this.pushObservation(`${event.data.storyId} integrated (${event.data.mode})`)
-        } else if (StoryMergeFailed.is(event) && event.data.runId === this.opts.runId) {
+            ) || !this.acceptsActiveStoryCorrelation(event.payload)) return
+            this.pushObservation(`${event.payload.storyId} integrated (${event.payload.mode})`)
+        } else if (StoryMergeFailed.is(event) && event.payload.runId === this.opts.runId) {
             if (!this.acceptsObservation(
                 source,
                 this.opts.observationAuthorities?.repositoryAuthority,
-            ) || !this.acceptsActiveStoryCorrelation(event.data)) return
-            this.pushObservation(`${event.data.storyId} integration failed: ${event.data.error}`)
-        } else if (StoryResult.is(event) && event.data.runId === this.opts.runId) {
+            ) || !this.acceptsActiveStoryCorrelation(event.payload)) return
+            this.pushObservation(`${event.payload.storyId} integration failed: ${event.payload.error}`)
+        } else if (StoryResult.is(event) && event.payload.runId === this.opts.runId) {
             const outcomeAuthority =
                 this.opts.observationAuthorities?.outcomeAuthority
             if (
                 outcomeAuthority &&
-                (!outcomeAuthority.matchesResult(source, event.data) ||
-                    !this.acceptsActiveStoryCorrelation(event.data))
+                (!outcomeAuthority.matchesResult(source, event.payload) ||
+                    !this.acceptsActiveStoryCorrelation(event.payload))
             ) return
-            this.pushObservation(event.data.suspension
-                ? `${event.data.storyId} execution suspended for dependency block ${event.data.suspension.blockId}`
-                : `${event.data.storyId} execution ${event.data.success ? "succeeded" : "failed"}`)
-        } else if (CollaborationNote.is(event) && event.data.runId === this.opts.runId) {
+            this.pushObservation(event.payload.suspension
+                ? `${event.payload.storyId} execution suspended for dependency block ${event.payload.suspension.blockId}`
+                : `${event.payload.storyId} execution ${event.payload.success ? "succeeded" : "failed"}`)
+        } else if (CollaborationNote.is(event) && event.payload.runId === this.opts.runId) {
             if (!this.acceptsObservation(
                 source,
                 this.opts.observationAuthorities?.collaborationAuthority,
             )) return
-            this.pushObservation(`${event.data.sourceAgentId} note: ${event.data.text}`)
-        } else if (RunVerificationCompleted.is(event) && event.data.runId === this.opts.runId) {
+            this.pushObservation(`${event.payload.sourceAgentId} note: ${event.payload.text}`)
+        } else if (RunVerificationCompleted.is(event) && event.payload.runId === this.opts.runId) {
             if (!this.acceptsObservation(
                 source,
                 this.opts.observationAuthorities?.verificationAuthority,
             )) return
-            this.pushObservation(`objective verification ${event.data.status}`)
-        } else if (RunCompleted.is(event) && event.data.runId === this.opts.runId) {
+            this.pushObservation(`objective verification ${event.payload.status}`)
+        } else if (RunCompleted.is(event) && event.payload.runId === this.opts.runId) {
             if (!this.acceptsObservation(source, this.opts.controlAuthority)) return
-            this.pushObservation(`run completed with success=${event.data.success}`)
+            this.pushObservation(`run completed with success=${event.payload.success}`)
         }
     }
 
     private acceptsObservation(
-        source: Participant,
-        authority: Participant | undefined,
+        source: BusMember,
+        authority: BusMember | undefined,
     ): boolean {
         return this.opts.observationAuthorities === undefined ||
             (authority !== undefined && source === authority)
     }
 
     private acceptsStoryObservation(
-        source: Participant,
+        source: BusMember,
         storyId: string,
     ): boolean {
         const authorities = this.opts.observationAuthorities

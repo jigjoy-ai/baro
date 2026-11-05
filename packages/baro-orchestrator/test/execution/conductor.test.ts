@@ -62,7 +62,7 @@ The boundary is independently callable.
             })
             const env = joinWithCapture(conductor)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "resume" }),
             )
@@ -94,21 +94,21 @@ The boundary is independently callable.
                 intraLevelDelaySecs: 0,
             })
             const env = joinWithCapture(conductor)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "unit test" }),
             )
 
             const spawn = await waitForEvent(env.events, StorySpawnRequest.is)
             assert.match(
-                spawn.data.prompt,
+                spawn.payload.prompt,
                 /Design baseline \(evidence-backed and revisable\)/,
             )
-            assert.match(spawn.data.prompt, /newer concrete repository evidence/)
-            assert.match(spawn.data.prompt, /collective runtime\s+replan path/)
-            assert.doesNotMatch(spawn.data.prompt, /authoritative — already decided/)
+            assert.match(spawn.payload.prompt, /newer concrete repository evidence/)
+            assert.match(spawn.payload.prompt, /collective runtime\s+replan path/)
+            assert.doesNotMatch(spawn.payload.prompt, /authoritative — already decided/)
 
-            env.deliverSemanticEvent(source("S1"), passResult("S1"))
+            env.publish(source("S1"), passResult("S1"))
             await waitForEvent(env.events, RunCompleted.is)
         })
     })
@@ -142,13 +142,13 @@ The boundary is independently callable.
                 intraLevelDelaySecs: 0,
             })
             const env = joinWithCapture(conductor)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "unit test" }),
             )
 
             const spawn = await waitForEvent(env.events, StorySpawnRequest.is)
-            const surface = spawn.data.surface
+            const surface = spawn.payload.surface
             assert.ok(surface, "spawn request carries a write surface")
             assert.deepEqual(surface.writes, ["src/tables/tables.service.ts"])
             assert.equal(
@@ -161,8 +161,8 @@ The boundary is independently callable.
                 "a story never appears as a stranger in its own surface",
             )
 
-            env.deliverSemanticEvent(source("S1"), passResult("S1"))
-            env.deliverSemanticEvent(source("S2"), passResult("S2"))
+            env.publish(source("S1"), passResult("S1"))
+            env.publish(source("S2"), passResult("S2"))
             await waitForEvent(env.events, RunCompleted.is)
         })
     })
@@ -181,15 +181,15 @@ The boundary is independently callable.
                 intraLevelDelaySecs: 0,
             })
             const env = joinWithCapture(conductor)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "unit test" }),
             )
 
             const spawn = await waitForEvent(env.events, StorySpawnRequest.is)
-            assert.equal(spawn.data.surface, undefined)
+            assert.equal(spawn.payload.surface, undefined)
 
-            env.deliverSemanticEvent(source("S1"), passResult("S1"))
+            env.publish(source("S1"), passResult("S1"))
             await waitForEvent(env.events, RunCompleted.is)
         })
     })
@@ -209,32 +209,32 @@ The boundary is independently callable.
             })
             const env = joinWithCapture(conductor)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "unit test" }),
             )
 
             const spawn = await waitForEvent(env.events, StorySpawnRequest.is)
             assert.equal(RunStarted.is(env.events.find(RunStarted.is)!), true)
-            assert.deepEqual(env.events.find(RunStarted.is)?.data, {
+            assert.deepEqual(env.events.find(RunStarted.is)?.payload, {
                 project: "Participant Tests",
                 storyCount: 1,
                 storyIds: ["S1"],
                 completedStoryIds: [],
                 coordinationMode: "legacy",
             })
-            assert.deepEqual(env.events.find(LevelStarted.is)?.data, {
+            assert.deepEqual(env.events.find(LevelStarted.is)?.payload, {
                 ordinal: 1,
                 totalLevelsHint: 1,
                 storyIds: ["S1"],
             })
-            assert.equal(spawn.data.storyId, "S1")
-            assert.equal(spawn.data.model, "opus")
-            assert.equal(spawn.data.retries, 2)
-            assert.equal(spawn.data.timeoutSecs, 45)
-            assert.match(spawn.data.prompt, /Implement conductor coverage/)
+            assert.equal(spawn.payload.storyId, "S1")
+            assert.equal(spawn.payload.model, "opus")
+            assert.equal(spawn.payload.retries, 2)
+            assert.equal(spawn.payload.timeoutSecs, 45)
+            assert.match(spawn.payload.prompt, /Implement conductor coverage/)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("S1"),
                 StoryResult.create({
                     storyId: "S1",
@@ -246,16 +246,16 @@ The boundary is independently callable.
             )
 
             const completed = await waitForEvent(env.events, RunCompleted.is)
-            assert.deepEqual(env.events.find(LevelCompleted.is)?.data, {
+            assert.deepEqual(env.events.find(LevelCompleted.is)?.payload, {
                 ordinal: 1,
                 passed: ["S1"],
                 failed: [],
             })
-            assert.equal(completed.data.success, true)
-            assert.deepEqual(completed.data.completedStories, ["S1"])
-            assert.deepEqual(completed.data.failedStories, [])
-            assert.equal(completed.data.totalAttempts, 2)
-            assert.equal(completed.data.abortReason, null)
+            assert.equal(completed.payload.success, true)
+            assert.deepEqual(completed.payload.completedStories, ["S1"])
+            assert.deepEqual(completed.payload.failedStories, [])
+            assert.equal(completed.payload.totalAttempts, 2)
+            assert.equal(completed.payload.abortReason, null)
 
             const savedPrd = JSON.parse(readFileSync(prdPath, "utf8")) as PrdFile
             assert.equal(savedPrd.userStories[0]?.passes, true)
@@ -280,13 +280,13 @@ The boundary is independently callable.
             })
             const env = joinWithCapture(conductor)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "unit test" }),
             )
 
             await waitForEvent(env.events, StorySpawnRequest.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("S1"),
                 StoryResult.create({
                     storyId: "S1",
@@ -298,7 +298,7 @@ The boundary is independently callable.
             )
 
             await waitForEvents(env.events, StorySpawnRequest.is, 2)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("S1"),
                 StoryResult.create({
                     storyId: "S1",
@@ -310,23 +310,23 @@ The boundary is independently callable.
             )
 
             const completed = await waitForEvent(env.events, RunCompleted.is)
-            assert.equal(completed.data.success, false)
-            assert.deepEqual(completed.data.completedStories, [])
-            assert.deepEqual(completed.data.failedStories, ["S1"])
-            assert.equal(completed.data.totalAttempts, 3)
+            assert.equal(completed.payload.success, false)
+            assert.deepEqual(completed.payload.completedStories, [])
+            assert.deepEqual(completed.payload.failedStories, ["S1"])
+            assert.equal(completed.payload.totalAttempts, 3)
             assert.equal(
-                completed.data.abortReason,
+                completed.payload.abortReason,
                 "all stories in level failed; aborting remaining levels",
             )
             assert.deepEqual(failedStories, ["S1", "S1"])
 
             const levelEvents = env.events.filter(LevelStarted.is)
             assert.equal(levelEvents.length, 2)
-            assert.deepEqual(levelEvents.map((event) => event.data.ordinal), [1, 2])
+            assert.deepEqual(levelEvents.map((event) => event.payload.ordinal), [1, 2])
 
             const recoveries = env.events.filter(RecoveryStarted.is)
             assert.equal(recoveries.length, 1)
-            assert.deepEqual(recoveries[0].data, { attempt: 1, storyIds: ["S1"] })
+            assert.deepEqual(recoveries[0].payload, { attempt: 1, storyIds: ["S1"] })
 
             const savedPrd = JSON.parse(readFileSync(prdPath, "utf8")) as PrdFile
             assert.equal(savedPrd.userStories[0]?.passes, false)
@@ -349,9 +349,9 @@ The boundary is independently callable.
                 replanProgressBudget: 1,
             })
             const env = joinWithCapture(conductor)
-            const deliver = env.deliverSemanticEvent.bind(env)
+            const deliver = env.publish.bind(env)
             let persistedReplans = 0
-            env.deliverSemanticEvent = (sourceParticipant, event) => {
+            env.publish = (sourceParticipant, event) => {
                 if (ReplanApplied.is(event)) {
                     const saved = JSON.parse(
                         readFileSync(prdPath, "utf8"),
@@ -359,7 +359,7 @@ The boundary is independently callable.
                     const savedIds = new Set(
                         saved.userStories.map((story) => story.id),
                     )
-                    for (const story of event.data.addedStories) {
+                    for (const story of event.payload.addedStories) {
                         assert.equal(savedIds.has(story.id), true)
                     }
                     persistedReplans += 1
@@ -367,43 +367,43 @@ The boundary is independently callable.
                 deliver(sourceParticipant, event)
             }
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "unit test" }),
             )
 
             // Level 1: S1 fails, Surgeon replaces it with S2 → S3 chain.
             await waitForEvents(env.events, StorySpawnRequest.is, 1)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("surgeon"),
                 replanEvent("S1", [storyAdd("S2"), storyAdd("S3", ["S2"])]),
             )
-            env.deliverSemanticEvent(source("S1"), failResult("S1"))
+            env.publish(source("S1"), failResult("S1"))
 
             // Level 2: S2 passes — budget (1) was fully consumed by the
             // first replan, so the run only survives if success resets it.
             const spawns2 = await waitForEvents(env.events, StorySpawnRequest.is, 2)
-            assert.equal(spawns2[1].data.storyId, "S2")
-            env.deliverSemanticEvent(source("S2"), passResult("S2"))
+            assert.equal(spawns2[1].payload.storyId, "S2")
+            env.publish(source("S2"), passResult("S2"))
 
             // Level 3: S3 fails, Surgeon replaces it with S4.
             const spawns3 = await waitForEvents(env.events, StorySpawnRequest.is, 3)
-            assert.equal(spawns3[2].data.storyId, "S3")
-            env.deliverSemanticEvent(
+            assert.equal(spawns3[2].payload.storyId, "S3")
+            env.publish(
                 source("surgeon"),
                 replanEvent("S3", [storyAdd("S4")]),
             )
-            env.deliverSemanticEvent(source("S3"), failResult("S3"))
+            env.publish(source("S3"), failResult("S3"))
 
             // Level 4: S4 passes → clean completion despite two replans.
             const spawns4 = await waitForEvents(env.events, StorySpawnRequest.is, 4)
-            assert.equal(spawns4[3].data.storyId, "S4")
-            env.deliverSemanticEvent(source("S4"), passResult("S4"))
+            assert.equal(spawns4[3].payload.storyId, "S4")
+            env.publish(source("S4"), passResult("S4"))
 
             const completed = await waitForEvent(env.events, RunCompleted.is)
-            assert.equal(completed.data.success, true)
-            assert.equal(completed.data.abortReason, null)
-            assert.deepEqual(completed.data.completedStories, ["S2", "S4"])
+            assert.equal(completed.payload.success, true)
+            assert.equal(completed.payload.abortReason, null)
+            assert.deepEqual(completed.payload.completedStories, ["S2", "S4"])
             assert.equal(persistedReplans, 2)
         })
     })
@@ -430,7 +430,7 @@ The boundary is independently callable.
             })
             const env = joinWithCapture(conductor)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "unit test" }),
             )
@@ -440,27 +440,27 @@ The boundary is independently callable.
                 2,
             )
             assert.deepEqual(
-                initialSpawns.map((event) => event.data.storyId),
+                initialSpawns.map((event) => event.payload.storyId),
                 ["S1", "S2"],
             )
 
             // Both failures belong to the same safe boundary. With the old
             // per-item halt, applying S1's replacement exhausted the budget,
             // discarded S2's already-drained sibling proposal, and stopped.
-            env.deliverSemanticEvent(
+            env.publish(
                 source("surgeon-S1"),
                 replanEvent("S1", [storyAdd("S1-replacement")]),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("surgeon-S2"),
                 replanEvent("S2", [storyAdd("S2-replacement")]),
             )
-            env.deliverSemanticEvent(source("S1"), failResult("S1"))
-            env.deliverSemanticEvent(source("S2"), failResult("S2"))
+            env.publish(source("S1"), failResult("S1"))
+            env.publish(source("S2"), failResult("S2"))
 
             const applied = await waitForEvents(env.events, ReplanApplied.is, 2)
             assert.deepEqual(
-                applied.map((event) => event.data.addedStories[0]?.id),
+                applied.map((event) => event.payload.addedStories[0]?.id),
                 ["S1-replacement", "S2-replacement"],
             )
             assert.equal(
@@ -468,7 +468,7 @@ The boundary is independently callable.
                     .filter(ConductorState.is)
                     .filter(
                         (event) =>
-                            event.data.detail === "replan 1/1 without progress",
+                            event.payload.detail === "replan 1/1 without progress",
                     ).length,
                 1,
             )
@@ -485,21 +485,21 @@ The boundary is independently callable.
                 4,
             )
             assert.deepEqual(
-                replacementSpawns.slice(2).map((event) => event.data.storyId),
+                replacementSpawns.slice(2).map((event) => event.payload.storyId),
                 ["S1-replacement", "S2-replacement"],
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("S1-replacement"),
                 passResult("S1-replacement"),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("S2-replacement"),
                 passResult("S2-replacement"),
             )
 
             const completed = await waitForEvent(env.events, RunCompleted.is)
-            assert.equal(completed.data.success, true)
-            assert.equal(completed.data.abortReason, null)
+            assert.equal(completed.payload.success, true)
+            assert.equal(completed.payload.abortReason, null)
         })
     })
 
@@ -519,35 +519,35 @@ The boundary is independently callable.
             })
             const env = joinWithCapture(conductor)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "unit test" }),
             )
 
             await waitForEvents(env.events, StorySpawnRequest.is, 1)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("surgeon"),
                 replanEvent("S1", [storyAdd("S2")]),
             )
-            env.deliverSemanticEvent(source("S1"), failResult("S1"))
+            env.publish(source("S1"), failResult("S1"))
 
             const spawns = await waitForEvents(env.events, StorySpawnRequest.is, 2)
-            assert.equal(spawns[1].data.storyId, "S2")
-            env.deliverSemanticEvent(source("S2"), failResult("S2"))
+            assert.equal(spawns[1].payload.storyId, "S2")
+            env.publish(source("S2"), failResult("S2"))
 
             const completed = await waitForEvent(env.events, RunCompleted.is)
-            assert.equal(completed.data.success, false)
+            assert.equal(completed.payload.success, false)
             assert.equal(
-                completed.data.abortReason,
+                completed.payload.abortReason,
                 "no progress after 1 replan — stopping so completed work can ship",
             )
-            assert.deepEqual(completed.data.failedStories, ["S2"])
+            assert.deepEqual(completed.payload.failedStories, ["S2"])
             assert.equal(env.events.filter(RecoveryStarted.is).length, 0)
             assert.equal(env.events.filter(StorySpawnRequest.is).length, 2)
             assert.ok(
                 env.events
                     .filter(ConductorState.is)
-                    .some((e) => e.data.detail === "replan 1/1 without progress"),
+                    .some((e) => e.payload.detail === "replan 1/1 without progress"),
             )
         })
     })
@@ -575,7 +575,7 @@ The boundary is independently callable.
             })
             const env = joinWithCapture(conductor)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "unit test" }),
             )
@@ -584,12 +584,12 @@ The boundary is independently callable.
             // Let the deadline lapse mid-story; the check must only fire
             // at the level boundary, after S1's result lands.
             await new Promise((resolve) => setTimeout(resolve, 80))
-            env.deliverSemanticEvent(source("S1"), passResult("S1"))
+            env.publish(source("S1"), passResult("S1"))
 
             const completed = await waitForEvent(env.events, RunCompleted.is)
-            assert.equal(completed.data.success, false)
-            assert.match(completed.data.abortReason ?? "", /soft deadline reached/)
-            assert.deepEqual(completed.data.completedStories, ["S1"])
+            assert.equal(completed.payload.success, false)
+            assert.match(completed.payload.abortReason ?? "", /soft deadline reached/)
+            assert.deepEqual(completed.payload.completedStories, ["S1"])
             // S2 was never spawned — the run stopped before the next level.
             assert.equal(env.events.filter(StorySpawnRequest.is).length, 1)
         })
@@ -618,7 +618,7 @@ The boundary is independently callable.
             })
             const env = joinWithCapture(conductor)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "unit test" }),
             )
@@ -626,21 +626,21 @@ The boundary is independently callable.
 
             // Four hours asleep inside a 30-minute budget spends none of it.
             clock.suspend(4 * 60 * 60_000)
-            env.deliverSemanticEvent(source("S1"), passResult("S1"))
+            env.publish(source("S1"), passResult("S1"))
             const spawned = await waitForEvents(env.events, StorySpawnRequest.is, 2)
             assert.deepEqual(
-                spawned.map((event) => event.data.storyId),
+                spawned.map((event) => event.payload.storyId),
                 ["S1", "S2"],
             )
             assert.equal(env.events.some(RunCompleted.is), false)
 
             // The same budget, reached as awake time, still stops the run.
             clock.advance(1_800_000)
-            env.deliverSemanticEvent(source("S2"), passResult("S2"))
+            env.publish(source("S2"), passResult("S2"))
             const completed = await waitForEvent(env.events, RunCompleted.is)
-            assert.equal(completed.data.success, false)
-            assert.match(completed.data.abortReason ?? "", /soft deadline reached/)
-            assert.deepEqual(completed.data.completedStories, ["S1", "S2"])
+            assert.equal(completed.payload.success, false)
+            assert.match(completed.payload.abortReason ?? "", /soft deadline reached/)
+            assert.deepEqual(completed.payload.completedStories, ["S1", "S2"])
             assert.equal(env.events.filter(StorySpawnRequest.is).length, 2)
         })
     })
@@ -670,19 +670,19 @@ The boundary is independently callable.
             })
             const env = joinWithCapture(conductor)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "unit test" }),
             )
             await waitForEvents(env.events, StorySpawnRequest.is, 1)
 
             clock.advance(1_800_000)
-            env.deliverSemanticEvent(source("S1"), passResult("S1"))
+            env.publish(source("S1"), passResult("S1"))
 
             const completed = await waitForEvent(env.events, RunCompleted.is)
-            assert.equal(completed.data.success, false)
-            assert.match(completed.data.abortReason ?? "", /soft deadline reached/)
-            assert.deepEqual(completed.data.completedStories, ["S1"])
+            assert.equal(completed.payload.success, false)
+            assert.match(completed.payload.abortReason ?? "", /soft deadline reached/)
+            assert.deepEqual(completed.payload.completedStories, ["S1"])
             assert.equal(env.events.filter(StorySpawnRequest.is).length, 1)
         })
     })
@@ -705,7 +705,7 @@ The boundary is independently callable.
                 })
                 const env = joinWithCapture(conductor)
 
-                env.deliverSemanticEvent(
+                env.publish(
                     source("operator"),
                     RunStartRequest.create({ reason: "unit test" }),
                 )
@@ -720,22 +720,22 @@ The boundary is independently callable.
                         StorySpawnRequest.is,
                         i - 1,
                     )
-                    assert.equal(spawns[i - 2].data.storyId, current)
-                    env.deliverSemanticEvent(
+                    assert.equal(spawns[i - 2].payload.storyId, current)
+                    env.publish(
                         source("surgeon"),
                         replanEvent(current, [storyAdd(next)]),
                     )
-                    env.deliverSemanticEvent(source(current), failResult(current))
+                    env.publish(source(current), failResult(current))
                     current = next
                 }
 
                 const spawns = await waitForEvents(env.events, StorySpawnRequest.is, 5)
-                assert.equal(spawns[4].data.storyId, "S5")
-                env.deliverSemanticEvent(source("S5"), passResult("S5"))
+                assert.equal(spawns[4].payload.storyId, "S5")
+                env.publish(source("S5"), passResult("S5"))
 
                 const completed = await waitForEvent(env.events, RunCompleted.is)
-                assert.equal(completed.data.success, true)
-                assert.equal(completed.data.abortReason, null)
+                assert.equal(completed.payload.success, true)
+                assert.equal(completed.payload.abortReason, null)
             } finally {
                 if (prevEnv === undefined) {
                     delete process.env.BARO_REPLAN_PROGRESS_BUDGET
@@ -769,14 +769,14 @@ The boundary is independently callable.
             })
             const env = joinWithCapture(conductor)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "unit test" }),
             )
             await waitForEvents(env.events, StorySpawnRequest.is, 1)
 
             const validAddition = storyAdd("S2", ["S1"])
-            env.deliverSemanticEvent(
+            env.publish(
                 source("surgeon"),
                 Replan.create({
                     source: "surgeon",
@@ -789,10 +789,10 @@ The boundary is independently callable.
                     modifiedDeps: {},
                 }),
             )
-            env.deliverSemanticEvent(source("S1"), passResult("S1"))
+            env.publish(source("S1"), passResult("S1"))
 
             const applied = await waitForEvent(env.events, ReplanApplied.is)
-            assert.deepEqual(applied.data, {
+            assert.deepEqual(applied.payload, {
                 source: "surgeon",
                 reason: "mixed fresh and stale operations",
                 removedStoryIds: [],
@@ -808,10 +808,10 @@ The boundary is independently callable.
             assert.equal(persisted.userStories[0]?.passes, true)
 
             const spawns = await waitForEvents(env.events, StorySpawnRequest.is, 2)
-            assert.equal(spawns[1]?.data.storyId, "S2")
-            env.deliverSemanticEvent(source("S2"), passResult("S2"))
+            assert.equal(spawns[1]?.payload.storyId, "S2")
+            env.publish(source("S2"), passResult("S2"))
             const completed = await waitForEvent(env.events, RunCompleted.is)
-            assert.equal(completed.data.success, true)
+            assert.equal(completed.payload.success, true)
         })
     })
 
@@ -833,22 +833,22 @@ The boundary is independently callable.
             })
             const env = joinWithCapture(conductor)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "unit test" }),
             )
             await waitForEvents(env.events, StorySpawnRequest.is, 1)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("surgeon"),
                 replanEvent("S1", [storyAdd("S2")]),
             )
-            env.deliverSemanticEvent(source("S1"), failResult("S1"))
+            env.publish(source("S1"), failResult("S1"))
 
             const completed = await waitForEvent(env.events, RunCompleted.is)
             const summary = await conductor.done
-            assert.equal(completed.data.success, false)
-            assert.match(completed.data.abortReason ?? "", /persist replan.*disk full/)
-            assert.equal(summary.abortReason, completed.data.abortReason)
+            assert.equal(completed.payload.success, false)
+            assert.match(completed.payload.abortReason ?? "", /persist replan.*disk full/)
+            assert.equal(summary.abortReason, completed.payload.abortReason)
             assert.equal(env.events.filter(ReplanApplied.is).length, 0)
             assert.equal(env.events.filter(StorySpawnRequest.is).length, 1)
 
@@ -878,18 +878,18 @@ The boundary is independently callable.
             })
             const env = joinWithCapture(conductor)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "unit test" }),
             )
             await waitForEvents(env.events, StorySpawnRequest.is, 1)
-            env.deliverSemanticEvent(source("S1"), passResult("S1"))
+            env.publish(source("S1"), passResult("S1"))
 
             const completed = await waitForEvent(env.events, RunCompleted.is)
             const summary = await conductor.done
-            assert.equal(completed.data.success, false)
+            assert.equal(completed.payload.success, false)
             assert.match(
-                completed.data.abortReason ?? "",
+                completed.payload.abortReason ?? "",
                 /persist story 'S1'.*read-only filesystem/,
             )
             assert.deepEqual(summary.completedStories, [])
@@ -914,7 +914,7 @@ The boundary is independently callable.
             })
             const env = joinWithCapture(conductor)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "unit test" }),
             )
@@ -960,13 +960,13 @@ The boundary is independently callable.
                 },
             ]
             for (const proposal of invalidProposals) {
-                env.deliverSemanticEvent(
+                env.publish(
                     source("surgeon"),
                     Replan.create(proposal as ReplanData),
                 )
             }
             const validAddition = storyAdd("S2", ["S1"])
-            env.deliverSemanticEvent(
+            env.publish(
                 source("surgeon"),
                 Replan.create({
                     source: "surgeon",
@@ -976,14 +976,14 @@ The boundary is independently callable.
                     modifiedDeps: {},
                 }),
             )
-            env.deliverSemanticEvent(source("S1"), passResult("S1"))
+            env.publish(source("S1"), passResult("S1"))
 
             const applied = await waitForEvent(env.events, ReplanApplied.is)
-            assert.deepEqual(applied.data.addedStories, [validAddition])
+            assert.deepEqual(applied.payload.addedStories, [validAddition])
             assert.equal(env.events.filter(ReplanApplied.is).length, 1)
             const ignored = env.events
                 .filter(ConductorState.is)
-                .map((event) => event.data.detail ?? "")
+                .map((event) => event.payload.detail ?? "")
                 .filter((detail) => detail.startsWith("replan ignored"))
             assert.equal(ignored.length, 5)
             assert.ok(ignored.some((detail) => detail.includes("invalid_proposal")))
@@ -999,10 +999,10 @@ The boundary is independently callable.
             )
 
             const spawns = await waitForEvents(env.events, StorySpawnRequest.is, 2)
-            assert.equal(spawns[1]?.data.storyId, "S2")
-            env.deliverSemanticEvent(source("S2"), passResult("S2"))
+            assert.equal(spawns[1]?.payload.storyId, "S2")
+            env.publish(source("S2"), passResult("S2"))
             const completed = await waitForEvent(env.events, RunCompleted.is)
-            assert.equal(completed.data.success, true)
+            assert.equal(completed.payload.success, true)
         })
     })
 
@@ -1029,12 +1029,12 @@ The boundary is independently callable.
             })
             const env = joinWithCapture(conductor)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "unit test" }),
             )
             await waitForEvents(env.events, StorySpawnRequest.is, 1)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("surgeon"),
                 Replan.create({
                     source: "surgeon",
@@ -1044,20 +1044,20 @@ The boundary is independently callable.
                     modifiedDeps: {},
                 }),
             )
-            env.deliverSemanticEvent(source("S1"), failResult("S1"))
+            env.publish(source("S1"), failResult("S1"))
 
             const recoverySpawns = await waitForEvents(
                 env.events,
                 StorySpawnRequest.is,
                 2,
             )
-            assert.equal(recoverySpawns[1]?.data.storyId, "S1")
+            assert.equal(recoverySpawns[1]?.payload.storyId, "S1")
             assert.equal(env.events.filter(ReplanApplied.is).length, 0)
             assert.ok(
                 env.events
                     .filter(ConductorState.is)
                     .some((event) =>
-                        event.data.detail?.startsWith("skip proposal deferred"),
+                        event.payload.detail?.startsWith("skip proposal deferred"),
                     ),
             )
             const persisted = JSON.parse(readFileSync(prdPath, "utf8")) as PrdFile
@@ -1066,9 +1066,9 @@ The boundary is independently callable.
                 ["S1", "S-done"],
             )
 
-            env.deliverSemanticEvent(source("S1"), failResult("S1"))
+            env.publish(source("S1"), failResult("S1"))
             const completed = await waitForEvent(env.events, RunCompleted.is)
-            assert.equal(completed.data.success, false)
+            assert.equal(completed.payload.success, false)
         })
     })
 })

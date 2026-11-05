@@ -5,7 +5,8 @@
  * the live stdin session (continuation turns + targeted-message injection).
  */
 
-import { Participant, SemanticEvent } from "../../runtime/mozaik.js"
+import { SemanticEvent } from "../../runtime/mozaik.js"
+import { BusMember } from "../../runtime/coordination.js"
 
 import {
     AgentResult,
@@ -44,9 +45,9 @@ export interface ClaudeCliParticipantOptions {
     /** Compatibility targeted messages from this exact participant are
      * ignored because the owning StoryAgent consumes correlated Critique
      * events directly. */
-    ignoredTargetedMessageAuthority?: Participant
+    ignoredTargetedMessageAuthority?: BusMember
     /** Exact Bridge and lease capability required in collective execution. */
-    targetedMessageAuthority?: Participant
+    targetedMessageAuthority?: BusMember
     targetedMessageCorrelation?: Readonly<{
         runId?: string
         leaseId?: string
@@ -179,15 +180,15 @@ export class ClaudeCliParticipant extends CliParticipant<ClaudeRunSummary> {
 
         for (const item of items) {
             if (item instanceof SemanticEvent) {
-                if (ClaudeSystem.is(item) && item.data.subtype === "init") {
+                if (ClaudeSystem.is(item) && item.payload.subtype === "init") {
                     this.transition("running", "claude init received")
                     this.settleReady()
                 }
                 if (AgentResult.is(item)) {
-                    this.lastResult = item.data
+                    this.lastResult = item.payload
                     this.transition(
-                        item.data.isError ? "failed" : "done",
-                        `result:${item.data.subtype}`,
+                        item.payload.isError ? "failed" : "done",
+                        `result:${item.payload.subtype}`,
                     )
                 }
             }
@@ -196,8 +197,8 @@ export class ClaudeCliParticipant extends CliParticipant<ClaudeRunSummary> {
     }
 
     override async onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): Promise<void> {
         // This participant owns bus → stdin forwarding for its agentId;
         // StoryAgent observes these events for lifecycle only and must NOT
@@ -206,7 +207,7 @@ export class ClaudeCliParticipant extends CliParticipant<ClaudeRunSummary> {
             AgentTargetedMessage.is(event) &&
             acceptsTargetedMessage(
                 source,
-                event.data,
+                event.payload,
                 this.agentId,
                 this.options.targetedMessageAuthority,
                 this.options.targetedMessageCorrelation ?? {},
@@ -215,11 +216,11 @@ export class ClaudeCliParticipant extends CliParticipant<ClaudeRunSummary> {
             !(
                 this.options.ignoreCorrelatedTerminalFeedback === true &&
                 source === this.options.targetedMessageAuthority &&
-                typeof event.data.metadata.terminalId === "string"
+                typeof event.payload.metadata.terminalId === "string"
             )
         ) {
             if (!this.processStdin) return
-            this.sendUserMessage(event.data.text)
+            this.sendUserMessage(event.payload.text)
         }
     }
 }

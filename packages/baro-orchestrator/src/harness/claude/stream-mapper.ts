@@ -27,7 +27,7 @@ export type MappedItem =
     | ModelMessageItem
     | FunctionCallItem
     | FunctionCallOutputItem
-    | SemanticEvent<unknown>
+    | SemanticEvent<string, unknown>
 
 export interface MapResult {
     items: MappedItem[]

@@ -4,7 +4,8 @@
  * The process/stream skeleton lives in CliParticipant.
  */
 
-import { Participant, SemanticEvent } from "../../runtime/mozaik.js"
+import { SemanticEvent } from "../../runtime/mozaik.js"
+import { BusMember } from "../../runtime/coordination.js"
 
 import {
     AgentTargetedMessage,
@@ -31,7 +32,7 @@ export interface OpenCodeCliParticipantOptions {
      * for tool approvals, which blocks autonomous runs. Default: true.
      */
     skipPermissions?: boolean
-    targetedMessageAuthority?: Participant
+    targetedMessageAuthority?: BusMember
     targetedMessageCorrelation?: Readonly<{
         runId?: string
         leaseId?: string
@@ -151,7 +152,7 @@ export class OpenCodeCliParticipant extends CliParticipant<OpenCodeRunSummary> {
             if (item instanceof SemanticEvent) {
                 if (
                     OpenCodeSystem.is(item) &&
-                    item.data.subtype === "step_start"
+                    item.payload.subtype === "step_start"
                 ) {
                     this.transition("running", "opencode step started")
                     this.settleReady()
@@ -164,8 +165,8 @@ export class OpenCodeCliParticipant extends CliParticipant<OpenCodeRunSummary> {
     }
 
     override async onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): Promise<void> {
         // OpenCode run is one-shot — stdin carries only the initial prompt; targeted messages are
         // logged and dropped.
@@ -173,7 +174,7 @@ export class OpenCodeCliParticipant extends CliParticipant<OpenCodeRunSummary> {
             AgentTargetedMessage.is(event) &&
             acceptsTargetedMessage(
                 source,
-                event.data,
+                event.payload,
                 this.agentId,
                 this.options.targetedMessageAuthority,
                 this.options.targetedMessageCorrelation ?? {},

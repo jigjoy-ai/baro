@@ -39,7 +39,7 @@ function requestIntegration(
     env: ReturnType<typeof joinWithCapture>,
     extra: Record<string, unknown> = {},
 ) {
-    env.deliverSemanticEvent(
+    env.publish(
         BOARD,
         StoryIntegrationRequested.create({
             runId: "run-refused",
@@ -75,7 +75,7 @@ describe("GitCoordinator integration_refused", () => {
 
             const refused = env.events.filter(IntegrationRefused.is)
             assert.equal(refused.length, 1)
-            assert.deepEqual(refused[0]!.data, {
+            assert.deepEqual(refused[0]!.payload, {
                 runId: "run-refused",
                 storyId: "S1",
                 leaseId: "lease-1",
@@ -91,8 +91,8 @@ describe("GitCoordinator integration_refused", () => {
             // The refusal itself is unchanged: the Board still keys on this.
             const failure = env.events.find(StoryMergeFailed.is)
             assert.ok(failure)
-            assert.equal(failure.data.branch, "baro-recovery/run/S1/1")
-            assert.equal(failure.data.retryable, true)
+            assert.equal(failure.payload.branch, "baro-recovery/run/S1/1")
+            assert.equal(failure.payload.retryable, true)
         })
     })
 
@@ -120,16 +120,16 @@ describe("GitCoordinator integration_refused", () => {
 
             const refused = env.events.filter(IntegrationRefused.is)
             assert.equal(refused.length, 1)
-            assert.equal(refused[0]!.data.invariant, "merge_conflict")
-            assert.equal(refused[0]!.data.recoveryRef, null)
-            assert.equal(refused[0]!.data.worktreeRetained, false)
-            assert.equal(refused[0]!.data.recoverable, false)
-            assert.equal(refused[0]!.data.retryable, false)
-            assert.equal(refused[0]!.data.branch, "baro/S1")
+            assert.equal(refused[0]!.payload.invariant, "merge_conflict")
+            assert.equal(refused[0]!.payload.recoveryRef, null)
+            assert.equal(refused[0]!.payload.worktreeRetained, false)
+            assert.equal(refused[0]!.payload.recoverable, false)
+            assert.equal(refused[0]!.payload.retryable, false)
+            assert.equal(refused[0]!.payload.branch, "baro/S1")
 
             const failure = env.events.find(StoryMergeFailed.is)
             assert.ok(failure)
-            assert.match(failure.data.error, /recovery preparation failed/)
+            assert.match(failure.payload.error, /recovery preparation failed/)
         })
     })
 
@@ -149,7 +149,7 @@ describe("GitCoordinator integration_refused", () => {
 
             const refused = env.events.filter(IntegrationRefused.is)
             assert.equal(refused.length, 1)
-            assert.deepEqual(refused[0]!.data, {
+            assert.deepEqual(refused[0]!.payload, {
                 runId: "run-refused",
                 storyId: "S1",
                 leaseId: "lease-1",
@@ -175,7 +175,7 @@ describe("GitCoordinator integration_refused", () => {
             const coordinator = coordinatorFor(dir, worktrees)
             const env = joinWithCapture(coordinator)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 BROKER,
                 WorkLeaseGranted.create({
                     runId: "run-refused",
@@ -197,19 +197,19 @@ describe("GitCoordinator integration_refused", () => {
 
             const refused = env.events.filter(IntegrationRefused.is)
             assert.equal(refused.length, 1)
-            assert.equal(refused[0]!.data.invariant, "seal_missing")
+            assert.equal(refused[0]!.payload.invariant, "seal_missing")
             assert.equal(
-                refused[0]!.data.detail,
+                refused[0]!.payload.detail,
                 "reviewed candidate seal marker is missing for story S1",
             )
             // Nothing merged, so the accepted work is still recoverable.
-            assert.equal(refused[0]!.data.recoveryRef, "baro-recovery/run/S1/2")
-            assert.equal(refused[0]!.data.recoverable, true)
-            assert.equal(refused[0]!.data.retryable, false)
+            assert.equal(refused[0]!.payload.recoveryRef, "baro-recovery/run/S1/2")
+            assert.equal(refused[0]!.payload.recoverable, true)
+            assert.equal(refused[0]!.payload.retryable, false)
 
             const failure = env.events.find(StoryMergeFailed.is)
             assert.ok(failure)
-            assert.match(failure.data.error, /candidate seal marker is missing/)
+            assert.match(failure.payload.error, /candidate seal marker is missing/)
         })
     })
 
@@ -228,13 +228,13 @@ describe("GitCoordinator integration_refused", () => {
 
             const refused = env.events.filter(IntegrationRefused.is)
             assert.equal(refused.length, 1)
-            assert.equal(refused[0]!.data.invariant, "fingerprint_missing")
+            assert.equal(refused[0]!.payload.invariant, "fingerprint_missing")
             assert.equal(
-                refused[0]!.data.detail,
+                refused[0]!.payload.detail,
                 "reviewed candidate fingerprint is missing or invalid for story S1",
             )
-            assert.equal(refused[0]!.data.worktreeRetained, true)
-            assert.equal(refused[0]!.data.recoverable, true)
+            assert.equal(refused[0]!.payload.worktreeRetained, true)
+            assert.equal(refused[0]!.payload.recoverable, true)
         })
     })
 
@@ -258,16 +258,16 @@ describe("GitCoordinator integration_refused", () => {
 
             const refused = env.events.filter(IntegrationRefused.is)
             assert.equal(refused.length, 1)
-            assert.equal(refused[0]!.data.invariant, "worktree_missing")
-            assert.equal(refused[0]!.data.worktreeRetained, false)
-            assert.equal(refused[0]!.data.recoverable, false)
+            assert.equal(refused[0]!.payload.invariant, "worktree_missing")
+            assert.equal(refused[0]!.payload.worktreeRetained, false)
+            assert.equal(refused[0]!.payload.recoverable, false)
 
             // The unreadable accessor must not have upgraded the refusal into
             // a crash, nor suppressed the failure the Board acts on.
             const failure = env.events.find(StoryMergeFailed.is)
             assert.ok(failure)
             assert.equal(
-                failure.data.error,
+                failure.payload.error,
                 "isolated worktree state missing for S1",
             )
         })
@@ -300,17 +300,17 @@ describe("GitCoordinator integration_refused", () => {
             assert.equal(prepared, 0, "the intact story branch is not released for a re-run")
             const refused = env.events.filter(IntegrationRefused.is)
             assert.equal(refused.length, 1)
-            assert.equal(refused[0]!.data.invariant, "host_checkout_dirty")
-            assert.equal(refused[0]!.data.retryable, false)
-            assert.equal(refused[0]!.data.branch, "baro-wt/run/S1")
-            assert.equal(refused[0]!.data.recoveryRef, null)
-            assert.equal(refused[0]!.data.worktreeRetained, true)
+            assert.equal(refused[0]!.payload.invariant, "host_checkout_dirty")
+            assert.equal(refused[0]!.payload.retryable, false)
+            assert.equal(refused[0]!.payload.branch, "baro-wt/run/S1")
+            assert.equal(refused[0]!.payload.recoveryRef, null)
+            assert.equal(refused[0]!.payload.worktreeRetained, true)
 
             const failure = env.events.find(StoryMergeFailed.is)
             assert.ok(failure)
-            assert.equal(failure.data.retryable, false)
-            assert.match(failure.data.error, /uncommitted changes on \[a\.txt\]/)
-            assert.doesNotMatch(failure.data.error, /recovery preparation failed/)
+            assert.equal(failure.payload.retryable, false)
+            assert.match(failure.payload.error, /uncommitted changes on \[a\.txt\]/)
+            assert.doesNotMatch(failure.payload.error, /recovery preparation failed/)
         })
     })
 })

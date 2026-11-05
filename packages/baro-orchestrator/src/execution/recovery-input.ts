@@ -13,36 +13,36 @@ import { isProviderCapacityFailure } from "../harness/provider-failure.js"
  * failure shape consumed by all Surgeon implementations.
  */
 export function recoveryInput(
-    event: SemanticEvent<unknown>,
+    event: SemanticEvent<string, unknown>,
 ): StoryResultData | null {
     if (StoryResult.is(event)) {
-        return event.data.suspension !== undefined ||
-            event.data.success ||
-            isProviderCapacityFailure(event.data) ||
-            (event.data.failure !== undefined &&
-                !isSemanticWorkFailure(event.data))
+        return event.payload.suspension !== undefined ||
+            event.payload.success ||
+            isProviderCapacityFailure(event.payload) ||
+            (event.payload.failure !== undefined &&
+                !isSemanticWorkFailure(event.payload))
             ? null
-            : event.data
+            : event.payload
     }
-    if (!StoryQualityCompleted.is(event) || event.data.status !== "failed") {
+    if (!StoryQualityCompleted.is(event) || event.payload.status !== "failed") {
         return null
     }
 
-    const violated = event.data.critique?.violatedCriteria ?? []
+    const violated = event.payload.critique?.violatedCriteria ?? []
     const violationSuffix = violated.length > 0
         ? ` (violated: ${violated.join("; ")})`
         : ""
     return {
-        storyId: event.data.storyId,
+        storyId: event.payload.storyId,
         success: false,
         // Execution itself succeeded; these neutral values let the existing
         // Surgeon prompt/replan contract represent a post-execution failure.
         attempts: 1,
         durationSecs: 0,
-        error: `acceptance quality gate failed: ${event.data.reason}${violationSuffix}`,
-        runId: event.data.runId,
-        leaseId: event.data.leaseId,
-        generation: event.data.generation,
+        error: `acceptance quality gate failed: ${event.payload.reason}${violationSuffix}`,
+        runId: event.payload.runId,
+        leaseId: event.payload.leaseId,
+        generation: event.payload.generation,
     }
 }
 

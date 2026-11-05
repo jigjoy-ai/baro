@@ -37,7 +37,7 @@ describe("stdin agent_message commands", () => {
         const event = env.events[0]
         assert.equal(AgentTargetedMessage.is(event), true)
         if (!AgentTargetedMessage.is(event)) return
-        assert.deepEqual(event.data, {
+        assert.deepEqual(event.payload, {
             recipientId: "S2",
             text: "focus on the failing spec",
             metadata: { source: "user" },
@@ -81,7 +81,7 @@ describe("stdin agent_message commands", () => {
 
         const requests = env.events.filter(ConversationRequested.is)
         assert.equal(requests.length, 1)
-        assert.deepEqual(requests[0]?.data, {
+        assert.deepEqual(requests[0]?.payload, {
             runId: "run-stdin",
             messageId: "user-message-1",
             text: "What is the collective doing?",

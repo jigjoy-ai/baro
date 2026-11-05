@@ -31,7 +31,7 @@ const envelope = {
 describe("aggregate goal governance", () => {
     it("defers strict completion until a source-bound aggregate review passes", () => {
         const fixture = aggregateFixture("run-aggregate-goal")
-        fixture.env.deliverSemanticEvent(
+        fixture.env.publish(
             fixture.board,
             completionRequest(fixture, "check-aggregate"),
         )
@@ -39,29 +39,29 @@ describe("aggregate goal governance", () => {
         const request = fixture.env.events.find(GoalAggregateReviewRequested.is)
         assert.ok(request)
 
-        const completed = aggregateCompletion(request.data, "passed")
-        fixture.env.deliverSemanticEvent(source("forged-reviewer"), completed)
+        const completed = aggregateCompletion(request.payload, "passed")
+        fixture.env.publish(source("forged-reviewer"), completed)
         assert.equal(fixture.env.events.filter(GoalCompletionAttested.is).length, 0)
-        fixture.env.deliverSemanticEvent(
+        fixture.env.publish(
             fixture.reviewer,
             GoalAggregateReviewCompleted.create({
-                ...completed.data,
+                ...completed.payload,
                 verificationId: "forged-verification",
             }),
         )
         assert.equal(fixture.env.events.filter(GoalCompletionAttested.is).length, 0)
 
-        fixture.env.deliverSemanticEvent(fixture.reviewer, completed)
+        fixture.env.publish(fixture.reviewer, completed)
         const attestation = fixture.env.events.find(GoalCompletionAttested.is)
-        assert.equal(attestation?.data.status, "satisfied")
+        assert.equal(attestation?.payload.status, "satisfied")
         assert.equal(
-            attestation?.data.invariants[0]?.aggregateReviewStatus,
+            attestation?.payload.invariants[0]?.aggregateReviewStatus,
             "passed",
         )
         assert.equal(
             fixture.env.events
                 .filter(GoalLedgerProjectionUpdated.is)
-                .at(-1)?.data.projection.aggregateReviews.length,
+                .at(-1)?.payload.projection.aggregateReviews.length,
             1,
         )
     })
@@ -88,7 +88,7 @@ describe("aggregate goal governance", () => {
         guardian.setQualityAuthority(acceptanceGate)
         guardian.setAggregateReviewAuthority(reviewer)
         const env = joinWithCapture(guardian)
-        env.deliverSemanticEvent(
+        env.publish(
             repository,
             StoryMerged.create({
                 runId,
@@ -97,11 +97,11 @@ describe("aggregate goal governance", () => {
                 mode: "worktree",
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             acceptanceGate,
             passedQuality(runId, "S1", "lease-1"),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             board,
             GoalCompletionCheckRequested.create({
                 runId,
@@ -114,76 +114,76 @@ describe("aggregate goal governance", () => {
         const request = env.events.find(GoalAggregateReviewRequested.is)
         assert.ok(request)
 
-        env.deliverSemanticEvent(
+        env.publish(
             acceptanceGate,
             StoryQualityCompleted.create({
-                ...passedQuality(runId, "S1", "lease-1").data,
+                ...passedQuality(runId, "S1", "lease-1").payload,
                 evaluationId: "S1:new-quality",
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             reviewer,
-            aggregateCompletion(request.data, "passed"),
+            aggregateCompletion(request.payload, "passed"),
         )
         assert.equal(env.events.filter(GoalCompletionAttested.is).length, 0)
         const requests = env.events.filter(GoalAggregateReviewRequested.is)
         assert.equal(requests.length, 2)
         assert.notEqual(
-            requests[1]!.data.basis.fingerprint,
-            requests[0]!.data.basis.fingerprint,
+            requests[1]!.payload.basis.fingerprint,
+            requests[0]!.payload.basis.fingerprint,
         )
-        assert.ok(requests[1]!.data.goalRevision > requests[0]!.data.goalRevision)
+        assert.ok(requests[1]!.payload.goalRevision > requests[0]!.payload.goalRevision)
 
-        env.deliverSemanticEvent(
+        env.publish(
             reviewer,
-            aggregateCompletion(requests[1]!.data, "passed"),
+            aggregateCompletion(requests[1]!.payload, "passed"),
         )
         const attestation = env.events.find(GoalCompletionAttested.is)
-        assert.equal(attestation?.data.status, "satisfied")
+        assert.equal(attestation?.payload.status, "satisfied")
         assert.equal(
             env.events
                 .filter(GoalLedgerProjectionUpdated.is)
-                .at(-1)?.data.projection.aggregateReviews.length,
+                .at(-1)?.payload.projection.aggregateReviews.length,
             1,
         )
     })
 
     it("fails closed after a second quality-only basis change", () => {
         const fixture = singleStoryFixture("run-stale-twice")
-        fixture.env.deliverSemanticEvent(
+        fixture.env.publish(
             fixture.board,
             completionRequest(fixture, "check-stale-twice"),
         )
         const first = fixture.env.events.find(GoalAggregateReviewRequested.is)
         assert.ok(first)
-        fixture.env.deliverSemanticEvent(
+        fixture.env.publish(
             fixture.acceptanceGate,
             StoryQualityCompleted.create({
-                ...passedQuality(fixture.runId, "S1", "lease-S1").data,
+                ...passedQuality(fixture.runId, "S1", "lease-S1").payload,
                 evaluationId: "quality-second",
             }),
         )
-        fixture.env.deliverSemanticEvent(
+        fixture.env.publish(
             fixture.reviewer,
-            aggregateCompletion(first.data, "passed"),
+            aggregateCompletion(first.payload, "passed"),
         )
         const second = fixture.env.events
             .filter(GoalAggregateReviewRequested.is)
             .at(-1)
         assert.ok(second)
-        fixture.env.deliverSemanticEvent(
+        fixture.env.publish(
             fixture.acceptanceGate,
             StoryQualityCompleted.create({
-                ...passedQuality(fixture.runId, "S1", "lease-S1").data,
+                ...passedQuality(fixture.runId, "S1", "lease-S1").payload,
                 evaluationId: "quality-third",
             }),
         )
-        fixture.env.deliverSemanticEvent(
+        fixture.env.publish(
             fixture.reviewer,
-            aggregateCompletion(second.data, "passed"),
+            aggregateCompletion(second.payload, "passed"),
         )
         assert.equal(
-            fixture.env.events.find(GoalCompletionAttested.is)?.data.status,
+            fixture.env.events.find(GoalCompletionAttested.is)?.payload.status,
             "incomplete",
         )
         assert.equal(
@@ -194,13 +194,13 @@ describe("aggregate goal governance", () => {
 
     it("does not reuse verification when the integrated lease changes", () => {
         const fixture = singleStoryFixture("run-stale-integration")
-        fixture.env.deliverSemanticEvent(
+        fixture.env.publish(
             fixture.board,
             completionRequest(fixture, "check-stale-integration"),
         )
         const request = fixture.env.events.find(GoalAggregateReviewRequested.is)
         assert.ok(request)
-        fixture.env.deliverSemanticEvent(
+        fixture.env.publish(
             source("repository"),
             StoryMerged.create({
                 runId: fixture.runId,
@@ -211,7 +211,7 @@ describe("aggregate goal governance", () => {
         )
         // The forged repository above is ignored; use the authority retained by
         // the fixture for the actual changed integration identity.
-        fixture.env.deliverSemanticEvent(
+        fixture.env.publish(
             fixture.repository,
             StoryMerged.create({
                 runId: fixture.runId,
@@ -220,16 +220,16 @@ describe("aggregate goal governance", () => {
                 mode: "worktree",
             }),
         )
-        fixture.env.deliverSemanticEvent(
+        fixture.env.publish(
             fixture.acceptanceGate,
             passedQuality(fixture.runId, "S1", "lease-S1-new"),
         )
-        fixture.env.deliverSemanticEvent(
+        fixture.env.publish(
             fixture.reviewer,
-            aggregateCompletion(request.data, "passed"),
+            aggregateCompletion(request.payload, "passed"),
         )
         assert.equal(
-            fixture.env.events.find(GoalCompletionAttested.is)?.data.status,
+            fixture.env.events.find(GoalCompletionAttested.is)?.payload.status,
             "incomplete",
         )
         assert.equal(
@@ -240,15 +240,15 @@ describe("aggregate goal governance", () => {
 
     it("turns an aggregate semantic rejection into invariant-scoped remediation", () => {
         const fixture = aggregateFixture("run-aggregate-rejected")
-        fixture.env.deliverSemanticEvent(
+        fixture.env.publish(
             fixture.board,
             completionRequest(fixture, "check-rejected"),
         )
         const request = fixture.env.events.find(GoalAggregateReviewRequested.is)
         assert.ok(request)
-        fixture.env.deliverSemanticEvent(
+        fixture.env.publish(
             fixture.reviewer,
-            aggregateCompletion(request.data, "failed"),
+            aggregateCompletion(request.payload, "failed"),
         )
 
         assert.equal(
@@ -260,37 +260,37 @@ describe("aggregate goal governance", () => {
             GoalInvariantRemediationProposed.is,
         )
         assert.ok(remediation)
-        assert.equal(remediation.data.invariantId, "G-A1")
-        assert.deepEqual(remediation.data.story.goalInvariantIds, ["G-A1"])
+        assert.equal(remediation.payload.invariantId, "G-A1")
+        assert.deepEqual(remediation.payload.story.goalInvariantIds, ["G-A1"])
         assert.equal(
-            remediation.data.story.acceptance[0],
-            `[G-A1] ${request.data.basis.invariants[0]!.text}`,
+            remediation.payload.story.acceptance[0],
+            `[G-A1] ${request.payload.basis.invariants[0]!.text}`,
         )
-        assert.match(remediation.data.reason, /run-level semantic review/i)
-        assert.match(remediation.data.reason, /does not prove the invariant/)
+        assert.match(remediation.payload.reason, /run-level semantic review/i)
+        assert.match(remediation.payload.reason, /does not prove the invariant/)
         assert.equal(
             fixture.env.events
                 .filter(GoalLedgerProjectionUpdated.is)
-                .at(-1)?.data.projection.aggregateReviews.length,
+                .at(-1)?.payload.projection.aggregateReviews.length,
             1,
         )
     })
 
     it("dispatches one story for a shared root cause and admits the challenge group atomically", () => {
         const fixture = singleStoryFixture("run-aggregate-grouped-remediation")
-        fixture.env.deliverSemanticEvent(
+        fixture.env.publish(
             fixture.board,
             completionRequest(fixture, "check-grouped-remediation"),
         )
         const request = fixture.env.events.find(GoalAggregateReviewRequested.is)
         assert.ok(request)
         const groupId = "goal-remediation-group-shared-root"
-        const failed = aggregateCompletion(request.data, "failed")
-        fixture.env.deliverSemanticEvent(
+        const failed = aggregateCompletion(request.payload, "failed")
+        fixture.env.publish(
             fixture.reviewer,
             GoalAggregateReviewCompleted.create({
-                ...failed.data,
-                invariants: failed.data.invariants.map((invariant) => ({
+                ...failed.payload,
+                invariants: failed.payload.invariants.map((invariant) => ({
                     ...invariant,
                     remediationGroupId: groupId,
                 })),
@@ -302,33 +302,33 @@ describe("aggregate goal governance", () => {
         )
         assert.equal(proposals.length, 1)
         const proposal = proposals[0]!
-        assert.equal(proposal.data.remediationGroupId, groupId)
-        assert.deepEqual(proposal.data.invariantIds, ["G-A1", "G-C1"])
-        assert.equal(proposal.data.challengeIds?.length, 2)
+        assert.equal(proposal.payload.remediationGroupId, groupId)
+        assert.deepEqual(proposal.payload.invariantIds, ["G-A1", "G-C1"])
+        assert.equal(proposal.payload.challengeIds?.length, 2)
         assert.deepEqual(
-            proposal.data.story.goalInvariantIds,
+            proposal.payload.story.goalInvariantIds,
             ["G-A1", "G-C1"],
         )
 
-        fixture.env.deliverSemanticEvent(
+        fixture.env.publish(
             fixture.board,
             GoalInvariantRemediationAdmitted.create({
                 runId: fixture.runId,
                 contractId: fixture.contractId,
-                challengeId: proposal.data.challengeIds![0]!,
-                challengeIds: [proposal.data.challengeIds![0]!],
-                invariantId: proposal.data.invariantIds![0]!,
-                invariantIds: [proposal.data.invariantIds![0]!],
+                challengeId: proposal.payload.challengeIds![0]!,
+                challengeIds: [proposal.payload.challengeIds![0]!],
+                invariantId: proposal.payload.invariantIds![0]!,
+                invariantIds: [proposal.payload.invariantIds![0]!],
                 remediationGroupId: groupId,
-                proposalId: proposal.data.proposalId,
-                storyId: proposal.data.story.id,
+                proposalId: proposal.payload.proposalId,
+                storyId: proposal.payload.story.id,
                 graphVersion: 2,
                 disposition: "applied",
             }),
         )
         let projection = fixture.env.events
             .filter(GoalLedgerProjectionUpdated.is)
-            .at(-1)!.data.projection
+            .at(-1)!.payload.projection
         assert.equal(
             projection.challenges.every(
                 ({ remediation }) => remediation?.status === "requested",
@@ -337,25 +337,25 @@ describe("aggregate goal governance", () => {
             "a valid subset receipt admits none of the group",
         )
 
-        fixture.env.deliverSemanticEvent(
+        fixture.env.publish(
             fixture.board,
             GoalInvariantRemediationAdmitted.create({
                 runId: fixture.runId,
                 contractId: fixture.contractId,
-                challengeId: proposal.data.challengeId,
-                challengeIds: proposal.data.challengeIds!,
+                challengeId: proposal.payload.challengeId,
+                challengeIds: proposal.payload.challengeIds!,
                 invariantId: "G-C1",
                 invariantIds: ["G-C1", "G-A1"],
                 remediationGroupId: groupId,
-                proposalId: proposal.data.proposalId,
-                storyId: proposal.data.story.id,
+                proposalId: proposal.payload.proposalId,
+                storyId: proposal.payload.story.id,
                 graphVersion: 2,
                 disposition: "applied",
             }),
         )
         projection = fixture.env.events
             .filter(GoalLedgerProjectionUpdated.is)
-            .at(-1)!.data.projection
+            .at(-1)!.payload.projection
         assert.equal(
             projection.challenges.every(
                 ({ remediation }) => remediation?.status === "requested",
@@ -364,30 +364,30 @@ describe("aggregate goal governance", () => {
             "a misordered receipt admits none of the group",
         )
 
-        fixture.env.deliverSemanticEvent(
+        fixture.env.publish(
             fixture.board,
             GoalInvariantRemediationAdmitted.create({
                 runId: fixture.runId,
                 contractId: fixture.contractId,
-                challengeId: proposal.data.challengeId,
-                challengeIds: proposal.data.challengeIds!,
-                invariantId: proposal.data.invariantId,
-                invariantIds: proposal.data.invariantIds!,
+                challengeId: proposal.payload.challengeId,
+                challengeIds: proposal.payload.challengeIds!,
+                invariantId: proposal.payload.invariantId,
+                invariantIds: proposal.payload.invariantIds!,
                 remediationGroupId: groupId,
-                proposalId: proposal.data.proposalId,
-                storyId: proposal.data.story.id,
+                proposalId: proposal.payload.proposalId,
+                storyId: proposal.payload.story.id,
                 graphVersion: 2,
                 disposition: "applied",
             }),
         )
         projection = fixture.env.events
             .filter(GoalLedgerProjectionUpdated.is)
-            .at(-1)!.data.projection
+            .at(-1)!.payload.projection
         assert.equal(
             projection.challenges.every(
                 ({ remediation }) =>
                     remediation?.status === "admitted" &&
-                    remediation.storyId === proposal.data.story.id,
+                    remediation.storyId === proposal.payload.story.id,
             ),
             true,
         )
@@ -395,15 +395,15 @@ describe("aggregate goal governance", () => {
 
     it("an inconclusive aggregate review completes on per-story evidence without coding remediation", () => {
         const fixture = aggregateFixture("run-aggregate-inconclusive")
-        fixture.env.deliverSemanticEvent(
+        fixture.env.publish(
             fixture.board,
             completionRequest(fixture, "check-inconclusive"),
         )
         const request = fixture.env.events.find(GoalAggregateReviewRequested.is)
         assert.ok(request)
-        fixture.env.deliverSemanticEvent(
+        fixture.env.publish(
             fixture.reviewer,
-            aggregateCompletion(request.data, "inconclusive"),
+            aggregateCompletion(request.payload, "inconclusive"),
         )
 
         assert.equal(
@@ -411,10 +411,10 @@ describe("aggregate goal governance", () => {
             false,
         )
         const attestation = fixture.env.events.find(GoalCompletionAttested.is)
-        assert.equal(attestation?.data.status, "satisfied")
-        assert.deepEqual(attestation?.data.openInvariantIds, [])
-        assert.deepEqual(attestation?.data.satisfiedInvariantIds, ["G-A1"])
-        assert.match(attestation?.data.reason ?? "", /inconclusive for 1 of them/)
+        assert.equal(attestation?.payload.status, "satisfied")
+        assert.deepEqual(attestation?.payload.openInvariantIds, [])
+        assert.deepEqual(attestation?.payload.satisfiedInvariantIds, ["G-A1"])
+        assert.match(attestation?.payload.reason ?? "", /inconclusive for 1 of them/)
     })
 
     it("bounds repeated semantic remediation and eventually returns the rejected attestation", () => {
@@ -451,15 +451,15 @@ describe("aggregate goal governance", () => {
             "run-aggregate-remediation-bounded",
             prior.snapshot(1),
         )
-        fixture.env.deliverSemanticEvent(
+        fixture.env.publish(
             fixture.board,
             completionRequest(fixture, "check-bounded"),
         )
         const request = fixture.env.events.find(GoalAggregateReviewRequested.is)
         assert.ok(request)
-        fixture.env.deliverSemanticEvent(
+        fixture.env.publish(
             fixture.reviewer,
-            aggregateCompletion(request.data, "failed"),
+            aggregateCompletion(request.payload, "failed"),
         )
 
         assert.equal(
@@ -467,8 +467,8 @@ describe("aggregate goal governance", () => {
             false,
         )
         const attestation = fixture.env.events.find(GoalCompletionAttested.is)
-        assert.equal(attestation?.data.status, "incomplete")
-        assert.deepEqual(attestation?.data.rejectedInvariantIds, ["G-A1"])
+        assert.equal(attestation?.payload.status, "incomplete")
+        assert.deepEqual(attestation?.payload.rejectedInvariantIds, ["G-A1"])
     })
 
     it("does not let worker-controlled aggregate-like ids consume the remediation cap", () => {
@@ -505,23 +505,23 @@ describe("aggregate goal governance", () => {
             "run-aggregate-worker-prefix-spoof",
             prior.snapshot(1),
         )
-        fixture.env.deliverSemanticEvent(
+        fixture.env.publish(
             fixture.board,
             completionRequest(fixture, "check-worker-prefix"),
         )
         const request = fixture.env.events.find(GoalAggregateReviewRequested.is)
         assert.ok(request)
-        fixture.env.deliverSemanticEvent(
+        fixture.env.publish(
             fixture.reviewer,
-            aggregateCompletion(request.data, "failed"),
+            aggregateCompletion(request.payload, "failed"),
         )
 
         const remediation = fixture.env.events.find(
             GoalInvariantRemediationProposed.is,
         )
         assert.ok(remediation)
-        assert.equal(remediation.data.invariantId, "G-A1")
-        assert.match(remediation.data.challengeId, /^aggregate-g-a1-/)
+        assert.equal(remediation.payload.invariantId, "G-A1")
+        assert.match(remediation.payload.challengeId, /^aggregate-g-a1-/)
         assert.equal(fixture.env.events.some(GoalCompletionAttested.is), false)
     })
 })
@@ -562,11 +562,11 @@ function aggregateFixture(
     guardian.setAggregateReviewAuthority(reviewer)
     const env = joinWithCapture(guardian)
     for (const storyId of storyIds) {
-        env.deliverSemanticEvent(
+        env.publish(
             acceptanceGate,
             passedQuality(runId, storyId, `lease-${storyId}`),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             repository,
             StoryMerged.create({
                 runId,
@@ -607,7 +607,7 @@ function singleStoryFixture(runId: string) {
     guardian.setQualityAuthority(acceptanceGate)
     guardian.setAggregateReviewAuthority(reviewer)
     const env = joinWithCapture(guardian)
-    env.deliverSemanticEvent(
+    env.publish(
         repository,
         StoryMerged.create({
             runId,
@@ -616,7 +616,7 @@ function singleStoryFixture(runId: string) {
             mode: "worktree",
         }),
     )
-    env.deliverSemanticEvent(
+    env.publish(
         acceptanceGate,
         passedQuality(runId, "S1", "lease-S1"),
     )

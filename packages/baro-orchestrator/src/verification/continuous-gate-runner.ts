@@ -15,9 +15,9 @@
  * by the same code. No model is ever called from here.
  */
 
-import type { FunctionCallItem, Participant, SemanticEvent } from "../runtime/mozaik.js"
+import type { FunctionCallItem, SemanticEvent } from "../runtime/mozaik.js"
 import { AgentTargetedMessage } from "../events/collaboration.js"
-import { BaseObserver } from "../runtime/mozaik.js"
+import { BusMember } from "../runtime/coordination.js"
 import { isFileMutationTool } from "../harness/tool-classification.js"
 import { participantAgentId } from "../runtime/participant-identity.js"
 import {
@@ -71,7 +71,7 @@ export function gateCommandWasKilled(command: { status: string; tail?: string })
     return /exited with code null/u.test(tail) || /signal: (killed|terminated)/u.test(tail)
 }
 
-export class ContinuousGateRunner extends BaseObserver {
+export class ContinuousGateRunner extends BusMember {
     private readonly lastDelivered = new Map<string, GateOutcome>()
     private readonly timers = new Map<string, NodeJS.Timeout>()
     /** One gate at a time for the whole run. Ten concurrent `go build ./...`
@@ -88,7 +88,7 @@ export class ContinuousGateRunner extends BaseObserver {
         super()
     }
 
-    override onExternalFunctionCall(source: Participant, item: FunctionCallItem): void {
+    override onExternalFunctionCall(source: BusMember, item: FunctionCallItem): void {
         if (this.stopped) return
         if (!isFileMutationTool(item.name)) return
         const agentId = participantAgentId(source)
@@ -208,8 +208,8 @@ export class ContinuousGateRunner extends BaseObserver {
             text: renderGateReport(outcome),
             metadata: { source: "continuous-gate", runId: this.opts.runId },
         })
-        for (const environment of this.getEnvironments()) {
-            environment.deliverSemanticEvent(this, event as SemanticEvent<unknown>)
+        for (const environment of this.getBuses()) {
+            environment.publish(this, event as SemanticEvent<string, unknown>)
         }
     }
 }

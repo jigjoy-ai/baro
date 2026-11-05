@@ -259,8 +259,8 @@ export class Critic extends OneShotCritic {
             },
         }
         const event = ModelInvocationMeasured.create(data)
-        for (const env of this.getEnvironments()) {
-            env.deliverSemanticEvent(this, event)
+        for (const env of this.getBuses()) {
+            env.publish(this, event)
         }
     }
 }

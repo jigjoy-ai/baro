@@ -4,10 +4,9 @@ import { join } from "node:path"
 import { describe, it } from "node:test"
 
 import {
-    BaseObserver,
-    type Participant,
     type SemanticEvent,
 } from "../../../src/runtime/mozaik.js"
+import { BusMember } from "../../../src/runtime/coordination.js"
 
 import { AgentTurnProjector } from "../../../src/acceptance/agent-turn-projector.js"
 import { CodexStoryAgent } from "../../../src/harness/codex/story-agent.js"
@@ -56,7 +55,7 @@ process.exit(0)
                 timeoutSecs: FIXTURE_TIMEOUT_SECS,
                 skipGitRepoCheck: true,
             })
-            const terminalSources: Array<Participant & {
+            const terminalSources: Array<BusMember & {
                 getPhase?(): string
             }> = []
             agent.setTerminalSourceRegistrar((source) => terminalSources.push(source))
@@ -69,10 +68,10 @@ process.exit(0)
             assert.equal(outcome.attempts, 1)
             assert.equal(outcome.finalSummary?.threadId, "codex-thread")
             assert.ok(event)
-            assert.equal(event.data.storyId, "story-codex")
-            assert.equal(event.data.success, true)
-            assert.equal(event.data.attempts, 1)
-            assert.equal(event.data.error, null)
+            assert.equal(event.payload.storyId, "story-codex")
+            assert.equal(event.payload.success, true)
+            assert.equal(event.payload.attempts, 1)
+            assert.equal(event.payload.error, null)
             assert.equal(terminalSources.length, 1)
             assert.equal(terminalSources[0]?.agentId, "story-codex")
         })
@@ -129,10 +128,10 @@ setTimeout(() => {
                 projector.join(env)
 
                 const evidenceSnapshots: string[] = []
-                const critic = new (class extends BaseObserver {
+                const critic = new (class extends BusMember {
                     override onExternalEvent(
-                        sourceParticipant: Participant,
-                        event: SemanticEvent<unknown>,
+                        sourceParticipant: BusMember,
+                        event: SemanticEvent<string, unknown>,
                     ): void {
                         if (
                             sourceParticipant !== projector ||
@@ -141,11 +140,11 @@ setTimeout(() => {
                         evidenceSnapshots.push(
                             readFileSync(candidatePath, "utf8"),
                         )
-                        env.deliverSemanticEvent(
+                        env.publish(
                             this,
                             Critique.create({
                                 agentId: correlation.storyId,
-                                terminalId: event.data.terminalId,
+                                terminalId: event.payload.terminalId,
                                 status: "evaluated",
                                 verdict: "pass",
                                 reasoning: "stable bytes observed",
@@ -180,7 +179,7 @@ setTimeout(() => {
                     )
                 })
                 agent.join(env)
-                env.deliverSemanticEvent(
+                env.publish(
                     broker,
                     WorkLeaseGranted.create({
                         runId,
@@ -202,7 +201,7 @@ setTimeout(() => {
                     env.events.some(
                         (event) =>
                             CodexTurnEvent.is(event) &&
-                            event.data.phase === "completed",
+                            event.payload.phase === "completed",
                     ),
                 )
                 assert.equal(
@@ -218,7 +217,7 @@ setTimeout(() => {
                 assert.equal(outcome.success, true)
                 assert.deepEqual(evidenceSnapshots, ["final stable bytes\n"])
                 const terminal = env.events.find(AgentTurnCompleted.is)
-                assert.match(terminal?.data.terminalId ?? "", /^quiesced:/)
+                assert.match(terminal?.payload.terminalId ?? "", /^quiesced:/)
 
                 agent.leave(env)
                 critic.leave(env)
@@ -294,7 +293,7 @@ setInterval(() => {}, 1000)
                     )
                 })
                 agent.join(env)
-                env.deliverSemanticEvent(
+                env.publish(
                     broker,
                     WorkLeaseGranted.create({
                         runId,
@@ -316,7 +315,7 @@ setInterval(() => {}, 1000)
                     env.events.some(
                         (event) =>
                             CodexTurnEvent.is(event) &&
-                            event.data.phase === "completed",
+                            event.payload.phase === "completed",
                     ),
                 )
                 assert.equal(
@@ -395,10 +394,10 @@ setTimeout(() => process.exit(0), 500)
                 const env = captureEnv()
                 projector.join(env)
                 const evidenceSnapshots: string[] = []
-                const critic = new (class extends BaseObserver {
+                const critic = new (class extends BusMember {
                     override onExternalEvent(
-                        sourceParticipant: Participant,
-                        event: SemanticEvent<unknown>,
+                        sourceParticipant: BusMember,
+                        event: SemanticEvent<string, unknown>,
                     ): void {
                         if (
                             sourceParticipant !== projector ||
@@ -407,11 +406,11 @@ setTimeout(() => process.exit(0), 500)
                         evidenceSnapshots.push(
                             readFileSync(candidatePath, "utf8"),
                         )
-                        env.deliverSemanticEvent(
+                        env.publish(
                             this,
                             Critique.create({
                                 agentId: correlation.storyId,
-                                terminalId: event.data.terminalId,
+                                terminalId: event.payload.terminalId,
                                 status: "evaluated",
                                 verdict: "pass",
                                 reasoning: "detached writer was drained",
@@ -446,7 +445,7 @@ setTimeout(() => process.exit(0), 500)
                     )
                 })
                 agent.join(env)
-                env.deliverSemanticEvent(
+                env.publish(
                     broker,
                     WorkLeaseGranted.create({
                         runId,
@@ -515,7 +514,7 @@ process.exit(0)
             const env = captureEnv()
             const projector = source("projector")
             const critic = source("critic")
-            const terminalSources: Participant[] = []
+            const terminalSources: BusMember[] = []
             const originalPrompt = "Implement request cancellation and its race test."
             const agent = new CodexStoryAgent({
                 id: "story-codex-surgical",
@@ -534,7 +533,7 @@ process.exit(0)
             })
             agent.setTerminalSourceRegistrar((participant) => {
                 terminalSources.push(
-                    participant as Participant & { getPhase?(): string },
+                    participant as BusMember & { getPhase?(): string },
                 )
             })
             agent.join(env)
@@ -543,7 +542,7 @@ process.exit(0)
             await waitUntil(
                 () => terminalSources[0]?.getPhase?.() === "done",
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 projector,
                 AgentTurnCompleted.create({
                     agentId: agent.agentId,
@@ -554,7 +553,7 @@ process.exit(0)
                     canContinue: false,
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 critic,
                 Critique.create({
                     agentId: agent.agentId,
@@ -574,7 +573,7 @@ process.exit(0)
             await waitUntil(
                 () => terminalSources[1]?.getPhase?.() === "done",
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 projector,
                 AgentTurnCompleted.create({
                     agentId: agent.agentId,
@@ -585,7 +584,7 @@ process.exit(0)
                     canContinue: false,
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 critic,
                 Critique.create({
                     agentId: agent.agentId,
@@ -665,11 +664,11 @@ process.exit(1)
             assert.equal(outcome.finalSummary?.exitCode, 1)
             assert.equal(events.length, 1)
             assert.ok(event)
-            assert.equal(event.data.storyId, "story-codex-retry")
-            assert.equal(event.data.success, false)
-            assert.equal(event.data.attempts, 2)
-            assert.equal(event.data.error, "non-zero exit 1")
-            assert.deepEqual(event.data.failure, outcome.failure)
+            assert.equal(event.payload.storyId, "story-codex-retry")
+            assert.equal(event.payload.success, false)
+            assert.equal(event.payload.attempts, 2)
+            assert.equal(event.payload.error, "non-zero exit 1")
+            assert.deepEqual(event.payload.failure, outcome.failure)
         })
     })
 
@@ -716,8 +715,8 @@ process.exit(1)
                 code: "rate_limited",
             })
             assert.ok(event)
-            assert.equal(event.data.attempts, 1)
-            assert.deepEqual(event.data.failure, outcome.failure)
+            assert.equal(event.payload.attempts, 1)
+            assert.deepEqual(event.payload.failure, outcome.failure)
         })
     })
 
@@ -748,7 +747,7 @@ process.exit(1)
                 code: "process_spawn_failed",
             })
             assert.ok(event)
-            assert.deepEqual(event.data.failure, outcome.failure)
+            assert.deepEqual(event.payload.failure, outcome.failure)
         })
     })
 
@@ -796,7 +795,7 @@ setInterval(() => {}, 1_000)
                 code: "command_timeout",
             })
             assert.ok(event)
-            assert.deepEqual(event.data.failure, outcome.failure)
+            assert.deepEqual(event.payload.failure, outcome.failure)
         })
     })
 
@@ -830,7 +829,7 @@ descendant.once("message", () => {
 
                 const env = captureEnv()
                 const terminalSources: Array<
-                    Participant & { getPhase?(): string }
+                    BusMember & { getPhase?(): string }
                 > = []
                 const agent = new CodexStoryAgent({
                     id: "story-codex-hard-timeout-race",
@@ -854,7 +853,7 @@ descendant.once("message", () => {
                 })
                 agent.setTerminalSourceRegistrar((participant) => {
                     terminalSources.push(
-                        participant as Participant & { getPhase?(): string },
+                        participant as BusMember & { getPhase?(): string },
                     )
                 })
                 agent.join(env)
@@ -878,7 +877,7 @@ descendant.once("message", () => {
                 assert.equal(terminalSources.length, 1)
                 assert.equal(terminalSources[0]?.getPhase?.(), "done")
                 assert.equal(events.length, 1)
-                assert.deepEqual(events[0]?.data.failure, outcome.failure)
+                assert.deepEqual(events[0]?.payload.failure, outcome.failure)
             })
         },
     )
@@ -933,7 +932,7 @@ process.exit(0)
                 })
                 assert.match(outcome.error ?? "", /without workspace cleanup/)
                 assert.ok(result)
-                assert.deepEqual(result.data.failure, outcome.failure)
+                assert.deepEqual(result.payload.failure, outcome.failure)
             })
         },
     )

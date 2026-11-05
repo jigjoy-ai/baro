@@ -10,13 +10,11 @@
  */
 
 import {
-    BaseObserver,
-    Participant,
     SemanticEvent,
 } from "../runtime/mozaik.js"
 
 import { SPAWN_GATES, announceGates } from "../execution/gate-registry.js"
-import { AgenticEnvironment } from "../runtime/mozaik.js"
+import { CoordinationBus, BusMember } from "../runtime/coordination.js"
 import type { GatewayBillingCoordinator } from "../telemetry/billing/index.js"
 import {
     RunCompleted,
@@ -90,30 +88,30 @@ export interface StoryFactoryOptions {
     runId?: string
     workerId?: string
     /** Object-identity authority allowed to grant/release collective leases. */
-    leaseAuthority?: Participant
+    leaseAuthority?: BusMember
     /** Exact CollectiveBoard allowed to publish executable work offers. */
-    offerAuthority?: Participant
+    offerAuthority?: BusMember
     /** Shared run-scoped authority for dynamic factory/agent outcomes. */
     outcomeAuthority?: StoryOutcomeAuthority
     /** Exact CollaborationBridge whose correlated deliveries may reach a
      * collective worker. Presence enables fail-closed message validation. */
-    targetedMessageAuthority?: Participant
+    targetedMessageAuthority?: BusMember
     /** Exact Supervisor allowed to abort the current collective lease. When
      * omitted, collective bus interventions are disabled. */
-    interventionAuthority?: Participant
+    interventionAuthority?: BusMember
     /** Collective Board allowed to answer native `propose_replan` tool calls. */
-    runtimeReplanDecisionAuthority?: Participant
+    runtimeReplanDecisionAuthority?: BusMember
     /** Exact Critic allowed to complete a continuation-capable worker turn. */
-    turnReviewAuthority?: Participant
+    turnReviewAuthority?: BusMember
     /** Exact terminal projector used to correlate one-shot CLI candidates. */
-    terminalTurnAuthority?: Participant
+    terminalTurnAuthority?: BusMember
     /** Exact collective AcceptanceGate that remains responsible for quality
      * after an inconclusive continuation-worker handoff. */
-    acceptanceGateAuthority?: Participant
+    acceptanceGateAuthority?: BusMember
     /** Bound for the Critic handshake before an infrastructure failure. */
     turnReviewTimeoutMs?: number
     /** Exact telemetry reducer whose measurements may influence advisory bids. */
-    telemetryAuthority?: Participant
+    telemetryAuthority?: BusMember
     collaboration?: {
         commandPath: string
         /** Exact manager-owned Bridge capability issuer. Its private storage
@@ -221,9 +219,9 @@ export interface StoryFactoryBidOptions {
     maxConcurrent?: number
 }
 
-export class StoryFactory extends BaseObserver {
+export class StoryFactory extends BusMember {
     /** The bus environment, wired in before any spawn; passed to the executor. */
-    private envRef: AgenticEnvironment | null = null
+    private envRef: CoordinationBus | null = null
     private readonly active: Map<string, StoryExecution> = new Map()
     /** Disposed terminal executions retained only until their exact lease is
      * released, so a delayed block decision can still prove quiescence. */
@@ -321,7 +319,7 @@ export class StoryFactory extends BaseObserver {
         this.routeLearner?.clearPending()
     }
 
-    setEnvironment(env: AgenticEnvironment): void {
+    setEnvironment(env: CoordinationBus): void {
         this.envRef = env
         if (this.opts.coordinationMode === "collective") {
             // Advertise as soon as the worker joins. Board preparation can
@@ -332,19 +330,19 @@ export class StoryFactory extends BaseObserver {
     }
 
     override async onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): Promise<void> {
         await this.handleEvent(event, source, false)
     }
 
-    override async onInternalEvent(event: SemanticEvent<unknown>): Promise<void> {
+    override async onInternalEvent(event: SemanticEvent<string, unknown>): Promise<void> {
         await this.handleEvent(event, null, true)
     }
 
     private async handleEvent(
-        event: SemanticEvent<unknown>,
-        source: Participant | null,
+        event: SemanticEvent<string, unknown>,
+        source: BusMember | null,
         internal: boolean,
     ): Promise<void> {
         if (
@@ -353,7 +351,7 @@ export class StoryFactory extends BaseObserver {
             source === this.opts.telemetryAuthority &&
             ModelInvocationMeasured.is(event)
         ) {
-            const measurement = event.data
+            const measurement = event.payload
             const correlation = measurement.leaseId
                 ? this.telemetryLeases.get(measurement.leaseId)
                 : undefined
@@ -383,23 +381,23 @@ export class StoryFactory extends BaseObserver {
         if (
             this.opts.coordinationMode === "collective" &&
             WorkOffered.is(event) &&
-            event.data.runId === this.runId() &&
+            event.payload.runId === this.runId() &&
             source === this.opts.offerAuthority
         ) {
-            if (this.bidOptions) this.bid(event.data)
-            else this.claim(event.data)
+            if (this.bidOptions) this.bid(event.payload)
+            else this.claim(event.payload)
             return
         }
 
         if (
             this.opts.coordinationMode === "collective" &&
             WorkOfferRetractionResolved.is(event) &&
-            event.data.runId === this.runId() &&
-            event.data.disposition === "retracted" &&
+            event.payload.runId === this.runId() &&
+            event.payload.disposition === "retracted" &&
             source === this.opts.leaseAuthority
         ) {
             for (const [bidId, stored] of this.bidRoutes) {
-                if (stored.offerId === event.data.offerId) {
+                if (stored.offerId === event.payload.offerId) {
                     this.bidRoutes.delete(bidId)
                 }
             }
@@ -409,42 +407,42 @@ export class StoryFactory extends BaseObserver {
         if (
             this.opts.coordinationMode === "collective" &&
             WorkLeaseGranted.is(event) &&
-            event.data.runId === this.runId() &&
+            event.payload.runId === this.runId() &&
             source === this.opts.leaseAuthority
         ) {
-            if (event.data.workerId !== this.workerId()) return
+            if (event.payload.workerId !== this.workerId()) return
             this.opts.outcomeAuthority!.registerSpawnAuthority(
                 {
-                    runId: event.data.runId,
-                    storyId: event.data.request.storyId,
-                    leaseId: event.data.leaseId,
+                    runId: event.payload.runId,
+                    storyId: event.payload.request.storyId,
+                    leaseId: event.payload.leaseId,
                 },
                 this,
             )
             if (this.bidOptions) {
                 for (const [bidId, stored] of this.bidRoutes) {
                     if (
-                        stored.offerId === event.data.offerId &&
-                        bidId !== event.data.bidId
+                        stored.offerId === event.payload.offerId &&
+                        bidId !== event.payload.bidId
                     ) this.bidRoutes.delete(bidId)
                 }
             }
             if (this.bidOptions) {
-                const stored = event.data.bidId
-                    ? this.bidRoutes.get(event.data.bidId)
+                const stored = event.payload.bidId
+                    ? this.bidRoutes.get(event.payload.bidId)
                     : undefined
                 if (
                     !stored ||
-                    stored.offerId !== event.data.offerId ||
-                    !event.data.route ||
-                    !sameRouteDescriptor(stored.descriptor, event.data.route)
+                    stored.offerId !== event.payload.offerId ||
+                    !event.payload.route ||
+                    !sameRouteDescriptor(stored.descriptor, event.payload.route)
                 ) {
                     this.emitBus(
                         StorySpawnFailed.create({
-                            runId: event.data.runId,
-                            offerId: event.data.offerId,
-                            leaseId: event.data.leaseId,
-                            storyId: event.data.request.storyId,
+                            runId: event.payload.runId,
+                            offerId: event.payload.offerId,
+                            leaseId: event.payload.leaseId,
+                            storyId: event.payload.request.storyId,
                             error: "market lease did not match the worker's stored bid",
                             failure: {
                                 kind: "infrastructure",
@@ -454,25 +452,25 @@ export class StoryFactory extends BaseObserver {
                     )
                     return
                 }
-                this.leasedRoutes.set(event.data.request.storyId, stored.route)
+                this.leasedRoutes.set(event.payload.request.storyId, stored.route)
             }
-            this.leases.set(event.data.request.storyId, event.data)
-            this.telemetryLeases.set(event.data.leaseId, {
-                storyId: event.data.request.storyId,
-                generation: event.data.generation,
+            this.leases.set(event.payload.request.storyId, event.payload)
+            this.telemetryLeases.set(event.payload.leaseId, {
+                storyId: event.payload.request.storyId,
+                generation: event.payload.generation,
             })
             this.routeLearner?.beginLease(
-                event.data.leaseId,
-                event.data.request.storyId,
+                event.payload.leaseId,
+                event.payload.request.storyId,
             )
             this.emitBus(
                 StorySpawnRequest.create({
-                    ...event.data.request,
-                    offerId: event.data.offerId,
-                    runId: event.data.runId,
-                    leaseId: event.data.leaseId,
-                    generation: event.data.generation,
-                    workerId: event.data.workerId,
+                    ...event.payload.request,
+                    offerId: event.payload.offerId,
+                    runId: event.payload.runId,
+                    leaseId: event.payload.leaseId,
+                    generation: event.payload.generation,
+                    workerId: event.payload.workerId,
                 }),
             )
             return
@@ -483,31 +481,31 @@ export class StoryFactory extends BaseObserver {
                 // Collective spawn requests are projected by this worker only
                 // after an authorized lease. Never trust an external replay.
                 if (!internal) return
-                const lease = this.leases.get(event.data.storyId)
+                const lease = this.leases.get(event.payload.storyId)
                 if (
                     !lease ||
-                    event.data.runId !== this.runId() ||
-                    event.data.workerId !== this.workerId() ||
-                    event.data.leaseId !== lease.leaseId ||
-                    event.data.generation !== lease.generation
+                    event.payload.runId !== this.runId() ||
+                    event.payload.workerId !== this.workerId() ||
+                    event.payload.leaseId !== lease.leaseId ||
+                    event.payload.generation !== lease.generation
                 ) return
             }
-            await this.spawn(event.data)
+            await this.spawn(event.payload)
             return
         }
 
         if (
             this.opts.coordinationMode === "collective" &&
             WorkBlockAccepted.is(event) &&
-            event.data.runId === this.runId() &&
+            event.payload.runId === this.runId() &&
             source === this.opts.runtimeReplanDecisionAuthority
         ) {
-            const lease = this.leases.get(event.data.storyId)
+            const lease = this.leases.get(event.payload.storyId)
             if (
-                lease?.leaseId === event.data.leaseId &&
-                lease.generation === event.data.generation
+                lease?.leaseId === event.payload.leaseId &&
+                lease.generation === event.payload.generation
             ) {
-                this.beginDependencySuspension(event.data)
+                this.beginDependencySuspension(event.payload)
             }
             return
         }
@@ -515,33 +513,33 @@ export class StoryFactory extends BaseObserver {
         if (
             this.opts.coordinationMode === "collective" &&
             WorkLeaseReleased.is(event) &&
-            event.data.runId === this.runId() &&
+            event.payload.runId === this.runId() &&
             source === this.opts.leaseAuthority
         ) {
-            const lease = this.leases.get(event.data.storyId)
-            if (lease?.leaseId === event.data.leaseId) {
+            const lease = this.leases.get(event.payload.storyId)
+            if (lease?.leaseId === event.payload.leaseId) {
                 if (this.routeLearner && this.configuredBidRoute) {
                     const learned = this.routeLearner.completeLease(
-                        event.data.storyId,
-                        event.data.leaseId,
-                        event.data.reason,
+                        event.payload.storyId,
+                        event.payload.leaseId,
+                        event.payload.reason,
                     )
                     this.publishLearnedEstimate(learned)
                 }
-                const exec = this.active.get(event.data.storyId)
+                const exec = this.active.get(event.payload.storyId)
                 if (exec && this.envRef) {
                     exec.abort?.()
                     exec.dispose(this.envRef)
-                    this.active.delete(event.data.storyId)
+                    this.active.delete(event.payload.storyId)
                 }
-                this.leases.delete(event.data.storyId)
-                this.suspensions.delete(event.data.storyId)
-                this.settledExecutions.delete(event.data.storyId)
+                this.leases.delete(event.payload.storyId)
+                this.suspensions.delete(event.payload.storyId)
+                this.settledExecutions.delete(event.payload.storyId)
                 this.routeLearner?.forgetLease(
-                    event.data.storyId,
-                    event.data.leaseId,
+                    event.payload.storyId,
+                    event.payload.leaseId,
                 )
-                this.leasedRoutes.delete(event.data.storyId)
+                this.leasedRoutes.delete(event.payload.storyId)
                 if (lease.bidId) this.bidRoutes.delete(lease.bidId)
             }
             return
@@ -550,7 +548,7 @@ export class StoryFactory extends BaseObserver {
         if (
             RunCompleted.is(event) &&
             (this.opts.coordinationMode !== "collective" ||
-                (event.data.runId === this.runId() &&
+                (event.payload.runId === this.runId() &&
                     source === this.opts.runtimeReplanDecisionAuthority))
         ) {
             this.bidRoutes.clear()
@@ -558,21 +556,21 @@ export class StoryFactory extends BaseObserver {
             return
         }
 
-        if (StoryIntervention.is(event) && event.data.action === "abort") {
+        if (StoryIntervention.is(event) && event.payload.action === "abort") {
             if (this.opts.coordinationMode === "collective") {
-                const lease = this.leases.get(event.data.storyId)
+                const lease = this.leases.get(event.payload.storyId)
                 if (
                     source !== this.opts.interventionAuthority ||
                     !lease ||
-                    event.data.runId !== this.runId() ||
-                    event.data.leaseId !== lease.leaseId ||
-                    event.data.generation !== lease.generation
+                    event.payload.runId !== this.runId() ||
+                    event.payload.leaseId !== lease.leaseId ||
+                    event.payload.generation !== lease.generation
                 ) return
             }
-            const aborted = this.abort(event.data.storyId)
+            const aborted = this.abort(event.payload.storyId)
             if (aborted) {
                 process.stderr.write(
-                    `[story-factory] ${event.data.storyId} aborted (${event.data.source}): ${event.data.reason}\n`,
+                    `[story-factory] ${event.payload.storyId} aborted (${event.payload.source}): ${event.payload.reason}\n`,
                 )
             }
             return
@@ -584,32 +582,32 @@ export class StoryFactory extends BaseObserver {
             if (this.opts.coordinationMode === "collective") {
                 if (
                     !source ||
-                    !this.opts.outcomeAuthority!.matchesResult(source, event.data)
+                    !this.opts.outcomeAuthority!.matchesResult(source, event.payload)
                 ) return
-                const lease = this.leases.get(event.data.storyId)
+                const lease = this.leases.get(event.payload.storyId)
                 if (
                     !lease ||
-                    event.data.runId !== this.runId() ||
-                    event.data.leaseId !== lease.leaseId ||
-                    event.data.generation !== lease.generation
+                    event.payload.runId !== this.runId() ||
+                    event.payload.leaseId !== lease.leaseId ||
+                    event.payload.generation !== lease.generation
                 ) return
             }
             if (
-                event.data.failure?.kind === "infrastructure" &&
-                event.data.failure.code ===
+                event.payload.failure?.kind === "infrastructure" &&
+                event.payload.failure.code ===
                     "process_quiescence_uncertified"
             ) {
-                this.uncertifiedWorktreeIds.add(event.data.storyId)
+                this.uncertifiedWorktreeIds.add(event.payload.storyId)
             }
-            const exec = this.active.get(event.data.storyId)
+            const exec = this.active.get(event.payload.storyId)
             if (exec && this.envRef) {
                 exec.dispose(this.envRef)
-                this.active.delete(event.data.storyId)
+                this.active.delete(event.payload.storyId)
                 if (this.opts.coordinationMode === "collective") {
-                    this.settledExecutions.set(event.data.storyId, exec)
+                    this.settledExecutions.set(event.payload.storyId, exec)
                 }
-            } else if (this.spawning.has(event.data.storyId)) {
-                this.settledWhileSpawning.add(event.data.storyId)
+            } else if (this.spawning.has(event.payload.storyId)) {
+                this.settledWhileSpawning.add(event.payload.storyId)
             }
         }
     }
@@ -954,7 +952,7 @@ export class StoryFactory extends BaseObserver {
                 (req.model ? ` (model="${req.model}")` : "") +
                 "\n",
         )
-        this.envRef.deliverSemanticEvent(
+        this.envRef.publish(
             this,
             StoryRouted.create({
                 storyId: req.storyId,
@@ -1137,14 +1135,14 @@ export class StoryFactory extends BaseObserver {
                 : {}),
             ...(collectiveCorrelation
                 ? {
-                      registerResultAuthority: (source: Participant) => {
+                      registerResultAuthority: (source: BusMember) => {
                           this.opts.outcomeAuthority!.registerResultAuthority(
                               collectiveCorrelation,
                               source,
                           )
                           resultAuthorityRegistered = true
                       },
-                      registerTerminalAuthority: (source: Participant) => {
+                      registerTerminalAuthority: (source: BusMember) => {
                           this.opts.outcomeAuthority!.registerTerminalAuthority(
                               collectiveCorrelation,
                               source,
@@ -1185,7 +1183,7 @@ export class StoryFactory extends BaseObserver {
         // Emit the "yes, agent spawned" notification so observers can
         // see the lifecycle. Conductor doesn't actually need this, but
         // it makes audit logs/replays much clearer.
-        this.envRef.deliverSemanticEvent(
+        this.envRef.publish(
             this,
             StorySpawned.create({ storyId: req.storyId }),
         )
@@ -1312,8 +1310,8 @@ export class StoryFactory extends BaseObserver {
         )
     }
 
-    private emitBus(event: SemanticEvent<unknown>): void {
-        this.envRef?.deliverSemanticEvent(this, event)
+    private emitBus(event: SemanticEvent<string, unknown>): void {
+        this.envRef?.publish(this, event)
     }
 
     private advertiseCapabilities(): void {

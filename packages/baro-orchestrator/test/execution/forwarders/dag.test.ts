@@ -220,7 +220,7 @@ describe("DagForwarder", () => {
             },
         })
         const current = RuntimeReplanApplied.create({
-            ...historical.data,
+            ...historical.payload,
             proposalId: "proposal-v3",
             baseGraphVersion: 2,
             previousGraphVersion: 2,

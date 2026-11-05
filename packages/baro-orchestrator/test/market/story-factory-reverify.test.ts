@@ -1,7 +1,7 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 
-import type { AgenticEnvironment } from "../../src/runtime/mozaik.js"
+import type { CoordinationBus } from "../../src/runtime/coordination.js"
 
 import { StoryFactory } from "../../src/market/story-factory.js"
 import type {
@@ -38,7 +38,7 @@ class CapturingExecutor implements StoryExecutor {
         req: StorySpawnRequestData,
         _route: StoryRoute,
         cwd: string,
-        _env: AgenticEnvironment,
+        _env: CoordinationBus,
         opts: StoryExecOpts,
     ): StoryExecution {
         this.calls.push({ req, cwd })
@@ -108,10 +108,10 @@ describe("StoryFactory re-verification of an unjudged attempt", () => {
             assert.deepEqual(createCalls, [])
             assert.equal(executor.calls.length, 0, "no agent attempt was spent")
             const terminal = env.events.find(AgentResult.is)
-            assert.match(terminal?.data.resultText ?? "", /PASS {2}npm run build/)
+            assert.match(terminal?.payload.resultText ?? "", /PASS {2}npm run build/)
             const result = env.events.find(StoryResult.is)
-            assert.equal(result?.data.success, true)
-            assert.equal(result?.data.attempts, 0)
+            assert.equal(result?.payload.success, true)
+            assert.equal(result?.payload.attempts, 0)
         })
     })
 
@@ -173,17 +173,17 @@ describe("StoryFactory re-verification of an unjudged attempt", () => {
                     leaseId: "lease-S3-2",
                     workerId: "worker-a",
                     generation: 2,
-                    request: spawn().data,
+                    request: spawn().payload,
                 }),
             )
             await settle()
 
             assert.equal(executor.calls.length, 0)
             const result = env.events.find(StoryResult.is)
-            assert.equal(result?.data.success, true)
-            assert.equal(result?.data.runId, runId)
-            assert.equal(result?.data.leaseId, "lease-S3-2")
-            assert.equal(result?.data.generation, 2)
+            assert.equal(result?.payload.success, true)
+            assert.equal(result?.payload.runId, runId)
+            assert.equal(result?.payload.leaseId, "lease-S3-2")
+            assert.equal(result?.payload.generation, 2)
             assert.equal(
                 outcomeAuthority.terminalCorrelationForSource(
                     source("agent"),

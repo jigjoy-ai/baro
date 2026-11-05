@@ -2,10 +2,9 @@ import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 
 import type {
-    AgenticEnvironment,
-    Participant,
     SemanticEvent,
 } from "../../src/runtime/mozaik.js"
+import type { BusMember, CoordinationBus } from "../../src/runtime/coordination.js"
 
 import {
     StoryResult,
@@ -21,8 +20,8 @@ import type {
 } from "../../src/execution/story-executor.js"
 import type { StoryRoute } from "../../src/market/routing.js"
 
-function source(id: string): Participant {
-    return { agentId: id } as unknown as Participant
+function source(id: string): BusMember {
+    return { agentId: id } as unknown as BusMember
 }
 
 function spawn(storyId: string, model = "sonnet") {
@@ -59,12 +58,12 @@ describe("StoryFactory — StoryExecutor seam", () => {
             },
         }
 
-        const delivered: SemanticEvent<unknown>[] = []
+        const delivered: SemanticEvent<string, unknown>[] = []
         const env = {
-            deliverSemanticEvent: (_s: unknown, e: SemanticEvent<unknown>) => {
+            publish: (_s: unknown, e: SemanticEvent<string, unknown>) => {
                 delivered.push(e)
             },
-        } as unknown as AgenticEnvironment
+        } as unknown as CoordinationBus
 
         const factory = new StoryFactory({ cwd: "/work", executor: fake })
         factory.setEnvironment(env)
@@ -100,9 +99,9 @@ describe("StoryFactory — StoryExecutor seam", () => {
 
     it("LocalStoryExecutor registers the concrete agent before join/run", () => {
         const executor = new LocalStoryExecutor()
-        const env = {} as AgenticEnvironment
-        let registered: Participant | null = null
-        const registerTerminalAuthority = (_sourceParticipant: Participant) => undefined
+        const env = {} as CoordinationBus
+        let registered: BusMember | null = null
+        const registerTerminalAuthority = (_sourceParticipant: BusMember) => undefined
 
         assert.throws(
             () => executor.start(
@@ -126,7 +125,7 @@ describe("StoryFactory — StoryExecutor seam", () => {
                         assert.equal(sourceParticipant.agentId, "S-local")
                         assert.equal(
                             (sourceParticipant as unknown as {
-                                resultAuthority: Participant
+                                resultAuthority: BusMember
                             }).resultAuthority,
                             sourceParticipant,
                         )
@@ -147,7 +146,7 @@ describe("StoryFactory — StoryExecutor seam", () => {
 
     it("LocalStoryExecutor keeps the Claude review timeout default when Factory wiring passes undefined", () => {
         const executor = new LocalStoryExecutor()
-        const env = {} as AgenticEnvironment
+        const env = {} as CoordinationBus
         const critic = source("critic")
 
         for (const [configured, expected] of [
@@ -190,7 +189,7 @@ describe("StoryFactory — StoryExecutor seam", () => {
 
     it("LocalStoryExecutor wires exact surgical-review authorities into every one-shot backend", () => {
         const executor = new LocalStoryExecutor()
-        const env = {} as AgenticEnvironment
+        const env = {} as CoordinationBus
         const projector = source("terminal-projector")
         const critic = source("critic")
 
@@ -221,8 +220,8 @@ describe("StoryFactory — StoryExecutor seam", () => {
                                 const agent = participant as unknown as {
                                     spec: {
                                         requiresQualityReview: boolean
-                                        terminalTurnAuthority: Participant
-                                        turnReviewAuthority: Participant
+                                        terminalTurnAuthority: BusMember
+                                        turnReviewAuthority: BusMember
                                         turnReviewTimeoutMs: number
                                         handoffInconclusiveToAcceptanceGate: boolean
                                         requireProcessQuiescenceCertification: boolean
@@ -268,7 +267,7 @@ describe("StoryFactory — StoryExecutor seam", () => {
 
     it("LocalStoryExecutor forwards correlated runtime replan context to OpenAI", () => {
         const executor = new LocalStoryExecutor()
-        const env = {} as AgenticEnvironment
+        const env = {} as CoordinationBus
         const board = source("collective-board")
         let inspected = false
 
@@ -301,7 +300,7 @@ describe("StoryFactory — StoryExecutor seam", () => {
                                     graphVersion?: number
                                 }
                                 opts: {
-                                    runtimeReplanDecisionAuthority: Participant
+                                    runtimeReplanDecisionAuthority: BusMember
                                     runtimeReplanDecisionTimeoutMs: number
                                 }
                                 tools: Array<{ name: string; strict?: boolean }>

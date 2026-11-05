@@ -33,7 +33,7 @@ describe("Operator", () => {
         assert.equal(AgentTargetedMessage.is(event), true)
         if (!AgentTargetedMessage.is(event)) return
 
-        assert.deepEqual(event.data, {
+        assert.deepEqual(event.payload, {
             recipientId: "S2",
             text: "Focus on the failing test first.",
             metadata: { source: "operator" },

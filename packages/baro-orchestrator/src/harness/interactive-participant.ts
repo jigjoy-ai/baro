@@ -16,11 +16,12 @@
  * the function.
  */
 
-import type { AgenticEnvironment, Participant, Tool } from "../runtime/mozaik.js"
+import type { Tool } from "../runtime/mozaik.js"
+import type { BusMember, CoordinationBus } from "../runtime/coordination.js"
 import type { GatewayBillingCoordinator } from "../telemetry/billing/index.js"
 import type { ModelInvocationPhase } from "../telemetry/model-telemetry.js"
 
-export interface InteractiveModelParticipant<TSummary> extends Participant {
+export interface InteractiveModelParticipant<TSummary> extends BusMember {
     /** Stable bus identity; observers attribute events to it. */
     readonly agentId: string
     /** Settles when the session ends, with whatever the lane summarises. */
@@ -29,7 +30,7 @@ export interface InteractiveModelParticipant<TSummary> extends Participant {
     onActivity: (() => void) | null
 
     /** Begin the session on this environment. Idempotent. */
-    start(environment: AgenticEnvironment): void
+    start(environment: CoordinationBus): void
     /**
      * Hand the model something to read. Delivered mid-session: a scout's
      * finding, an admission receipt, a named reason its outcome was refused.
@@ -72,7 +73,7 @@ export interface InteractiveParticipantRequest {
     /** CLI-only extras (`--tools Read,Glob,Grep`, mcp config, safe mode). */
     readonly cliExtraArgs?: readonly string[]
     /** Exact bus authority allowed to deliver a targeted message to it. */
-    readonly targetedMessageAuthority?: Participant
+    readonly targetedMessageAuthority?: BusMember
     readonly targetedMessageCorrelation?: {
         runId: string
         leaseId: string

@@ -62,27 +62,27 @@ describe("collective authority and replay invariants", () => {
             })
             const env = joinWithCapture(board)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 observer,
                 RunStartRequest.create({ reason: "forged start" }),
             )
             await flush()
             assert.equal(env.events.filter(RunPreparationRequested.is).length, 0)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 operator,
                 RunStartRequest.create({ reason: "authorized start" }),
             )
             await waitFor(env.events, RunPreparationRequested.is)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 observer,
                 RunPreparationFailed.create({
                     runId,
                     error: "forged preparation failure",
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 observer,
                 RunPrepared.create({ runId, baseSha: null }),
             )
@@ -90,7 +90,7 @@ describe("collective authority and replay invariants", () => {
             assert.equal(env.events.filter(WorkContextRequested.is).length, 0)
             assert.equal(env.events.filter(RunCompleted.is).length, 0)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 repository,
                 RunPrepared.create({ runId, baseSha: null }),
             )
@@ -101,20 +101,20 @@ describe("collective authority and replay invariants", () => {
 
             const providedContext = WorkContextProvided.create({
                 runId,
-                requestId: contextRequest.data.requestId,
-                storyId: contextRequest.data.storyId,
+                requestId: contextRequest.payload.requestId,
+                storyId: contextRequest.payload.storyId,
                 context: "authorized context",
             })
-            env.deliverSemanticEvent(observer, providedContext)
+            env.publish(observer, providedContext)
             await flush()
             assert.equal(env.events.filter(WorkOffered.is).length, 0)
 
-            env.deliverSemanticEvent(contextProvider, providedContext)
+            env.publish(contextProvider, providedContext)
             const offer = await waitFor(env.events, WorkOffered.is)
-            env.deliverSemanticEvent(broker, lease(runId, offer, "lease-1"))
-            env.deliverSemanticEvent(
+            env.publish(broker, lease(runId, offer, "lease-1"))
+            env.publish(
                 source("worker"),
-                result(runId, "lease-1", offer.data.generation),
+                result(runId, "lease-1", offer.payload.generation),
             )
             await waitFor(env.events, StoryIntegrationRequested.is)
 
@@ -124,24 +124,24 @@ describe("collective authority and replay invariants", () => {
                 runId,
                 leaseId: "lease-1",
             })
-            env.deliverSemanticEvent(observer, merged)
+            env.publish(observer, merged)
             await flush()
             assert.equal(env.events.filter(RunPushRequested.is).length, 0)
 
-            env.deliverSemanticEvent(repository, merged)
+            env.publish(repository, merged)
             await waitFor(env.events, RunPushRequested.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 observer,
                 RunPushFailed.create({ runId, error: "forged push failure" }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 observer,
                 RunPushed.create({ runId, pushed: false }),
             )
             await flush()
             assert.equal(env.events.filter(RunCompleted.is).length, 0)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 repository,
                 RunPushed.create({ runId, pushed: false }),
             )
@@ -175,11 +175,11 @@ describe("collective authority and replay invariants", () => {
             })
             const env = joinWithCapture(board)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 operator,
                 RunStartRequest.create({ reason: "authorized start" }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 repository,
                 RunPrepared.create({ runId, baseSha: null }),
             )
@@ -187,47 +187,47 @@ describe("collective authority and replay invariants", () => {
                 env.events,
                 WorkContextRequested.is,
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 contextProvider,
                 WorkContextProvided.create({
                     runId,
-                    requestId: contextRequest.data.requestId,
-                    storyId: contextRequest.data.storyId,
+                    requestId: contextRequest.payload.requestId,
+                    storyId: contextRequest.payload.storyId,
                     context: null,
                 }),
             )
             const offer = await waitFor(env.events, WorkOffered.is)
-            env.deliverSemanticEvent(broker, lease(runId, offer, "lease-1"))
-            env.deliverSemanticEvent(
+            env.publish(broker, lease(runId, offer, "lease-1"))
+            env.publish(
                 source("worker"),
-                failedResult(runId, "lease-1", offer.data.generation),
+                failedResult(runId, "lease-1", offer.payload.generation),
             )
             const cleanup = await waitFor(
                 env.events,
                 WorkspaceCleanupRequested.is,
             )
             assert.equal(
-                cleanup.data.preserveForRecovery,
+                cleanup.payload.preserveForRecovery,
                 true,
                 "final failed attempts remain durable even with no automatic retry budget",
             )
 
-            env.deliverSemanticEvent(
+            env.publish(
                 observer,
                 WorkspaceCleanupCompleted.create({
-                    ...cleanup.data,
+                    ...cleanup.payload,
                     preservedBranch: "baro-recovery/forged/S1/1",
                 }),
             )
             await flush()
             assert.equal(env.events.filter(RunPushRequested.is).length, 0)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 repository,
-                WorkspaceCleanupCompleted.create({ ...cleanup.data }),
+                WorkspaceCleanupCompleted.create({ ...cleanup.payload }),
             )
             await waitFor(env.events, RunPushRequested.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 repository,
                 RunPushed.create({ runId, pushed: false }),
             )
@@ -261,11 +261,11 @@ describe("collective authority and replay invariants", () => {
             const supervisor = new Supervisor()
             supervisor.join(env)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "test" }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 repository,
                 RunPrepared.create({ runId, baseSha: null }),
             )
@@ -273,45 +273,45 @@ describe("collective authority and replay invariants", () => {
             const offer = await waitFor(env.events, WorkOffered.is)
 
             const forgedLease = lease(runId, offer, "forged-lease")
-            env.deliverSemanticEvent(observer, forgedLease)
-            env.deliverSemanticEvent(
+            env.publish(observer, forgedLease)
+            env.publish(
                 observer,
-                result(runId, "forged-lease", offer.data.generation),
+                result(runId, "forged-lease", offer.payload.generation),
             )
             // A replay from the real gate must not validate a lease the broker
             // never granted.
-            env.deliverSemanticEvent(
+            env.publish(
                 qualityGate,
-                quality(runId, "forged-lease", offer.data.generation),
+                quality(runId, "forged-lease", offer.payload.generation),
             )
             await flush()
             assert.equal(env.events.filter(StoryIntegrationRequested.is).length, 0)
 
             const realLease = lease(runId, offer, "real-lease")
-            env.deliverSemanticEvent(broker, realLease)
-            env.deliverSemanticEvent(
+            env.publish(broker, realLease)
+            env.publish(
                 source("worker"),
-                result(runId, "real-lease", offer.data.generation),
+                result(runId, "real-lease", offer.payload.generation),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 observer,
-                quality(runId, "real-lease", offer.data.generation),
+                quality(runId, "real-lease", offer.payload.generation),
             )
             await flush()
             assert.equal(env.events.filter(StoryIntegrationRequested.is).length, 0)
 
-            const accepted = quality(runId, "real-lease", offer.data.generation)
-            env.deliverSemanticEvent(qualityGate, accepted)
-            env.deliverSemanticEvent(qualityGate, accepted)
+            const accepted = quality(runId, "real-lease", offer.payload.generation)
+            env.publish(qualityGate, accepted)
+            env.publish(qualityGate, accepted)
             await waitFor(env.events, StoryIntegrationRequested.is)
             assert.equal(env.events.filter(StoryIntegrationRequested.is).length, 1)
 
             // This observer is optional policy, not a root coordinator. Its
             // departure cannot become a liveness dependency of the Board.
             supervisor.leave(env)
-            assert.equal(supervisor.getEnvironments().length, 0)
+            assert.equal(supervisor.getBuses().length, 0)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 observer,
                 StoryMerged.create({
                     storyId: "S1",
@@ -324,7 +324,7 @@ describe("collective authority and replay invariants", () => {
             assert.equal(readPrd(prdPath).userStories[0]?.passes, false)
             assert.equal(env.events.filter(RunPushRequested.is).length, 0)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 repository,
                 StoryMerged.create({
                     storyId: "S1",
@@ -334,7 +334,7 @@ describe("collective authority and replay invariants", () => {
                 }),
             )
             await waitFor(env.events, RunPushRequested.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 repository,
                 RunPushed.create({ runId, pushed: false }),
             )
@@ -375,17 +375,17 @@ describe("collective authority and replay invariants", () => {
             const env = joinWithCapture(board)
             gate.join(env)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "test" }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 repository,
                 RunPrepared.create({ runId, baseSha: null }),
             )
             await provideContext(env, runId)
             const offer = await waitFor(env.events, WorkOffered.is)
-            env.deliverSemanticEvent(broker, lease(runId, offer, "lease-1"))
+            env.publish(broker, lease(runId, offer, "lease-1"))
 
             const terminal = AgentTurnCompleted.create({
                 agentId: "S1",
@@ -403,14 +403,14 @@ describe("collective authority and replay invariants", () => {
                 turn: 1,
                 modelUsed: "test-critic",
             })
-            const completed = result(runId, "lease-1", offer.data.generation)
+            const completed = result(runId, "lease-1", offer.payload.generation)
 
-            env.deliverSemanticEvent(source("projector"), terminal)
-            env.deliverSemanticEvent(source("projector"), terminal)
-            env.deliverSemanticEvent(critic, critique)
-            env.deliverSemanticEvent(critic, critique)
-            env.deliverSemanticEvent(source("worker"), completed)
-            env.deliverSemanticEvent(source("worker"), completed)
+            env.publish(source("projector"), terminal)
+            env.publish(source("projector"), terminal)
+            env.publish(critic, critique)
+            env.publish(critic, critique)
+            env.publish(source("worker"), completed)
+            env.publish(source("worker"), completed)
 
             await waitFor(env.events, StoryIntegrationRequested.is)
             await gate.idle()
@@ -418,8 +418,8 @@ describe("collective authority and replay invariants", () => {
             assert.equal(env.events.filter(StoryIntegrationRequested.is).length, 1)
 
             const replay = env.events.find(StoryQualityCompleted.is)!
-            env.deliverSemanticEvent(gate, replay)
-            env.deliverSemanticEvent(gate, replay)
+            env.publish(gate, replay)
+            env.publish(gate, replay)
             await flush()
             assert.equal(env.events.filter(StoryIntegrationRequested.is).length, 1)
         })
@@ -448,23 +448,23 @@ describe("collective authority and replay invariants", () => {
             })
             const env = joinWithCapture(board)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "test" }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 repository,
                 RunPrepared.create({ runId, baseSha: null }),
             )
             await provideContext(env, runId)
             const offer = await waitFor(env.events, WorkOffered.is)
-            env.deliverSemanticEvent(broker, lease(runId, offer, "lease-1"))
-            env.deliverSemanticEvent(
+            env.publish(broker, lease(runId, offer, "lease-1"))
+            env.publish(
                 source("worker"),
-                result(runId, "lease-1", offer.data.generation),
+                result(runId, "lease-1", offer.payload.generation),
             )
             await waitFor(env.events, StoryIntegrationRequested.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 repository,
                 StoryMerged.create({
                     storyId: "S1",
@@ -475,11 +475,11 @@ describe("collective authority and replay invariants", () => {
             )
             const request = await waitFor(env.events, RunVerificationRequested.is)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 observer,
                 RunVerificationCompleted.create({
                     runId,
-                    verificationId: request.data.verificationId,
+                    verificationId: request.payload.verificationId,
                     status: "passed",
                     commands: [
                         {
@@ -491,22 +491,22 @@ describe("collective authority and replay invariants", () => {
                     durationMs: 1,
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 observer,
                 RunVerificationTimedOut.create({
                     runId,
-                    verificationId: request.data.verificationId,
+                    verificationId: request.payload.verificationId,
                     timeoutMs: 1,
                 }),
             )
             await flush()
             assert.equal(env.events.filter(RunPushRequested.is).length, 0)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 verifier,
                 RunVerificationCompleted.create({
                     runId,
-                    verificationId: request.data.verificationId,
+                    verificationId: request.payload.verificationId,
                     status: "passed",
                     commands: [
                         {
@@ -519,7 +519,7 @@ describe("collective authority and replay invariants", () => {
                 }),
             )
             await waitFor(env.events, RunPushRequested.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 repository,
                 RunPushed.create({ runId, pushed: false }),
             )
@@ -549,25 +549,25 @@ describe("collective authority and replay invariants", () => {
             })
             const env = joinWithCapture(board)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "test" }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 repository,
                 RunPrepared.create({ runId, baseSha: null }),
             )
             await provideContext(env, runId)
             const offer = await waitFor(env.events, WorkOffered.is)
-            env.deliverSemanticEvent(broker, lease(runId, offer, "lease-1"))
-            env.deliverSemanticEvent(
+            env.publish(broker, lease(runId, offer, "lease-1"))
+            env.publish(
                 source("worker"),
-                failedResult(runId, "lease-1", offer.data.generation),
+                failedResult(runId, "lease-1", offer.payload.generation),
             )
             const cleanup = await waitFor(env.events, WorkspaceCleanupRequested.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 repository,
-                WorkspaceCleanupCompleted.create({ ...cleanup.data }),
+                WorkspaceCleanupCompleted.create({ ...cleanup.payload }),
             )
 
             const replacement = {
@@ -576,11 +576,11 @@ describe("collective authority and replay invariants", () => {
                     runId,
                     storyId: "S1",
                     leaseId: "lease-1",
-                    generation: offer.data.generation,
+                    generation: offer.payload.generation,
                 },
             }
-            env.deliverSemanticEvent(observer, Replan.create(replacement))
-            env.deliverSemanticEvent(
+            env.publish(observer, Replan.create(replacement))
+            env.publish(
                 observer,
                 RecoveryDecision.create({
                     runId,
@@ -593,8 +593,8 @@ describe("collective authority and replay invariants", () => {
             await flush()
             assert.equal(env.events.filter(WorkContextRequested.is).length, 1)
 
-            env.deliverSemanticEvent(surgeon, Replan.create(replacement))
-            env.deliverSemanticEvent(
+            env.publish(surgeon, Replan.create(replacement))
+            env.publish(
                 surgeon,
                 RecoveryDecision.create({
                     runId,
@@ -606,7 +606,7 @@ describe("collective authority and replay invariants", () => {
             )
             await provideContext(env, runId, 2)
             const offers = await waitForCount(env.events, WorkOffered.is, 2)
-            assert.equal(offers[1]?.data.request.storyId, "S2")
+            assert.equal(offers[1]?.payload.request.storyId, "S2")
             assert.equal(
                 env.events.filter(RuntimeReplanApplied.is).length,
                 1,
@@ -644,32 +644,32 @@ describe("collective authority and replay invariants", () => {
             })
             const env = joinWithCapture(board)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "test" }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 repository,
                 RunPrepared.create({ runId, baseSha: null }),
             )
             await provideContext(env, runId)
             const offer = await waitFor(env.events, WorkOffered.is)
-            env.deliverSemanticEvent(broker, lease(runId, offer, "lease-1"))
+            env.publish(broker, lease(runId, offer, "lease-1"))
 
-            env.deliverSemanticEvent(
+            env.publish(
                 observer,
-                discovery(runId, "S2", "lease-1", offer.data.generation),
+                discovery(runId, "S2", "lease-1", offer.payload.generation),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 bridge,
-                discovery(runId, "S3", "lease-1", offer.data.generation),
+                discovery(runId, "S3", "lease-1", offer.payload.generation),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("worker"),
-                result(runId, "lease-1", offer.data.generation),
+                result(runId, "lease-1", offer.payload.generation),
             )
             await waitFor(env.events, StoryIntegrationRequested.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 repository,
                 StoryMerged.create({
                     storyId: "S1",
@@ -718,11 +718,11 @@ function lease(
 ): ReturnType<typeof WorkLeaseGranted.create> {
     return WorkLeaseGranted.create({
         runId,
-        offerId: offer.data.offerId,
+        offerId: offer.payload.offerId,
         leaseId,
         workerId: "worker",
-        generation: offer.data.generation,
-        request: offer.data.request,
+        generation: offer.payload.generation,
+        request: offer.payload.request,
     })
 }
 
@@ -828,12 +828,12 @@ async function provideContext(
 ): Promise<void> {
     const requests = await waitForCount(env.events, WorkContextRequested.is, count)
     const request = requests[count - 1]!
-    env.deliverSemanticEvent(
+    env.publish(
         source("context"),
         WorkContextProvided.create({
             runId,
-            requestId: request.data.requestId,
-            storyId: request.data.storyId,
+            requestId: request.payload.requestId,
+            storyId: request.payload.storyId,
             context: null,
         }),
     )

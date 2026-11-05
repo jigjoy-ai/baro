@@ -4,7 +4,8 @@
  * The process/stream skeleton lives in CliParticipant.
  */
 
-import { Participant, SemanticEvent } from "../../runtime/mozaik.js"
+import { SemanticEvent } from "../../runtime/mozaik.js"
+import { BusMember } from "../../runtime/coordination.js"
 
 import { AgentTargetedMessage, PiSystem } from "../../semantic-events.js"
 import { mapPiEvent } from "./stream-mapper.js"
@@ -23,7 +24,7 @@ export interface PiCliParticipantOptions {
     piBin?: string
     /** Bound inherited-stdio drain after the direct CLI root exits. */
     closeDrainTimeoutMs?: number
-    targetedMessageAuthority?: Participant
+    targetedMessageAuthority?: BusMember
     targetedMessageCorrelation?: Readonly<{
         runId?: string
         leaseId?: string
@@ -115,8 +116,8 @@ export class PiCliParticipant extends CliParticipant<PiRunSummary> {
             if (item instanceof SemanticEvent) {
                 if (
                     PiSystem.is(item) &&
-                    (item.data.subtype === "session" ||
-                        item.data.subtype === "agent_start")
+                    (item.payload.subtype === "session" ||
+                        item.payload.subtype === "agent_start")
                 ) {
                     this.transition("running", "pi agent started")
                     this.settleReady()
@@ -129,8 +130,8 @@ export class PiCliParticipant extends CliParticipant<PiRunSummary> {
     }
 
     override async onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): Promise<void> {
         // Pi `-p` is one-shot — stdin carries only the initial prompt; targeted messages are
         // logged and dropped.
@@ -138,7 +139,7 @@ export class PiCliParticipant extends CliParticipant<PiRunSummary> {
             AgentTargetedMessage.is(event) &&
             acceptsTargetedMessage(
                 source,
-                event.data,
+                event.payload,
                 this.agentId,
                 this.options.targetedMessageAuthority,
                 this.options.targetedMessageCorrelation ?? {},

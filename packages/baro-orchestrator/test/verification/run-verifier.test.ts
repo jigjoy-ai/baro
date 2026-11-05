@@ -33,7 +33,7 @@ describe("RunVerifier", () => {
         })
         const env = joinWithCapture(verifier)
 
-        env.deliverSemanticEvent(
+        env.publish(
             source("ambient-board"),
             RunVerificationRequested.create({
                 runId: "run-unbound",
@@ -81,17 +81,17 @@ describe("RunVerifier", () => {
             verificationId: "run-authority:verification:1",
         })
 
-        env.deliverSemanticEvent(source("attacker"), request)
+        env.publish(source("attacker"), request)
         await verifier.idle()
         assert.equal(calls, 0)
         assert.equal(env.events.filter(RunVerificationCompleted.is).length, 0)
 
-        env.deliverSemanticEvent(board, request)
+        env.publish(board, request)
         await verifier.idle()
         assert.equal(calls, 1)
         assert.equal(env.events.filter(RunVerificationCompleted.is).length, 1)
 
-        env.deliverSemanticEvent(source("attacker-replay"), request)
+        env.publish(source("attacker-replay"), request)
         await verifier.idle()
         assert.equal(env.events.filter(RunVerificationCompleted.is).length, 1)
     })
@@ -125,18 +125,18 @@ describe("RunVerifier", () => {
             verificationId: "verify-1",
         })
 
-        env.deliverSemanticEvent(BOARD, request)
-        env.deliverSemanticEvent(BOARD, request)
+        env.publish(BOARD, request)
+        env.publish(BOARD, request)
         await verifier.idle()
 
         const completed = env.events.filter(RunVerificationCompleted.is)
         assert.equal(calls, 1)
         assert.equal(completed.length, 1)
-        assert.equal(completed[0]?.data.verificationId, "verify-1")
-        assert.equal(completed[0]?.data.status, "passed")
-        assert.equal(completed[0]?.data.commands[0]?.command, "npm run test")
+        assert.equal(completed[0]?.payload.verificationId, "verify-1")
+        assert.equal(completed[0]?.payload.status, "passed")
+        assert.equal(completed[0]?.payload.commands[0]?.command, "npm run test")
 
-        env.deliverSemanticEvent(BOARD, request)
+        env.publish(BOARD, request)
         await verifier.idle()
         assert.equal(calls, 1)
         assert.equal(env.events.filter(RunVerificationCompleted.is).length, 2)
@@ -151,7 +151,7 @@ describe("RunVerifier", () => {
             })
             verifier.setRequestAuthority(BOARD)
             const env = joinWithCapture(verifier)
-            env.deliverSemanticEvent(
+            env.publish(
                 BOARD,
                 RunVerificationRequested.create({
                     runId: "run-skip",
@@ -161,8 +161,8 @@ describe("RunVerifier", () => {
             await verifier.idle()
 
             const completed = env.events.find(RunVerificationCompleted.is)
-            assert.equal(completed?.data.status, "skipped")
-            assert.deepEqual(completed?.data.commands, [])
+            assert.equal(completed?.payload.status, "skipped")
+            assert.deepEqual(completed?.payload.commands, [])
         })
     })
 
@@ -192,7 +192,7 @@ describe("RunVerifier", () => {
         })
         verifier.setRequestAuthority(BOARD)
         const env = joinWithCapture(verifier)
-        env.deliverSemanticEvent(
+        env.publish(
             BOARD,
             RunVerificationRequested.create({
                 runId: "run-partial-skip",
@@ -202,9 +202,9 @@ describe("RunVerifier", () => {
         await verifier.idle()
 
         const completed = env.events.find(RunVerificationCompleted.is)
-        assert.equal(completed?.data.status, "skipped")
+        assert.equal(completed?.payload.status, "skipped")
         assert.deepEqual(
-            completed?.data.commands.map(({ status }) => status),
+            completed?.payload.commands.map(({ status }) => status),
             ["passed", "skipped"],
         )
     })
@@ -228,7 +228,7 @@ describe("RunVerifier", () => {
                 JSON.stringify({ name: "v", scripts: { test: "exit 0" } }),
             )
 
-            env.deliverSemanticEvent(
+            env.publish(
                 BOARD,
                 RunVerificationRequested.create({
                     runId: "run-final-plan",
@@ -238,9 +238,9 @@ describe("RunVerifier", () => {
             await verifier.idle()
 
             const completed = env.events.find(RunVerificationCompleted.is)
-            assert.equal(completed?.data.status, "passed")
+            assert.equal(completed?.payload.status, "passed")
             assert.deepEqual(
-                completed?.data.commands.map(({ command, status }) => ({
+                completed?.payload.commands.map(({ command, status }) => ({
                     command,
                     status,
                 })),
@@ -295,7 +295,7 @@ describe("RunVerifier", () => {
                     scripts,
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 BOARD,
                 RunVerificationRequested.create({
                     runId: "run-authoritative-prd",
@@ -305,9 +305,9 @@ describe("RunVerifier", () => {
             await verifier.idle()
 
             const completed = env.events.find(RunVerificationCompleted.is)
-            assert.equal(completed?.data.status, "passed")
+            assert.equal(completed?.payload.status, "passed")
             assert.deepEqual(
-                completed?.data.commands.map(({ command }) => command),
+                completed?.payload.commands.map(({ command }) => command),
                 ["npm run test", "npm run test -- added"],
             )
             assert.equal(existsSync(addedMarker), true)
@@ -363,7 +363,7 @@ describe("RunVerifier", () => {
             })
             verifier.setRequestAuthority(BOARD)
             const env = joinWithCapture(verifier)
-            env.deliverSemanticEvent(
+            env.publish(
                 BOARD,
                 RunVerificationRequested.create({
                     runId: "run-a13-final-plan",
@@ -373,18 +373,18 @@ describe("RunVerifier", () => {
             await verifier.idle()
 
             const completed = env.events.find(RunVerificationCompleted.is)
-            assert.equal(completed?.data.status, "passed")
-            assert.equal(completed?.data.commands.length, 5)
+            assert.equal(completed?.payload.status, "passed")
+            assert.equal(completed?.payload.commands.length, 5)
             assert.equal(
-                completed?.data.commands.every(({ status }) => status === "passed"),
+                completed?.payload.commands.every(({ status }) => status === "passed"),
                 true,
             )
             assert.equal(
-                completed?.data.commands.some(({ command }) =>
+                completed?.payload.commands.some(({ command }) =>
                     command.startsWith("npx ")),
                 false,
             )
-            const focused = completed?.data.commands.find(({ command }) =>
+            const focused = completed?.payload.commands.find(({ command }) =>
                 command.startsWith("npm run test -- "))
             assert.ok(focused)
             for (const testPath of testPaths) {
@@ -404,7 +404,7 @@ describe("RunVerifier", () => {
         })
         verifier.setRequestAuthority(BOARD)
         const env = joinWithCapture(verifier)
-        env.deliverSemanticEvent(
+        env.publish(
             BOARD,
             RunVerificationRequested.create({
                 runId: "run-fail",
@@ -414,8 +414,8 @@ describe("RunVerifier", () => {
         await verifier.idle()
 
         const completed = env.events.find(RunVerificationCompleted.is)
-        assert.equal(completed?.data.status, "failed")
-        assert.match(completed?.data.commands[0]?.tail ?? "", /exploded/)
+        assert.equal(completed?.payload.status, "failed")
+        assert.match(completed?.payload.commands[0]?.tail ?? "", /exploded/)
     })
 
     it("cancels the active verifier on the correlated timeout event", async () => {
@@ -444,7 +444,7 @@ describe("RunVerifier", () => {
         const board = source("board")
         verifier.setRequestAuthority(board)
         const env = joinWithCapture(verifier)
-        env.deliverSemanticEvent(
+        env.publish(
             board,
             RunVerificationRequested.create({
                 runId: "run-timeout",
@@ -452,7 +452,7 @@ describe("RunVerifier", () => {
             }),
         )
         await started
-        env.deliverSemanticEvent(
+        env.publish(
             source("attacker"),
             RunVerificationTimedOut.create({
                 runId: "run-timeout",
@@ -462,7 +462,7 @@ describe("RunVerifier", () => {
         )
         await new Promise<void>((resolve) => setImmediate(resolve))
         assert.equal(aborted, false)
-        env.deliverSemanticEvent(
+        env.publish(
             board,
             RunVerificationTimedOut.create({
                 runId: "run-timeout",

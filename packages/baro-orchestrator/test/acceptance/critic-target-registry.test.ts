@@ -213,7 +213,7 @@ describe("CriticTargetRegistry runtime replans", () => {
         assert.deepEqual(targets.get("S-new"), ["new criterion"])
 
         const remove = RuntimeReplanApplied.create({
-            ...event.data,
+            ...event.payload,
             proposalId: "proposal-2",
             baseGraphVersion: 2,
             previousGraphVersion: 2,
@@ -232,7 +232,7 @@ describe("CriticTargetRegistry runtime replans", () => {
         await registry.onExternalEvent(
             board,
             RuntimeReplanApplied.create({
-                ...event.data,
+                ...event.payload,
                 currentGraphVersion: 3,
             }),
         )

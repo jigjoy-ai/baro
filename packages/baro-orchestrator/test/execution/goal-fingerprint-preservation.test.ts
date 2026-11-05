@@ -109,12 +109,12 @@ async function conductorPersist(dir: string, prdPath: string): Promise<void> {
         intraLevelDelaySecs: 0,
     })
     const env = joinWithCapture(conductor)
-    env.deliverSemanticEvent(
+    env.publish(
         source("operator"),
         RunStartRequest.create({ reason: "unit test" }),
     )
     await waitForEvents(env.events, StorySpawnRequest.is, 1)
-    env.deliverSemanticEvent(source("S1"), passResult("S1"))
+    env.publish(source("S1"), passResult("S1"))
     const summary = await conductor.done
     assert.equal(summary.success, true)
 }

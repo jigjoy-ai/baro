@@ -144,89 +144,89 @@ export class ModelTelemetryCollector extends SerializedObserver {
     protected override handleEvent(context: SerializedEventContext): void {
         const { event } = context
         if (StoryRouted.is(event)) {
-            const correlation = this.routeCorrelation(context, event.data)
+            const correlation = this.routeCorrelation(context, event.payload)
             if (this.opts.outcomeAuthority && !correlation) return
-            this.routes.set(routeKey(event.data.storyId, correlation), {
-                backend: event.data.backend,
-                model: event.data.model,
+            this.routes.set(routeKey(event.payload.storyId, correlation), {
+                backend: event.payload.backend,
+                model: event.payload.model,
             })
             return
         }
         if (AgentResult.is(event)) {
             const correlation = this.terminalCorrelation(
                 context,
-                event.data.agentId,
+                event.payload.agentId,
             )
             if (this.opts.outcomeAuthority && !correlation) return
             if (
                 this.perRoundStoryRoutes.has(
-                    routeKey(event.data.agentId, correlation),
+                    routeKey(event.payload.agentId, correlation),
                 )
             ) return
             this.publishOnce(
                 event,
-                this.fromAgentResult(event.data, correlation),
+                this.fromAgentResult(event.payload, correlation),
                 correlation,
             )
             return
         }
-        if (CodexTurnEvent.is(event) && event.data.phase === "completed") {
+        if (CodexTurnEvent.is(event) && event.payload.phase === "completed") {
             const correlation = this.terminalCorrelation(
                 context,
-                event.data.agentId,
+                event.payload.agentId,
             )
             if (this.opts.outcomeAuthority && !correlation) return
             this.publishOnce(
                 event,
-                this.fromCodex(event.data, correlation),
+                this.fromCodex(event.payload, correlation),
                 correlation,
             )
             return
         }
-        if (OpenCodeSystem.is(event) && event.data.subtype === "step_finish") {
+        if (OpenCodeSystem.is(event) && event.payload.subtype === "step_finish") {
             const correlation = this.terminalCorrelation(
                 context,
-                event.data.agentId,
+                event.payload.agentId,
             )
             if (this.opts.outcomeAuthority && !correlation) return
             this.publishOnce(
                 event,
-                this.fromOpenCode(event.data, correlation),
+                this.fromOpenCode(event.payload, correlation),
                 correlation,
             )
             return
         }
-        if (DevinTurnEvent.is(event) && event.data.turnType === "turn_end") {
+        if (DevinTurnEvent.is(event) && event.payload.turnType === "turn_end") {
             const correlation = this.terminalCorrelation(
                 context,
-                event.data.agentId,
+                event.payload.agentId,
             )
             if (this.opts.outcomeAuthority && !correlation) return
             this.publishOnce(
                 event,
-                this.fromDevin(event.data, correlation),
+                this.fromDevin(event.payload, correlation),
                 correlation,
             )
             return
         }
-        if (PiTurnEvent.is(event) && event.data.turnType === "message_end") {
-            const message = record(event.data.raw.message)
+        if (PiTurnEvent.is(event) && event.payload.turnType === "message_end") {
+            const message = record(event.payload.raw.message)
             if (message.role !== "assistant") return
             const correlation = this.terminalCorrelation(
                 context,
-                event.data.agentId,
+                event.payload.agentId,
             )
             if (this.opts.outcomeAuthority && !correlation) return
             this.publishOnce(
                 event,
-                this.fromPi(event.data, correlation),
+                this.fromPi(event.payload, correlation),
                 correlation,
             )
         }
     }
 
     private publishOnce(
-        event: SemanticEvent<unknown>,
+        event: SemanticEvent<string, unknown>,
         observation: InvocationObservation,
         correlation: StoryResultAuthorityCorrelation | null,
     ): void {
@@ -641,13 +641,13 @@ function routeKey(
 }
 
 function terminalFingerprint(
-    event: SemanticEvent<unknown>,
+    event: SemanticEvent<string, unknown>,
     correlation: StoryResultAuthorityCorrelation | null,
 ): string {
     return createHash("sha256")
         .update(event.type)
         .update("\0")
-        .update(JSON.stringify(event.data))
+        .update(JSON.stringify(event.payload))
         .update("\0")
         .update(correlation ? routeKey(correlation.storyId, correlation) : "legacy")
         .digest("hex")

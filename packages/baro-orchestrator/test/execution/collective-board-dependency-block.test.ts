@@ -38,14 +38,14 @@ describe("CollectiveBoard dependency suspension", () => {
                 supportsCooperativeSuspend: true,
                 allowUnboundReplan: true,
             })
-            fixture.env.deliverSemanticEvent(
+            fixture.env.publish(
                 source("S1"),
                 RuntimeReplanProposed.create({
                     runId: fixture.runId,
                     proposalId: "proposal-self-prerequisite",
                     sourceStoryId: "S1",
                     leaseId: S1_LEASE,
-                    generation: fixture.s1Offer.data.generation,
+                    generation: fixture.s1Offer.payload.generation,
                     baseGraphVersion: 1,
                     reason: "the review needs a decision-level ratification first",
                     mutation: {
@@ -65,13 +65,13 @@ describe("CollectiveBoard dependency suspension", () => {
             )
             const applied = await waitFor(fixture.env.events, RuntimeReplanApplied.is)
             assert.deepEqual(
-                applied.data.mutation.addedStories.map(({ id }) => id),
+                applied.payload.mutation.addedStories.map(({ id }) => id),
                 ["S1-RATIFY"],
             )
-            assert.deepEqual(applied.data.mutation.modifiedDeps, {})
+            assert.deepEqual(applied.payload.mutation.modifiedDeps, {})
             const accepted = await waitFor(fixture.env.events, WorkBlockAccepted.is)
-            assert.equal(accepted.data.storyId, "S1")
-            assert.deepEqual(accepted.data.requiredStoryIds, ["S1-RATIFY"])
+            assert.equal(accepted.payload.storyId, "S1")
+            assert.deepEqual(accepted.payload.requiredStoryIds, ["S1-RATIFY"])
             assert.equal(fixture.env.events.some(WorkBlockRejected.is), false)
         })
     })
@@ -100,49 +100,49 @@ describe("CollectiveBoard dependency suspension", () => {
                 contextAuthority: context,
             })
             const env = joinWithCapture(board)
-            env.deliverSemanticEvent(
+            env.publish(
                 operator,
                 RunStartRequest.create({ reason: "test" }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 repo,
                 RunPrepared.create({ runId, baseSha: null }),
             )
             await answerNewContexts(env, context, runId)
             const initialOffers = await waitForCount(env.events, WorkOffered.is, 2)
             const byStory = new Map(
-                initialOffers.map((offer) => [offer.data.request.storyId, offer]),
+                initialOffers.map((offer) => [offer.payload.request.storyId, offer]),
             )
             for (const storyId of ["S1", "S2"]) {
                 const offer = byStory.get(storyId)!
-                env.deliverSemanticEvent(
+                env.publish(
                     broker,
                     WorkLeaseGranted.create({
                         runId,
-                        offerId: offer.data.offerId,
+                        offerId: offer.payload.offerId,
                         leaseId: `lease-${storyId}-1`,
                         workerId: "worker",
-                        generation: offer.data.generation,
-                        request: offer.data.request,
+                        generation: offer.payload.generation,
+                        request: offer.payload.request,
                         supportsCooperativeSuspend: true,
                     }),
                 )
             }
 
-            env.deliverSemanticEvent(
+            env.publish(
                 bridge,
                 WorkBlocked.create({
                     runId,
                     blockId: "block-S1-S2",
                     storyId: "S1",
                     leaseId: "lease-S1-1",
-                    generation: byStory.get("S1")!.data.generation,
+                    generation: byStory.get("S1")!.payload.generation,
                     requiredStoryIds: ["S2"],
                     reason: "S2 provides the shared helper",
                 }),
             )
             const accepted = await waitFor(env.events, WorkBlockAccepted.is)
-            assert.equal(accepted.data.graphVersion, 2)
+            assert.equal(accepted.payload.graphVersion, 2)
             assert.equal(env.events.filter(RuntimeReplanApplied.is).length, 1)
             let saved = JSON.parse(readFileSync(prdPath, "utf8")) as PrdFile
             assert.deepEqual(
@@ -152,13 +152,13 @@ describe("CollectiveBoard dependency suspension", () => {
 
             // A late abort result is expected process-quiescence evidence for
             // Broker, not an execution failure for Board/Surgeon policy.
-            env.deliverSemanticEvent(
+            env.publish(
                 source("S1-agent"),
                 StoryResult.create({
                     runId,
                     storyId: "S1",
                     leaseId: "lease-S1-1",
-                    generation: byStory.get("S1")!.data.generation,
+                    generation: byStory.get("S1")!.payload.generation,
                     success: false,
                     attempts: 1,
                     durationSecs: 3,
@@ -167,7 +167,7 @@ describe("CollectiveBoard dependency suspension", () => {
             )
             const dependencyRelease = {
                 runId,
-                offerId: byStory.get("S1")!.data.offerId,
+                offerId: byStory.get("S1")!.payload.offerId,
                 leaseId: "lease-S1-1",
                 storyId: "S1",
                 workerId: "worker",
@@ -177,7 +177,7 @@ describe("CollectiveBoard dependency suspension", () => {
                 attempts: 1,
                 durationSecs: 3,
             }
-            env.deliverSemanticEvent(
+            env.publish(
                 broker,
                 WorkLeaseReleased.create(dependencyRelease),
             )
@@ -185,24 +185,24 @@ describe("CollectiveBoard dependency suspension", () => {
                 env.events,
                 WorkspaceCleanupRequested.is,
             )
-            assert.equal(cleanup.data.preserveForRecovery, true)
-            env.deliverSemanticEvent(
+            assert.equal(cleanup.payload.preserveForRecovery, true)
+            env.publish(
                 repo,
                 WorkspaceCleanupCompleted.create({
                     runId,
-                    cleanupId: cleanup.data.cleanupId,
+                    cleanupId: cleanup.payload.cleanupId,
                     storyId: "S1",
                     leaseId: "lease-S1-1",
-                    generation: byStory.get("S1")!.data.generation,
+                    generation: byStory.get("S1")!.payload.generation,
                     preservedBranch: "baro-recovery/run/S1/1",
                 }),
             )
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("S2-agent"),
-                success(runId, "S2", "lease-S2-1", byStory.get("S2")!.data.generation),
+                success(runId, "S2", "lease-S2-1", byStory.get("S2")!.payload.generation),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 repo,
                 StoryMerged.create({
                     runId,
@@ -213,13 +213,13 @@ describe("CollectiveBoard dependency suspension", () => {
             )
 
             const firstLevel = await waitFor(env.events, LevelCompleted.is)
-            assert.deepEqual(firstLevel.data.blocked, ["S1"])
-            assert.deepEqual(firstLevel.data.failed, [])
+            assert.deepEqual(firstLevel.payload.blocked, ["S1"])
+            assert.deepEqual(firstLevel.payload.failed, [])
             assert.equal(
                 env.events.some(
                     (event) =>
                         ConductorState.is(event) &&
-                        event.data.detail.includes("healing action"),
+                        event.payload.detail.includes("healing action"),
                 ),
                 false,
             )
@@ -228,36 +228,36 @@ describe("CollectiveBoard dependency suspension", () => {
             const resumedOffer = (
                 await waitForCount(env.events, WorkOffered.is, 3)
             )[2]!
-            assert.equal(resumedOffer.data.request.storyId, "S1")
+            assert.equal(resumedOffer.payload.request.storyId, "S1")
             assert.match(
-                resumedOffer.data.request.prompt,
+                resumedOffer.payload.request.prompt,
                 /Resumed after dependency integration/,
             )
             assert.match(
-                resumedOffer.data.request.prompt,
+                resumedOffer.payload.request.prompt,
                 /baro-recovery\/run\/S1\/1/,
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 broker,
                 WorkLeaseGranted.create({
                     runId,
-                    offerId: resumedOffer.data.offerId,
+                    offerId: resumedOffer.payload.offerId,
                     leaseId: "lease-S1-2",
                     workerId: "worker",
-                    generation: resumedOffer.data.generation,
-                    request: resumedOffer.data.request,
+                    generation: resumedOffer.payload.generation,
+                    request: resumedOffer.payload.request,
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("S1-agent-2"),
                 success(
                     runId,
                     "S1",
                     "lease-S1-2",
-                    resumedOffer.data.generation,
+                    resumedOffer.payload.generation,
                 ),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 repo,
                 StoryMerged.create({
                     runId,
@@ -267,7 +267,7 @@ describe("CollectiveBoard dependency suspension", () => {
                 }),
             )
             await waitFor(env.events, RunPushRequested.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 repo,
                 RunPushed.create({ runId, pushed: false }),
             )
@@ -290,7 +290,7 @@ describe("CollectiveBoard dependency suspension", () => {
             const fixture = await startRunningBoard(dir, {
                 supportsCooperativeSuspend: true,
             })
-            fixture.env.deliverSemanticEvent(
+            fixture.env.publish(
                 fixture.bridge,
                 dependencyBlock(fixture),
             )
@@ -299,9 +299,9 @@ describe("CollectiveBoard dependency suspension", () => {
                 fixture.env.events,
                 WorkBlockRejected.is,
             )
-            assert.equal(rejected.data.code, "invalid_request")
-            assert.match(rejected.data.reason, /disabled/)
-            assert.equal(rejected.data.requestReason, BLOCK_REASON)
+            assert.equal(rejected.payload.code, "invalid_request")
+            assert.match(rejected.payload.reason, /disabled/)
+            assert.equal(rejected.payload.requestReason, BLOCK_REASON)
             assert.equal(
                 fixture.env.events.some(WorkBlockAccepted.is),
                 false,
@@ -320,7 +320,7 @@ describe("CollectiveBoard dependency suspension", () => {
                 dependencySuspensionEnabled: true,
                 supportsCooperativeSuspend: false,
             })
-            fixture.env.deliverSemanticEvent(
+            fixture.env.publish(
                 fixture.bridge,
                 dependencyBlock(fixture),
             )
@@ -329,8 +329,8 @@ describe("CollectiveBoard dependency suspension", () => {
                 fixture.env.events,
                 WorkBlockRejected.is,
             )
-            assert.equal(rejected.data.code, "invalid_request")
-            assert.match(rejected.data.reason, /cannot prove.*quiescence/)
+            assert.equal(rejected.payload.code, "invalid_request")
+            assert.match(rejected.payload.reason, /cannot prove.*quiescence/)
             assert.equal(
                 fixture.env.events.some(RuntimeReplanApplied.is),
                 false,
@@ -346,25 +346,25 @@ describe("CollectiveBoard dependency suspension", () => {
                 supportsCooperativeSuspend: true,
             })
             const request = dependencyBlock(fixture)
-            fixture.env.deliverSemanticEvent(fixture.bridge, request)
+            fixture.env.publish(fixture.bridge, request)
             const first = await waitFor(
                 fixture.env.events,
                 WorkBlockAccepted.is,
             )
 
-            fixture.env.deliverSemanticEvent(fixture.bridge, request)
+            fixture.env.publish(fixture.bridge, request)
             const accepted = await waitForCount(
                 fixture.env.events,
                 WorkBlockAccepted.is,
                 2,
             )
-            assert.deepEqual(accepted[1]!.data, first.data)
+            assert.deepEqual(accepted[1]!.payload, first.payload)
             assert.equal(
                 fixture.env.events.filter(RuntimeReplanApplied.is).length,
                 1,
             )
 
-            fixture.env.deliverSemanticEvent(
+            fixture.env.publish(
                 fixture.bridge,
                 dependencyBlock(fixture, "different request content"),
             )
@@ -372,9 +372,9 @@ describe("CollectiveBoard dependency suspension", () => {
                 fixture.env.events,
                 WorkBlockRejected.is,
             )
-            assert.equal(conflict.data.code, "invalid_request")
-            assert.match(conflict.data.reason, /already used with different content/)
-            assert.equal(conflict.data.requestReason, "different request content")
+            assert.equal(conflict.payload.code, "invalid_request")
+            assert.match(conflict.payload.reason, /already used with different content/)
+            assert.equal(conflict.payload.requestReason, "different request content")
             assert.equal(
                 fixture.env.events.filter(RuntimeReplanApplied.is).length,
                 1,
@@ -389,17 +389,17 @@ describe("CollectiveBoard dependency suspension", () => {
                 dependencySuspensionEnabled: true,
                 supportsCooperativeSuspend: true,
             })
-            fixture.env.deliverSemanticEvent(
+            fixture.env.publish(
                 fixture.bridge,
                 dependencyBlock(fixture),
             )
             await waitFor(fixture.env.events, WorkBlockAccepted.is)
 
-            fixture.env.deliverSemanticEvent(
+            fixture.env.publish(
                 fixture.broker,
                 WorkLeaseExpired.create({
                     runId: fixture.runId,
-                    offerId: fixture.s1Offer.data.offerId,
+                    offerId: fixture.s1Offer.payload.offerId,
                     leaseId: S1_LEASE,
                     storyId: "S1",
                     workerId: "worker",
@@ -461,29 +461,29 @@ async function startRunningBoard(
             : {}),
     })
     const env = joinWithCapture(board)
-    env.deliverSemanticEvent(
+    env.publish(
         operator,
         RunStartRequest.create({ reason: "test" }),
     )
-    env.deliverSemanticEvent(
+    env.publish(
         repo,
         RunPrepared.create({ runId, baseSha: null }),
     )
     await answerNewContexts(env, context, runId)
     const offers = await waitForCount(env.events, WorkOffered.is, 2)
     const s1Offer = offers.find(
-        (offer) => offer.data.request.storyId === "S1",
+        (offer) => offer.payload.request.storyId === "S1",
     )!
     for (const offer of offers) {
-        env.deliverSemanticEvent(
+        env.publish(
             broker,
             WorkLeaseGranted.create({
                 runId,
-                offerId: offer.data.offerId,
-                leaseId: `lease-${offer.data.request.storyId}-1`,
+                offerId: offer.payload.offerId,
+                leaseId: `lease-${offer.payload.request.storyId}-1`,
                 workerId: "worker",
-                generation: offer.data.generation,
-                request: offer.data.request,
+                generation: offer.payload.generation,
+                request: offer.payload.request,
                 supportsCooperativeSuspend:
                     options.supportsCooperativeSuspend,
             }),
@@ -508,7 +508,7 @@ function dependencyBlock(
         blockId: "block-S1-S2",
         storyId: "S1",
         leaseId: S1_LEASE,
-        generation: fixture.s1Offer.data.generation,
+        generation: fixture.s1Offer.payload.generation,
         requiredStoryIds: ["S2"],
         reason,
     })
@@ -562,21 +562,21 @@ async function answerNewContexts(
     const answered = new Set(
         env.events
             .filter(WorkContextProvided.is)
-            .map((event) => event.data.requestId),
+            .map((event) => event.payload.requestId),
     )
     for (let attempt = 0; attempt < 200; attempt += 1) {
         const requests = env.events
             .filter(WorkContextRequested.is)
-            .filter((event) => !answered.has(event.data.requestId))
+            .filter((event) => !answered.has(event.payload.requestId))
         if (requests.length > 0) {
             for (const request of requests) {
-                answered.add(request.data.requestId)
-                env.deliverSemanticEvent(
+                answered.add(request.payload.requestId)
+                env.publish(
                     authority,
                     WorkContextProvided.create({
                         runId,
-                        requestId: request.data.requestId,
-                        storyId: request.data.storyId,
+                        requestId: request.payload.requestId,
+                        storyId: request.payload.storyId,
                         context: null,
                     }),
                 )

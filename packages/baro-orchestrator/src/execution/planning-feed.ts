@@ -7,7 +7,8 @@
  * validation, persistence and scheduling.
  */
 
-import { BaseObserver, type SemanticEvent } from "../runtime/mozaik.js"
+import { type SemanticEvent } from "../runtime/mozaik.js"
+import { BusMember } from "../runtime/coordination.js"
 
 import {
     PlanFragmentProposed,
@@ -24,7 +25,7 @@ import type {
 } from "../stdin-commands.js"
 
 export class PlanningFeed
-    extends BaseObserver
+    extends BusMember
     implements PlanningFeedContract
 {
     open(command: PlanningOpenCommand): void {
@@ -71,9 +72,9 @@ export class PlanningFeed
         )
     }
 
-    private publish(event: SemanticEvent<unknown>): void {
-        for (const environment of this.getEnvironments()) {
-            environment.deliverSemanticEvent(this, event)
+    private publish(event: SemanticEvent<string, unknown>): void {
+        for (const environment of this.getBuses()) {
+            environment.publish(this, event)
         }
     }
 }

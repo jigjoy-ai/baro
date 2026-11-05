@@ -10,7 +10,8 @@
 
 import { existsSync } from "node:fs"
 
-import { BaseObserver, type Participant, type SemanticEvent } from "../runtime/mozaik.js"
+import { type SemanticEvent } from "../runtime/mozaik.js"
+import { BusMember } from "../runtime/coordination.js"
 
 import { loadPrd, persistPrdPreserving, type PrdFile } from "../prd.js"
 import { StoryMergeFailed, StoryMerged } from "../semantic-events.js"
@@ -109,36 +110,36 @@ export function createPrdStatusWriter({
  * with no authority bound every source is accepted, deduped per event kind
  * and story so a relayed copy cannot re-run the write.
  */
-export class PrdStatusObserver extends BaseObserver {
-    private repositoryAuthority: Participant | null = null
+export class PrdStatusObserver extends BusMember {
+    private repositoryAuthority: BusMember | null = null
     private readonly settled = new Set<string>()
 
     constructor(private readonly writer: PrdStatusWriter) {
         super()
     }
 
-    setRepositoryAuthority(authority: Participant): void {
+    setRepositoryAuthority(authority: BusMember): void {
         this.repositoryAuthority = authority
     }
 
     override onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): void {
         if (this.repositoryAuthority && source !== this.repositoryAuthority) {
             return
         }
         if (StoryMerged.is(event)) {
-            if (!this.claim(event.type, event.data.storyId)) return
+            if (!this.claim(event.type, event.payload.storyId)) return
             this.writer.onStoryMerged(
-                event.data.storyId,
-                event.data.mergeCommitSha,
+                event.payload.storyId,
+                event.payload.mergeCommitSha,
             )
             return
         }
         if (StoryMergeFailed.is(event)) {
-            if (!this.claim(event.type, event.data.storyId)) return
-            this.writer.onStoryFailed(event.data.storyId)
+            if (!this.claim(event.type, event.payload.storyId)) return
+            this.writer.onStoryFailed(event.payload.storyId)
         }
     }
 

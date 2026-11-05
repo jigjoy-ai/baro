@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import type { AgenticEnvironment } from "../../src/runtime/mozaik.js"
+import type { CoordinationBus } from "../../src/runtime/coordination.js"
 import type {
     StoryExecOpts,
     StoryExecution,
@@ -198,7 +198,7 @@ class WritingExecutor implements StoryExecutor {
         request: StorySpawnRequestData,
         _route: StoryRoute,
         cwd: string,
-        environment: AgenticEnvironment,
+        environment: CoordinationBus,
         options: StoryExecOpts,
     ): StoryExecution {
         this.cwds.push(cwd)
@@ -206,7 +206,7 @@ class WritingExecutor implements StoryExecutor {
         const resultSource = { agentId: request.storyId } as never
         options.registerResultAuthority?.(resultSource)
         setImmediate(() => {
-            environment.deliverSemanticEvent(
+            environment.publish(
                 resultSource,
                 StoryResult.create({
                     storyId: request.storyId,

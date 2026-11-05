@@ -9,7 +9,7 @@ import {
     type ChatCompletionChunk,
     type ChatStreamClient,
 } from "../../../src/harness/openai/chat-stream.js"
-import { FunctionCallItem, ModelMessageItem } from "../../../src/runtime/mozaik.js"
+import { FunctionCallItem, ModelMessageItem, toWire } from "../../../src/runtime/mozaik.js"
 
 /** A provider that streams exactly these chunks, recording what it was sent. */
 function endpoint(chunks: ChatCompletionChunk[]): {
@@ -57,7 +57,7 @@ describe("a streamed round is assembled into what a round returns", () => {
         const round = await streamChatRound(client, {})
         assert.equal(round.items.length, 1)
         assert.equal(
-            (round.items[0] as ModelMessageItem).toJSON().content[0].text,
+            toWire((round.items[0] as ModelMessageItem)).content[0].text,
             "The decision is to add an audit table.",
         )
     })
@@ -270,7 +270,7 @@ describe("through the provider client, on the wire", () => {
         )
 
         assert.equal(
-            (round.items[0] as ModelMessageItem).toJSON().content[0].text,
+            toWire((round.items[0] as ModelMessageItem)).content[0].text,
             "reading the service",
         )
         const call = round.items[1] as FunctionCallItem

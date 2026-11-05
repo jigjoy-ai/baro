@@ -4,7 +4,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, it } from "node:test"
 
-import type { AgenticEnvironment, Participant } from "../src/runtime/mozaik.js"
+import type { CoordinationBus, BusMember } from "../src/runtime/coordination.js"
 
 import { orchestrate } from "../src/orchestrate.js"
 import type {
@@ -37,13 +37,13 @@ class NeverQuiescingExecutor implements StoryExecutor {
         request: StorySpawnRequestData,
         _route: StoryRoute,
         cwd: string,
-        _environment: AgenticEnvironment,
+        _environment: CoordinationBus,
         options: StoryExecOpts,
     ): StoryExecution {
         this.started.push(request.storyId)
         const resultSource = {
             agentId: `never-quiescing:${request.storyId}`,
-        } as Participant
+        } as BusMember
         options.registerResultAuthority?.(resultSource)
 
         if (request.storyId === "S1") {
@@ -82,16 +82,16 @@ class UncertifiedTerminalExecutor implements StoryExecutor {
         request: StorySpawnRequestData,
         _route: StoryRoute,
         cwd: string,
-        environment: AgenticEnvironment,
+        environment: CoordinationBus,
         options: StoryExecOpts,
     ): StoryExecution {
         const resultSource = {
             agentId: `uncertified-terminal:${request.storyId}`,
-        } as Participant
+        } as BusMember
         options.registerResultAuthority?.(resultSource)
         writeFileSync(join(cwd, "partial.txt"), "unsafe live partial work\n")
         setImmediate(() => {
-            environment.deliverSemanticEvent(
+            environment.publish(
                 resultSource,
                 StoryResult.create({
                     runId: request.runId,

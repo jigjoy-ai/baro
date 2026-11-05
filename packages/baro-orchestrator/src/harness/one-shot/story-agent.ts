@@ -12,11 +12,9 @@ import { join } from "node:path"
 import { setTimeout as setTimeoutPromise } from "timers/promises"
 
 import {
-    AgenticEnvironment,
-    BaseObserver,
-    Participant,
     SemanticEvent,
 } from "../../runtime/mozaik.js"
+import { BusMember, CoordinationBus } from "../../runtime/coordination.js"
 
 import {
     drainGuardRefusals,
@@ -52,7 +50,7 @@ export interface OneShotStoryCoreSpec {
     runId?: string
     leaseId?: string
     generation?: number
-    targetedMessageAuthority?: Participant
+    targetedMessageAuthority?: BusMember
     /** Number of *additional* attempts after the first. */
     retries?: number
     /** Opt-in per-attempt wall bound in seconds; idleness is the default limit. */
@@ -62,8 +60,8 @@ export interface OneShotStoryCoreSpec {
     hardTimeoutSecs?: number
     /** Wait for the exact Critic verdict before publishing StoryResult. */
     requiresQualityReview?: boolean
-    terminalTurnAuthority?: Participant
-    turnReviewAuthority?: Participant
+    terminalTurnAuthority?: BusMember
+    turnReviewAuthority?: BusMember
     turnReviewTimeoutMs?: number
     handoffInconclusiveToAcceptanceGate?: boolean
     /** Collective safety boundary: a spawned CLI attempt must earn a positive
@@ -92,13 +90,13 @@ export interface OneShotStoryOutcome<TSummary> {
     suspension?: StorySuspension
 }
 
-export interface OneShotStoryRunner<TSummary> extends Participant {
+export interface OneShotStoryRunner<TSummary> extends BusMember {
     done: Promise<TSummary>
     /** Liveness feed: fires per output chunk so an idle watchdog can pet. */
     onActivity: (() => void) | null
-    join(environment: AgenticEnvironment): void
-    start(environment: AgenticEnvironment): void
-    leave(environment: AgenticEnvironment): void
+    join(environment: CoordinationBus): void
+    start(environment: CoordinationBus): void
+    leave(environment: CoordinationBus): void
     abortAndWait(): Promise<boolean>
     hasOwnedProcessGroup(): boolean
     hasSpawnedProcess(): boolean
@@ -109,7 +107,7 @@ export interface OneShotStoryBackend<TSummary extends OneShotRunSummaryBase> {
     name: string
     createRunner(prompt: string): OneShotStoryRunner<TSummary>
     /** Raw failure signal carried by a live event from the current runner. */
-    failureSignalFrom(event: SemanticEvent<unknown>): unknown | undefined
+    failureSignalFrom(event: SemanticEvent<string, unknown>): unknown | undefined
     /** Refusal/no-op detection the harness needs beyond a clean exit. */
     positiveEvidenceFailure(
         summary: TSummary,
@@ -133,13 +131,13 @@ type NormalizedCoreSpec = Required<
 
 export abstract class OneShotStoryAgent<
     TSummary extends OneShotRunSummaryBase,
-> extends BaseObserver {
+> extends BusMember {
     protected readonly spec: NormalizedCoreSpec
 
-    private envRef: AgenticEnvironment | null = null
+    private envRef: CoordinationBus | null = null
     /** Optional explicit bus identity for the terminal outcome. */
-    private resultAuthority: Participant | null = null
-    private terminalSourceRegistrar: ((source: Participant) => void) | null = null
+    private resultAuthority: BusMember | null = null
+    private terminalSourceRegistrar: ((source: BusMember) => void) | null = null
     private currentRunner: OneShotStoryRunner<TSummary> | null = null
     private currentPhase: AgentPhase = "idle"
     private startedAt: number | null = null
@@ -206,7 +204,7 @@ export abstract class OneShotStoryAgent<
         return this.currentRunner
     }
 
-    setResultAuthority(source: Participant): void {
+    setResultAuthority(source: BusMember): void {
         if (this.resultAuthority && this.resultAuthority !== source) {
             throw new Error(`result authority already set for ${this.spec.id}`)
         }
@@ -214,7 +212,7 @@ export abstract class OneShotStoryAgent<
     }
 
     setTerminalSourceRegistrar(
-        register: (source: Participant) => void,
+        register: (source: BusMember) => void,
     ): void {
         if (this.terminalSourceRegistrar && this.terminalSourceRegistrar !== register) {
             throw new Error(`terminal source registrar already set for ${this.spec.id}`)
@@ -223,7 +221,7 @@ export abstract class OneShotStoryAgent<
     }
 
     /** Idempotent; returns the `done` promise. */
-    run(environment: AgenticEnvironment): Promise<OneShotStoryOutcome<TSummary>> {
+    run(environment: CoordinationBus): Promise<OneShotStoryOutcome<TSummary>> {
         if (this.startedAt != null) {
             return this.done
         }
@@ -236,8 +234,8 @@ export abstract class OneShotStoryAgent<
 
     /** A rejected one-shot turn is resumed by a fresh process in the same worktree. */
     override async onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): Promise<void> {
         if (this.turnReview.observe(source, event)) return
         if (source !== this.currentRunner) return
@@ -649,7 +647,7 @@ export abstract class OneShotStoryAgent<
      * on PATH for exactly that spawn and never for the orchestrator itself. */
     private startWithPublishGuard(
         runner: OneShotStoryRunner<TSummary>,
-        env: AgenticEnvironment,
+        env: CoordinationBus,
     ): void {
         if (process.platform === "win32") {
             runner.start(env)
@@ -682,7 +680,7 @@ export abstract class OneShotStoryAgent<
     private drainCommandRefusals(): void {
         if (!this.publishGuardDir || !this.envRef) return
         for (const refusal of drainGuardRefusals(this.publishGuardDir)) {
-            this.envRef.deliverSemanticEvent(
+            this.envRef.publish(
                 this,
                 StoryCommandRefused.create({
                     storyId: this.spec.id,
@@ -701,7 +699,7 @@ export abstract class OneShotStoryAgent<
         failure?: StoryFailureData,
     ): void {
         if (!this.envRef) return
-        this.envRef.deliverSemanticEvent(
+        this.envRef.publish(
             this.resultAuthority ?? this,
             StoryResult.create({
                 storyId: this.spec.id,
@@ -760,7 +758,7 @@ export abstract class OneShotStoryAgent<
             !this.spec.leaseId ||
             this.spec.generation == null
         ) return
-        this.envRef.deliverSemanticEvent(
+        this.envRef.publish(
             this,
             OneShotAttemptFinalized.create({
                 runId: this.spec.runId,
@@ -798,7 +796,7 @@ export abstract class OneShotStoryAgent<
         if (next === this.currentPhase) return
         this.currentPhase = next
         if (this.envRef) {
-            this.envRef.deliverSemanticEvent(
+            this.envRef.publish(
                 this,
                 AgentState.create({
                     agentId: this.spec.id,

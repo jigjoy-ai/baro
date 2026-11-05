@@ -387,5 +387,5 @@ function assertLargePromptUsedStdin(item: Capture): void {
 function assertPass(events: readonly unknown[]): void {
     const critiques = events.filter(Critique.is)
     assert.equal(critiques.length, 1)
-    assert.equal(critiques[0]!.data.verdict, "pass")
+    assert.equal(critiques[0]!.payload.verdict, "pass")
 }

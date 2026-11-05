@@ -3,9 +3,9 @@ import assert from "node:assert/strict"
 
 import {
     FunctionCallItem,
-    FunctionCallOutputItem,
-    type Participant,
+    FunctionCallOutputItem
 } from "../../src/runtime/mozaik.js"
+import type { BusMember } from "../../src/runtime/coordination.js"
 
 import {
     AgentTargetedMessage,
@@ -51,8 +51,8 @@ describe("Librarian", () => {
 
         const event = env.events.find(Knowledge.is)
         assert.ok(event, "knowledge event emitted")
-        assert.equal(event.data.sourceAgentId, "S1")
-        assert.equal(event.data.summary, "Read src/auth.ts")
+        assert.equal(event.payload.sourceAgentId, "S1")
+        assert.equal(event.payload.summary, "Read src/auth.ts")
 
         assert.equal(librarian.gatherContext("S1", ["auth"]), null)
         const context = librarian.gatherContext("S2", ["auth"])
@@ -77,9 +77,9 @@ describe("Librarian", () => {
 
         const targeted = env.events.filter(AgentTargetedMessage.is)
         assert.equal(targeted.length, 1)
-        assert.equal(targeted[0].data.recipientId, "S2")
-        assert.equal(targeted[0].data.metadata.from_agent, "S1")
-        assert.ok(targeted[0].data.text.includes("Grep 'auth' in src"))
+        assert.equal(targeted[0].payload.recipientId, "S2")
+        assert.equal(targeted[0].payload.metadata.from_agent, "S1")
+        assert.ok(targeted[0].payload.text.includes("Grep 'auth' in src"))
     })
 
     it("stops broadcasting findings to stories after they complete", async () => {
@@ -229,7 +229,7 @@ describe("Librarian", () => {
         )
         await librarian.onExternalEvent(broker, oldGrant)
         const state = librarian as unknown as {
-            pending: Map<Participant, Map<string, unknown>>
+            pending: Map<BusMember, Map<string, unknown>>
         }
         assert.equal(state.pending.get(oldWorker)?.has("unfinished"), true)
 
@@ -347,7 +347,7 @@ describe("Librarian", () => {
             }),
         )
         const state = librarian as unknown as {
-            pending: Map<Participant, Map<string, unknown>>
+            pending: Map<BusMember, Map<string, unknown>>
         }
         assert.equal(state.pending.get(worker)?.has("unfinished") ?? false, false)
         await librarian.onExternalFunctionCall(

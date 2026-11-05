@@ -1,4 +1,5 @@
-import { BaseObserver, Participant, SemanticEvent } from "../../runtime/mozaik.js"
+import { SemanticEvent } from "../../runtime/mozaik.js"
+import { BusMember } from "../../runtime/coordination.js"
 
 import {
     ConductorState,
@@ -26,11 +27,11 @@ import { ActiveLeaseRegistry } from "../../runtime/active-lease-registry.js"
  * Mirrors Conductor lifecycle as a `progress` BaroEvent — the Rust TUI
  * doesn't understand `conductor_state` directly.
  */
-export class ProgressForwarder extends BaseObserver {
-    private legacyReplanAuthority: Participant | null = null
-    private runtimeReplanAuthority: Participant | null = null
-    private repositoryAuthority: Participant | null = null
-    private critiqueAuthority: Participant | null = null
+export class ProgressForwarder extends BusMember {
+    private legacyReplanAuthority: BusMember | null = null
+    private runtimeReplanAuthority: BusMember | null = null
+    private repositoryAuthority: BusMember | null = null
+    private critiqueAuthority: BusMember | null = null
     private collectiveAuthorities: Readonly<CollectiveProgressAuthorities> | null = null
     private readonly leases = new ActiveLeaseRegistry()
     private readonly seenRuntimeDecisions = new Set<string>()
@@ -70,7 +71,7 @@ export class ProgressForwarder extends BaseObserver {
         this.collectiveAuthorities = Object.freeze({ ...authorities })
     }
 
-    setLegacyReplanAuthority(authority: Participant): void {
+    setLegacyReplanAuthority(authority: BusMember): void {
         if (
             this.legacyReplanAuthority &&
             this.legacyReplanAuthority !== authority
@@ -82,7 +83,7 @@ export class ProgressForwarder extends BaseObserver {
         this.legacyReplanAuthority = authority
     }
 
-    setRuntimeReplanAuthority(authority: Participant): void {
+    setRuntimeReplanAuthority(authority: BusMember): void {
         if (
             this.runtimeReplanAuthority &&
             this.runtimeReplanAuthority !== authority
@@ -94,7 +95,7 @@ export class ProgressForwarder extends BaseObserver {
         this.runtimeReplanAuthority = authority
     }
 
-    setRepositoryAuthority(authority: Participant): void {
+    setRepositoryAuthority(authority: BusMember): void {
         if (this.repositoryAuthority && this.repositoryAuthority !== authority) {
             throw new Error(
                 "Progress forwarder repository authority is already bound",
@@ -103,7 +104,7 @@ export class ProgressForwarder extends BaseObserver {
         this.repositoryAuthority = authority
     }
 
-    setCritiqueAuthority(authority: Participant): void {
+    setCritiqueAuthority(authority: BusMember): void {
         if (this.critiqueAuthority && this.critiqueAuthority !== authority) {
             throw new Error(
                 "Progress forwarder critique authority is already bound",
@@ -113,8 +114,8 @@ export class ProgressForwarder extends BaseObserver {
     }
 
     override async onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): Promise<void> {
         if (this.collectiveFailClosed && !this.collectiveAuthorities) return
         if (WorkLeaseGranted.is(event) || WorkLeaseReleased.is(event)) {
@@ -122,34 +123,34 @@ export class ProgressForwarder extends BaseObserver {
             if (
                 !authorities ||
                 source !== authorities.broker ||
-                event.data.runId !== authorities.runId
+                event.payload.runId !== authorities.runId
             ) return
             if (
                 WorkLeaseReleased.is(event) &&
                 !this.leases.matchesLease(
-                    event.data.storyId,
-                    event.data.runId,
-                    event.data.leaseId,
+                    event.payload.storyId,
+                    event.payload.runId,
+                    event.payload.leaseId,
                 )
             ) return
             this.leases.observe(event, authorities.runId)
             return
         }
         if (RunStarted.is(event)) {
-            const expectedAuthority = event.data.coordinationMode === "collective"
+            const expectedAuthority = event.payload.coordinationMode === "collective"
                 ? this.runtimeReplanAuthority
                 : this.legacyReplanAuthority
             if (!expectedAuthority || source !== expectedAuthority) return
-            this.totalStories = event.data.storyCount
-            this.knownStories = event.data.storyIds
-                ? new Set(event.data.storyIds)
+            this.totalStories = event.payload.storyCount
+            this.knownStories = event.payload.storyIds
+                ? new Set(event.payload.storyIds)
                 : null
             this.completedStories.clear()
-            for (const storyId of event.data.completedStoryIds ?? []) {
+            for (const storyId of event.payload.completedStoryIds ?? []) {
                 this.completedStories.add(storyId)
             }
             this.requireMergedCompletion =
-                event.data.coordinationMode === "collective"
+                event.payload.coordinationMode === "collective"
             this.emitStoryProgress()
             return
         }
@@ -158,15 +159,15 @@ export class ProgressForwarder extends BaseObserver {
             if (
                 this.isCollective() &&
                 (!this.collectiveAuthorities ||
-                    event.data.runId !== this.collectiveAuthorities.runId ||
-                    !event.data.leaseId ||
+                    event.payload.runId !== this.collectiveAuthorities.runId ||
+                    !event.payload.leaseId ||
                     !this.leases.matchesLease(
-                        event.data.storyId,
+                        event.payload.storyId,
                         this.collectiveAuthorities.runId,
-                        event.data.leaseId,
+                        event.payload.leaseId,
                     ))
             ) return
-            this.completeStory(event.data.storyId)
+            this.completeStory(event.payload.storyId)
             return
         }
         if (LevelCompleted.is(event)) {
@@ -174,7 +175,7 @@ export class ProgressForwarder extends BaseObserver {
                 ? this.runtimeReplanAuthority
                 : this.legacyReplanAuthority
             if (!expectedAuthority || source !== expectedAuthority) return
-            for (const storyId of event.data.passed) this.completeStory(storyId)
+            for (const storyId of event.payload.passed) this.completeStory(storyId)
             return
         }
         if (ConductorState.is(event)) {
@@ -182,7 +183,7 @@ export class ProgressForwarder extends BaseObserver {
                 source !== this.legacyReplanAuthority &&
                 source !== this.runtimeReplanAuthority
             ) return
-            this.handleConductorState(event.data)
+            this.handleConductorState(event.payload)
             return
         }
         if (Replan.is(event)) {
@@ -193,30 +194,30 @@ export class ProgressForwarder extends BaseObserver {
         }
         if (ReplanApplied.is(event)) {
             if (source !== this.legacyReplanAuthority) return
-            this.handleReplan(event.data)
+            this.handleReplan(event.payload)
             return
         }
         if (RuntimeReplanApplied.is(event)) {
             if (
                 source !== this.runtimeReplanAuthority ||
-                this.seenRuntimeDecisions.has(event.data.proposalId) ||
-                (event.data.currentGraphVersion !== undefined &&
-                    event.data.graphVersion < event.data.currentGraphVersion) ||
-                event.data.graphVersion <= this.latestRuntimeGraphVersion
+                this.seenRuntimeDecisions.has(event.payload.proposalId) ||
+                (event.payload.currentGraphVersion !== undefined &&
+                    event.payload.graphVersion < event.payload.currentGraphVersion) ||
+                event.payload.graphVersion <= this.latestRuntimeGraphVersion
             ) return
-            this.seenRuntimeDecisions.add(event.data.proposalId)
+            this.seenRuntimeDecisions.add(event.payload.proposalId)
             this.latestRuntimeGraphVersion =
-                event.data.currentGraphVersion ?? event.data.graphVersion
-            this.handleRuntimeReplanApplied(event.data)
+                event.payload.currentGraphVersion ?? event.payload.graphVersion
+            this.handleRuntimeReplanApplied(event.payload)
             return
         }
         if (RuntimeReplanRejected.is(event)) {
             if (
                 source !== this.runtimeReplanAuthority ||
-                this.seenRuntimeDecisions.has(event.data.proposalId)
+                this.seenRuntimeDecisions.has(event.payload.proposalId)
             ) return
-            this.seenRuntimeDecisions.add(event.data.proposalId)
-            this.handleRuntimeReplanRejected(event.data)
+            this.seenRuntimeDecisions.add(event.payload.proposalId)
+            this.handleRuntimeReplanRejected(event.payload)
             return
         }
         if (Critique.is(event)) {
@@ -229,7 +230,7 @@ export class ProgressForwarder extends BaseObserver {
                 this.critiqueAuthority &&
                 source !== this.critiqueAuthority
             ) return
-            this.handleCritique(event.data)
+            this.handleCritique(event.payload)
             return
         }
         if (StoryQualityCompleted.is(event)) {
@@ -237,30 +238,30 @@ export class ProgressForwarder extends BaseObserver {
             if (
                 !authorities?.quality ||
                 source !== authorities.quality ||
-                event.data.runId !== authorities.runId ||
+                event.payload.runId !== authorities.runId ||
                 !this.leases.matchesLeaseGeneration(
-                    event.data.storyId,
+                    event.payload.storyId,
                     authorities.runId,
-                    event.data.leaseId,
-                    event.data.generation,
+                    event.payload.leaseId,
+                    event.payload.generation,
                 ) ||
-                this.seenQualityEvaluations.has(event.data.evaluationId)
+                this.seenQualityEvaluations.has(event.payload.evaluationId)
             ) return
-            this.seenQualityEvaluations.add(event.data.evaluationId)
-            if (event.data.critique) {
+            this.seenQualityEvaluations.add(event.payload.evaluationId)
+            if (event.payload.critique) {
                 this.handleCritique({
-                    agentId: event.data.storyId,
-                    ...event.data.critique,
+                    agentId: event.payload.storyId,
+                    ...event.payload.critique,
                 })
             } else {
                 emit({
                     type: "activity",
-                    id: event.data.storyId,
+                    id: event.payload.storyId,
                     kind: "verdict",
-                    ...(event.data.status === "inconclusive"
+                    ...(event.payload.status === "inconclusive"
                         ? {}
-                        : { ok: event.data.status === "passed" }),
-                    text: event.data.reason,
+                        : { ok: event.payload.status === "passed" }),
+                    text: event.payload.reason,
                 })
             }
             return
@@ -398,8 +399,8 @@ export class ProgressForwarder extends BaseObserver {
 
 export interface CollectiveProgressAuthorities {
     runId: string
-    board: Participant
-    broker: Participant
-    repository: Participant
-    quality?: Participant
+    board: BusMember
+    broker: BusMember
+    repository: BusMember
+    quality?: BusMember
 }

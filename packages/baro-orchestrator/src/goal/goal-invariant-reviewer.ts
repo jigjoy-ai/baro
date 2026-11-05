@@ -1,4 +1,5 @@
-import type { Participant, SemanticEvent } from "../runtime/mozaik.js"
+import type { SemanticEvent } from "../runtime/mozaik.js"
+import type { BusMember } from "../runtime/coordination.js"
 import { createHash } from "node:crypto"
 
 import {
@@ -153,10 +154,10 @@ export class GoalInvariantReviewer extends SerializedObserver {
     private readonly verifications = new Map<string, RunVerificationCompletedData>()
     private readonly completed = new Map<string, CachedReview>()
     private readonly active = new Map<string, AbortController>()
-    private requestAuthority: Participant | null = null
-    private verificationAuthority: Participant | null = null
-    private repositoryAuthority: Participant | null = null
-    private completionAuthority: Participant | null = null
+    private requestAuthority: BusMember | null = null
+    private verificationAuthority: BusMember | null = null
+    private repositoryAuthority: BusMember | null = null
+    private completionAuthority: BusMember | null = null
     private baseSha: string | null = null
     private baseShaIssue: string | null = null
     private verificationReplayIssue: string | null = null
@@ -204,7 +205,7 @@ export class GoalInvariantReviewer extends SerializedObserver {
         }
     }
 
-    setRequestAuthority(authority: Participant): void {
+    setRequestAuthority(authority: BusMember): void {
         this.requestAuthority = bindAuthority(
             this.requestAuthority,
             authority,
@@ -212,7 +213,7 @@ export class GoalInvariantReviewer extends SerializedObserver {
         )
     }
 
-    setVerificationAuthority(authority: Participant): void {
+    setVerificationAuthority(authority: BusMember): void {
         this.verificationAuthority = bindAuthority(
             this.verificationAuthority,
             authority,
@@ -220,7 +221,7 @@ export class GoalInvariantReviewer extends SerializedObserver {
         )
     }
 
-    setRepositoryAuthority(authority: Participant): void {
+    setRepositoryAuthority(authority: BusMember): void {
         this.repositoryAuthority = bindAuthority(
             this.repositoryAuthority,
             authority,
@@ -228,7 +229,7 @@ export class GoalInvariantReviewer extends SerializedObserver {
         )
     }
 
-    setCompletionAuthority(authority: Participant): void {
+    setCompletionAuthority(authority: BusMember): void {
         this.completionAuthority = bindAuthority(
             this.completionAuthority,
             authority,
@@ -247,11 +248,11 @@ export class GoalInvariantReviewer extends SerializedObserver {
 
     protected override handleEvent(context: SerializedEventContext): void {
         const { event, source } = context
-        if (RunPrepared.is(event) && event.data.runId === this.opts.runId) {
+        if (RunPrepared.is(event) && event.payload.runId === this.opts.runId) {
             if (source !== this.repositoryAuthority) return
             if (this.baseSha === null) {
-                this.baseSha = event.data.baseSha
-            } else if (this.baseSha !== event.data.baseSha) {
+                this.baseSha = event.payload.baseSha
+            } else if (this.baseSha !== event.payload.baseSha) {
                 this.baseShaIssue =
                     "trusted RunPrepared replayed the run identity with a conflicting base SHA"
             }
@@ -259,12 +260,12 @@ export class GoalInvariantReviewer extends SerializedObserver {
         }
         if (
             RunVerificationCompleted.is(event) &&
-            event.data.runId === this.opts.runId
+            event.payload.runId === this.opts.runId
         ) {
             if (source !== this.verificationAuthority) return
-            const existing = this.verifications.get(event.data.verificationId)
+            const existing = this.verifications.get(event.payload.verificationId)
             if (existing) {
-                if (JSON.stringify(existing) !== JSON.stringify(event.data)) {
+                if (JSON.stringify(existing) !== JSON.stringify(event.payload)) {
                     this.verificationReplayIssue =
                         "trusted final verification replayed an id with conflicting evidence"
                 }
@@ -272,8 +273,8 @@ export class GoalInvariantReviewer extends SerializedObserver {
             }
             setBounded(
                 this.verifications,
-                event.data.verificationId,
-                structuredClone(event.data),
+                event.payload.verificationId,
+                structuredClone(event.payload),
             )
             return
         }
@@ -281,7 +282,7 @@ export class GoalInvariantReviewer extends SerializedObserver {
             if (!this.completionAuthority || source !== this.completionAuthority) {
                 return
             }
-            if (event.data.runId && event.data.runId !== this.opts.runId) return
+            if (event.payload.runId && event.payload.runId !== this.opts.runId) return
             for (const controller of this.active.values()) {
                 controller.abort(new Error("aggregate review cancelled by run completion"))
             }
@@ -289,18 +290,18 @@ export class GoalInvariantReviewer extends SerializedObserver {
         }
         if (
             !GoalAggregateReviewRequested.is(event) ||
-            event.data.runId !== this.opts.runId ||
+            event.payload.runId !== this.opts.runId ||
             source !== this.requestAuthority
         ) return
 
-        const requestKey = JSON.stringify(event.data)
-        const cached = this.completed.get(event.data.reviewId)
+        const requestKey = JSON.stringify(event.payload)
+        const cached = this.completed.get(event.payload.reviewId)
         if (cached) {
             if (cached.requestKey !== requestKey) {
                 this.emit(
                     GoalAggregateReviewCompleted.create(
                         this.inconclusive(
-                            event.data,
+                            event.payload,
                             0,
                             "aggregate review id replayed with conflicting request correlation",
                         ),
@@ -312,18 +313,18 @@ export class GoalInvariantReviewer extends SerializedObserver {
                 this.emit(GoalAggregateReviewCompleted.create(cached.data))
                 return
             }
-            if (this.active.has(event.data.reviewId)) return
-            this.replayCachedReview(context, event.data, cached)
+            if (this.active.has(event.payload.reviewId)) return
+            this.replayCachedReview(context, event.payload, cached)
             return
         }
-        if (this.active.has(event.data.reviewId)) return
+        if (this.active.has(event.payload.reviewId)) return
 
         const controller = new AbortController()
-        this.active.set(event.data.reviewId, controller)
+        this.active.set(event.payload.reviewId, controller)
         context.spawnTask(
             {
-                label: `review global goal ${event.data.reviewId}`,
-                key: event.data.reviewId,
+                label: `review global goal ${event.payload.reviewId}`,
+                key: event.payload.reviewId,
             },
             async () => {
                 const deadline = createGoalReviewDeadline(
@@ -332,12 +333,12 @@ export class GoalInvariantReviewer extends SerializedObserver {
                     this.awakeClock,
                 )
                 try {
-                    const data = await this.evaluate(event.data, deadline)
+                    const data = await this.evaluate(event.payload, deadline)
                     await deadline.close()
                     if (controller.signal.aborted) return
                     setBounded(
                         this.completed,
-                        event.data.reviewId,
+                        event.payload.reviewId,
                         { requestKey, data },
                     )
                     this.emit(GoalAggregateReviewCompleted.create(data))
@@ -348,8 +349,8 @@ export class GoalInvariantReviewer extends SerializedObserver {
                     throw error
                 } finally {
                     await deadline.close()
-                    if (this.active.get(event.data.reviewId) === controller) {
-                        this.active.delete(event.data.reviewId)
+                    if (this.active.get(event.payload.reviewId) === controller) {
+                        this.active.delete(event.payload.reviewId)
                     }
                 }
             },
@@ -778,9 +779,9 @@ export class GoalInvariantReviewer extends SerializedObserver {
         )
     }
 
-    private emit(event: SemanticEvent<unknown>): void {
-        for (const env of this.getEnvironments()) {
-            env.deliverSemanticEvent(this, event)
+    private emit(event: SemanticEvent<string, unknown>): void {
+        for (const env of this.getBuses()) {
+            env.publish(this, event)
         }
     }
 }
@@ -1386,10 +1387,10 @@ function invocationInterruptionReason(
 }
 
 function bindAuthority(
-    current: Participant | null,
-    authority: Participant,
+    current: BusMember | null,
+    authority: BusMember,
     label: string,
-): Participant {
+): BusMember {
     if (current && current !== authority) throw new Error(`${label} is already bound`)
     return authority
 }

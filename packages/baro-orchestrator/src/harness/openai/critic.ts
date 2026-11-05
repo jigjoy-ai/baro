@@ -19,7 +19,6 @@
  */
 
 import {
-    BaseObserver,
     Gpt54,
     Gpt54Mini,
     Gpt54Nano,
@@ -29,9 +28,8 @@ import {
     SystemMessageItem,
     UserMessageItem,
     type GenerativeModel,
-    type Participant,
-    type TokenUsage,
-} from "../../runtime/mozaik.js"
+    type TokenUsage, toWire } from "../../runtime/mozaik.js"
+import { BusMember } from "../../runtime/coordination.js"
 
 import type { GatewayBillingCoordinator } from "../../telemetry/billing/index.js"
 import {
@@ -132,7 +130,7 @@ function pickModel(name: string): GenerativeModel {
     }
 }
 
-export class CriticOpenAI extends BaseObserver {
+export class CriticOpenAI extends BusMember {
     private readonly opts: Required<
         Omit<
             CriticOpenAIOptions,
@@ -184,8 +182,8 @@ export class CriticOpenAI extends BaseObserver {
     }
 
     override async onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): Promise<void> {
         const input = criticInput(event)
         if (!input) return
@@ -264,8 +262,8 @@ export class CriticOpenAI extends BaseObserver {
                     ? { staleCommands: preparation.staleCommands }
                     : {}),
             })
-            for (const env of this.getEnvironments()) {
-                env.deliverSemanticEvent(this, critiqueEvent)
+            for (const env of this.getBuses()) {
+                env.publish(this, critiqueEvent)
             }
 
             if (status === "evaluated" && verdict === "fail" && canContinue) {
@@ -282,8 +280,8 @@ export class CriticOpenAI extends BaseObserver {
                             ...(terminalId ? { terminalId } : {}),
                         },
                     })
-                    for (const env of this.getEnvironments()) {
-                        env.deliverSemanticEvent(this, msg)
+                    for (const env of this.getBuses()) {
+                        env.publish(this, msg)
                     }
                 }
             }
@@ -330,13 +328,13 @@ export class CriticOpenAI extends BaseObserver {
             },
         }
         const event = ModelInvocationMeasured.create(data)
-        for (const env of this.getEnvironments()) {
-            env.deliverSemanticEvent(this, event)
+        for (const env of this.getBuses()) {
+            env.publish(this, event)
         }
     }
 
     private terminalCorrelation(
-        source: Participant,
+        source: BusMember,
         agentId: string,
         terminalId: string | null,
     ): StoryResultAuthorityCorrelation | null {
@@ -376,7 +374,7 @@ export class CriticOpenAI extends BaseObserver {
             generation: number
         } | null,
     ): Promise<CriticOpenAIEvaluation> {
-        const context = ModelContext.create("critic")
+        const context = ModelContext.create()
             .addContextItem(SystemMessageItem.create(VERDICT_SYSTEM_PROMPT))
             .addContextItem(UserMessageItem.create(userPrompt))
 
@@ -410,7 +408,7 @@ export class CriticOpenAI extends BaseObserver {
             let assistantText = ""
             for (const item of round.items) {
                 if (item.type === "message") {
-                    const json = item.toJSON() as { content: Array<{ text: string }> }
+                    const json = toWire(item) as { content: Array<{ text: string }> }
                     assistantText += json.content?.[0]?.text ?? ""
                 }
             }

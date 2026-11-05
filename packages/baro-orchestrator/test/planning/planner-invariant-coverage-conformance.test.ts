@@ -234,7 +234,7 @@ describe("claude-lane invariant coverage conformance", () => {
                 protocol: { schemaVersion: 1, goal: projection },
             },
         } as unknown as PrdFile
-        const emitted: SemanticEvent<unknown>[] = []
+        const emitted: SemanticEvent<string, unknown>[] = []
         let phase = "running"
         const host: VerificationGoalGateHost = {
             emit: (event) => emitted.push(event),
@@ -261,10 +261,10 @@ describe("claude-lane invariant coverage conformance", () => {
         assert.ok(requested)
         gate.onGoalCompletionAttested({
             runId: "ordering-run",
-            checkId: requested.data.checkId,
+            checkId: requested.payload.checkId,
             contractId: CONTRACT.contractId,
             goalRevision: projection.revision,
-            verificationId: requested.data.verificationId,
+            verificationId: requested.payload.verificationId,
             status: assessment.status,
             satisfiedInvariantIds: assessment.satisfiedInvariantIds,
             openInvariantIds: assessment.openInvariantIds,

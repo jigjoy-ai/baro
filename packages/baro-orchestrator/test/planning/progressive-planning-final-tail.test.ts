@@ -687,7 +687,7 @@ function buildHarness(options: HarnessOptions): Harness {
         },
     }
 
-    const emitted: SemanticEvent<unknown>[] = []
+    const emitted: SemanticEvent<string, unknown>[] = []
     const activity: { kind: string; text: string }[] = []
     const coordinator = new ProgressivePlanningCoordinator({
         runId: RUN_ID,
@@ -835,18 +835,18 @@ function buildHarness(options: HarnessOptions): Harness {
         closed: () =>
             emitted
                 .filter((event) => PlanningStreamClosed.is(event))
-                .map((event) => event.data)
+                .map((event) => event.payload)
                 .at(-1),
         rejections: () =>
             emitted
                 .filter((event) => PlanFragmentRejected.is(event))
-                .map((event) => event.data),
+                .map((event) => event.payload),
         discards: () =>
             emitted
                 .filter((event) => event.type === "final_tail_discarded")
                 .map(
                     (event) =>
-                        event.data as {
+                        event.payload as {
                             storyIds: readonly string[]
                             code: string
                             reason: string

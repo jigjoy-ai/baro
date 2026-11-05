@@ -39,9 +39,9 @@
 import { existsSync, readFileSync } from "fs"
 import { join } from "path"
 
-import { BaseObserver, Participant, SemanticEvent } from "../runtime/mozaik.js"
+import { SemanticEvent } from "../runtime/mozaik.js"
 
-import { AgenticEnvironment } from "../runtime/mozaik.js"
+import { CoordinationBus, BusMember } from "../runtime/coordination.js"
 import { buildDag } from "../runtime-graph/dag.js"
 import { envNonNegativeInt } from "../runtime/env-int.js"
 import {
@@ -186,13 +186,13 @@ interface RunningLevelState {
     perStoryAttempts: Map<string, number>
 }
 
-export class Conductor extends BaseObserver {
+export class Conductor extends BusMember {
     private readonly opts: Required<
         Pick<ConductorOptions, "parallel" | "defaultModel">
     > &
         ConductorOptions
 
-    private envRef: AgenticEnvironment | null = null
+    private envRef: CoordinationBus | null = null
     private phase: ConductorPhase = "idle"
     private prd: PrdFile | null = null
     private startedAt = 0
@@ -283,7 +283,7 @@ export class Conductor extends BaseObserver {
         })
     }
 
-    setEnvironment(env: AgenticEnvironment): void {
+    setEnvironment(env: CoordinationBus): void {
         this.envRef = env
     }
 
@@ -298,18 +298,18 @@ export class Conductor extends BaseObserver {
      * (RunStartRequest from Operator, Replan from Surgeon, StoryResult
      * from StoryAgent) from "from self" (LevelComputeRequest).
      */
-    override async onInternalEvent(event: SemanticEvent<unknown>): Promise<void> {
+    override async onInternalEvent(event: SemanticEvent<string, unknown>): Promise<void> {
         await this.handle(event)
     }
 
     override async onExternalEvent(
-        _source: Participant,
-        event: SemanticEvent<unknown>,
+        _source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): Promise<void> {
         await this.handle(event)
     }
 
-    private handle(event: SemanticEvent<unknown>): Promise<void> {
+    private handle(event: SemanticEvent<string, unknown>): Promise<void> {
         // Run strictly after any in-flight handler. `.catch` on the stored
         // chain keeps one handler's failure from poisoning the queue while
         // still surfacing the rejection to this call's awaiter.
@@ -318,7 +318,7 @@ export class Conductor extends BaseObserver {
         return run
     }
 
-    private async handleEvent(event: SemanticEvent<unknown>): Promise<void> {
+    private async handleEvent(event: SemanticEvent<string, unknown>): Promise<void> {
         if (RunStartRequest.is(event)) {
             await this.handleRunStart()
             return
@@ -330,12 +330,12 @@ export class Conductor extends BaseObserver {
         }
 
         if (StoryResult.is(event)) {
-            await this.handleStoryResult(event.data)
+            await this.handleStoryResult(event.payload)
             return
         }
 
         if (Replan.is(event)) {
-            this.pendingReplans.push(event.data)
+            this.pendingReplans.push(event.payload)
             return
         }
     }
@@ -1057,8 +1057,8 @@ export class Conductor extends BaseObserver {
         return prompt
     }
 
-    private emit(event: SemanticEvent<unknown>): void {
-        this.envRef?.deliverSemanticEvent(this, event)
+    private emit(event: SemanticEvent<string, unknown>): void {
+        this.envRef?.publish(this, event)
     }
 }
 

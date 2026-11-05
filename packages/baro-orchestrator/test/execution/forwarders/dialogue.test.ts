@@ -23,9 +23,9 @@ it("forwards dialogue output only from the bound participant", () => {
         actions: [{ kind: "message", recipientId: "S1", text: "Run tests." }],
     })
 
-    env.deliverSemanticEvent(observer, response)
-    env.deliverSemanticEvent(authority, response)
-    env.deliverSemanticEvent(
+    env.publish(observer, response)
+    env.publish(authority, response)
+    env.publish(
         authority,
         ConversationFailed.create({
             runId: "run-1",

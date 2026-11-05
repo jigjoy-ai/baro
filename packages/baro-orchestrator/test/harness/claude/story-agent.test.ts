@@ -10,10 +10,9 @@ import { join } from "node:path"
 import { describe, it } from "node:test"
 
 import {
-    BaseObserver,
-    type Participant,
     type SemanticEvent,
 } from "../../../src/runtime/mozaik.js"
+import { BusMember } from "../../../src/runtime/coordination.js"
 
 import {
     AgentResult,
@@ -74,7 +73,7 @@ process.stdin.resume()
                 timeoutSecs: FIXTURE_TIMEOUT_SECS,
                 quietTimeoutMs: 5,
             })
-            const terminalSources: Participant[] = []
+            const terminalSources: BusMember[] = []
             agent.setTerminalSourceRegistrar((source) => terminalSources.push(source))
 
             const outcome = await agent.run(env)
@@ -85,10 +84,10 @@ process.stdin.resume()
             assert.equal(outcome.attempts, 1)
             assert.equal(outcome.finalSummary?.lastResult?.resultText, "story complete")
             assert.ok(event)
-            assert.equal(event.data.storyId, "story-claude")
-            assert.equal(event.data.success, true)
-            assert.equal(event.data.attempts, 1)
-            assert.equal(event.data.error, null)
+            assert.equal(event.payload.storyId, "story-claude")
+            assert.equal(event.payload.success, true)
+            assert.equal(event.payload.attempts, 1)
+            assert.equal(event.payload.error, null)
             assert.equal(terminalSources.length, 1)
             assert.equal(terminalSources[0]?.agentId, "story-claude")
         })
@@ -140,10 +139,10 @@ process.exit(0)
             assert.equal(outcome.finalSummary?.lastResult?.isError, true)
             assert.equal(events.length, 1)
             assert.ok(event)
-            assert.equal(event.data.storyId, "story-claude-retry")
-            assert.equal(event.data.success, false)
-            assert.equal(event.data.attempts, 2)
-            assert.equal(event.data.error, "claude reported isError on result:error")
+            assert.equal(event.payload.storyId, "story-claude-retry")
+            assert.equal(event.payload.success, false)
+            assert.equal(event.payload.attempts, 2)
+            assert.equal(event.payload.error, "claude reported isError on result:error")
         })
     })
 
@@ -194,9 +193,9 @@ process.exit(0)
             })
             assert.equal(outcome.error, expected)
             assert.ok(event)
-            assert.equal(event.data.error, expected)
-            assert.equal(event.data.attempts, 1)
-            assert.deepEqual(event.data.failure, {
+            assert.equal(event.payload.error, expected)
+            assert.equal(event.payload.attempts, 1)
+            assert.deepEqual(event.payload.failure, {
                 kind: "provider_capacity",
                 code: "session_limit",
             })
@@ -254,7 +253,7 @@ process.exit(0)
             assert.equal(outcome.attempts, 1)
             assert.equal(outcome.failure?.kind, "provider_capacity")
             assert.equal(outcome.failure?.code, "session_limit")
-            assert.equal(event?.data.failure?.code, "session_limit")
+            assert.equal(event?.payload.failure?.code, "session_limit")
         })
     })
 
@@ -639,7 +638,7 @@ process.exit(0)
                         (entry) => entry.event === "spawn",
                     ),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source(agent.id),
                 AgentResult.create({
                     agentId: agent.id,
@@ -698,7 +697,7 @@ process.exit(0)
                 const firstTerminalId = criticInput(first)?.terminalId
                 assert.ok(firstTerminalId)
 
-                env.deliverSemanticEvent(
+                env.publish(
                     reviewAuthority,
                     Critique.create({
                         agentId: "story-reviewed",
@@ -710,7 +709,7 @@ process.exit(0)
                         modelUsed: "test-critic",
                     }),
                 )
-                env.deliverSemanticEvent(
+                env.publish(
                     reviewAuthority,
                     AgentTargetedMessage.create({
                         recipientId: "story-reviewed",
@@ -724,7 +723,7 @@ process.exit(0)
                 const secondTerminalId = criticInput(second)?.terminalId
                 assert.ok(secondTerminalId)
                 assert.notEqual(secondTerminalId, firstTerminalId)
-                assert.equal(second.data.sessionId, first.data.sessionId)
+                assert.equal(second.payload.sessionId, first.payload.sessionId)
 
                 const inputsBeforePass = readJsonLines(fake.stdinPath)
                 assert.equal(inputsBeforePass.length, 2)
@@ -753,7 +752,7 @@ process.exit(0)
                     false,
                 )
 
-                env.deliverSemanticEvent(
+                env.publish(
                     reviewAuthority,
                     Critique.create({
                         agentId: "story-reviewed",
@@ -830,7 +829,7 @@ process.exit(0)
                 outcome.error ?? "",
                 /authoritative quality review timed out for terminal .+ after 40ms/,
             )
-            assert.deepEqual(storyResult?.data.failure, {
+            assert.deepEqual(storyResult?.payload.failure, {
                 kind: "infrastructure",
                 code: "review_timeout",
             })
@@ -887,7 +886,7 @@ process.exit(0)
 
             // A verdict that arrives after execution handed the candidate to
             // the Gate cannot reopen the finished worker or trigger repair.
-            env.deliverSemanticEvent(
+            env.publish(
                 reviewAuthority,
                 Critique.create({
                     agentId: agent.id,
@@ -975,7 +974,7 @@ process.exit(0)
             const [terminal] = await waitForAgentResults(env, 1, SPAWNED_FIXTURE_DEADLINE_MS)
             const terminalId = criticInput(terminal)?.terminalId
             assert.ok(terminalId)
-            env.deliverSemanticEvent(
+            env.publish(
                 reviewAuthority,
                 Critique.create({
                     agentId: agent.id,
@@ -1031,7 +1030,7 @@ process.exit(0)
             const [terminal] = await waitForAgentResults(env, 1, SPAWNED_FIXTURE_DEADLINE_MS)
             const terminalId = criticInput(terminal)?.terminalId
             assert.ok(terminalId)
-            env.deliverSemanticEvent(
+            env.publish(
                 reviewAuthority,
                 Critique.create({
                     agentId: agent.id,
@@ -1145,10 +1144,10 @@ async function waitForAgentResults(
     return new Promise<Results>((resolve, reject) => {
         let settled = false
         let timer: ReturnType<typeof setTimeout> | undefined
-        const waiter = new (class extends BaseObserver {
+        const waiter = new (class extends BusMember {
             override onExternalEvent(
-                _source: Participant,
-                event: SemanticEvent<unknown>,
+                _source: BusMember,
+                event: SemanticEvent<string, unknown>,
             ): void {
                 if (AgentResult.is(event)) settleIfReady()
             }

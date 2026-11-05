@@ -3,9 +3,9 @@ import assert from "node:assert/strict"
 
 import {
     FunctionCallItem,
-    FunctionCallOutputItem,
-    type Participant,
+    FunctionCallOutputItem
 } from "../../src/runtime/mozaik.js"
+import type { BusMember } from "../../src/runtime/coordination.js"
 import type { Finding, MemoryStore } from "@baro/memory"
 
 import { MemoryLibrarian } from "../../src/execution/memory-librarian.js"
@@ -287,7 +287,7 @@ describe("MemoryLibrarian", () => {
         )
         await librarian.onExternalEvent(broker, oldGrant)
         const state = librarian as unknown as {
-            pending: Map<Participant, Map<string, unknown>>
+            pending: Map<BusMember, Map<string, unknown>>
         }
         assert.equal(state.pending.get(oldWorker)?.has("unfinished"), true)
 
@@ -450,7 +450,7 @@ describe("MemoryLibrarian", () => {
             }),
         )
         const state = librarian as unknown as {
-            pending: Map<Participant, Map<string, unknown>>
+            pending: Map<BusMember, Map<string, unknown>>
         }
         assert.equal(state.pending.get(worker)?.has("unfinished") ?? false, false)
         await librarian.onExternalFunctionCall(

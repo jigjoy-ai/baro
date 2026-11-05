@@ -60,31 +60,31 @@ describe("GoalGuardian", () => {
             leaseId: "lease-1",
             mode: "worktree",
         })
-        env.deliverSemanticEvent(source("fake-repository"), merged)
-        env.deliverSemanticEvent(repository, merged)
-        env.deliverSemanticEvent(
+        env.publish(source("fake-repository"), merged)
+        env.publish(repository, merged)
+        env.publish(
             source("fake-gate"),
             passedQuality(runId, "S1", "lease-1"),
         )
 
-        env.deliverSemanticEvent(
+        env.publish(
             source("fake-board"),
             completionRequest(runId, "ignored", contract.contractId),
         )
         assert.equal(env.events.filter(GoalCompletionAttested.is).length, 0)
 
-        env.deliverSemanticEvent(
+        env.publish(
             board,
             completionRequest(runId, "check-without-quality", contract.contractId),
         )
         const incomplete = env.events.filter(GoalCompletionAttested.is).at(-1)
-        assert.equal(incomplete?.data.status, "incomplete")
+        assert.equal(incomplete?.payload.status, "incomplete")
         assert.deepEqual(
-            incomplete?.data.openInvariantIds,
+            incomplete?.payload.openInvariantIds,
             contract.invariants.map(({ id }) => id),
         )
 
-        env.deliverSemanticEvent(
+        env.publish(
             acceptanceGate,
             passedQuality(runId, "S1", "lease-1"),
         )
@@ -93,22 +93,22 @@ describe("GoalGuardian", () => {
             "check-satisfied",
             contract.contractId,
         )
-        env.deliverSemanticEvent(board, finalRequest)
+        env.publish(board, finalRequest)
         const satisfied = env.events.filter(GoalCompletionAttested.is).at(-1)
-        assert.equal(satisfied?.data.status, "satisfied")
+        assert.equal(satisfied?.payload.status, "satisfied")
         assert.deepEqual(
-            satisfied?.data.satisfiedInvariantIds,
+            satisfied?.payload.satisfiedInvariantIds,
             contract.invariants.map(({ id }) => id),
         )
-        assert.equal(Object.isFrozen(satisfied?.data), true)
-        assert.equal(Object.isFrozen(satisfied?.data.invariants), true)
+        assert.equal(Object.isFrozen(satisfied?.payload), true)
+        assert.equal(Object.isFrozen(satisfied?.payload.invariants), true)
 
-        env.deliverSemanticEvent(board, finalRequest)
+        env.publish(board, finalRequest)
         assert.equal(
             env.events.filter(
                 (event) =>
                     GoalCompletionAttested.is(event) &&
-                    event.data.checkId === "check-satisfied",
+                    event.payload.checkId === "check-satisfied",
             ).length,
             2,
             "an exact authority replay receives cached attestation",
@@ -129,7 +129,7 @@ describe("GoalGuardian", () => {
         guardian.setRequestAuthority(board)
         guardian.setIntegrationAuthority(repository)
         const env = joinWithCapture(guardian)
-        env.deliverSemanticEvent(
+        env.publish(
             repository,
             StoryMerged.create({
                 runId,
@@ -138,7 +138,7 @@ describe("GoalGuardian", () => {
                 mode: "shared-tree",
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             source("worker-S1"),
             GoalInvariantChallengeRaised.create({
                 runId,
@@ -150,13 +150,13 @@ describe("GoalGuardian", () => {
             }),
         )
 
-        env.deliverSemanticEvent(
+        env.publish(
             board,
             completionRequest(runId, "check-open", contract.contractId),
         )
         let attestation = env.events.filter(GoalCompletionAttested.is).at(-1)
-        assert.equal(attestation?.data.status, "incomplete")
-        assert.deepEqual(attestation?.data.openInvariantIds, [invariantIds[0]])
+        assert.equal(attestation?.payload.status, "incomplete")
+        assert.deepEqual(attestation?.payload.openInvariantIds, [invariantIds[0]])
 
         const resolved = GoalInvariantChallengeResolved.create({
             runId,
@@ -164,21 +164,21 @@ describe("GoalGuardian", () => {
             resolution: "resolved",
             reason: "a new ordering test proves cleanup",
         })
-        env.deliverSemanticEvent(source("fake-board"), resolved)
-        env.deliverSemanticEvent(
+        env.publish(source("fake-board"), resolved)
+        env.publish(
             board,
             completionRequest(runId, "check-still-open", contract.contractId),
         )
         attestation = env.events.filter(GoalCompletionAttested.is).at(-1)
-        assert.deepEqual(attestation?.data.openInvariantIds, [invariantIds[0]])
+        assert.deepEqual(attestation?.payload.openInvariantIds, [invariantIds[0]])
 
-        env.deliverSemanticEvent(board, resolved)
-        env.deliverSemanticEvent(
+        env.publish(board, resolved)
+        env.publish(
             board,
             completionRequest(runId, "check-resolved", contract.contractId),
         )
         attestation = env.events.filter(GoalCompletionAttested.is).at(-1)
-        assert.equal(attestation?.data.status, "satisfied")
+        assert.equal(attestation?.payload.status, "satisfied")
     })
 
     it("keeps no-envelope runs explicitly disabled instead of inventing a contract", () => {
@@ -189,22 +189,22 @@ describe("GoalGuardian", () => {
         const env = joinWithCapture(guardian)
 
         assert.equal(guardian.contract, null)
-        env.deliverSemanticEvent(
+        env.publish(
             board,
             completionRequest(runId, "legacy-check", null),
         )
         assert.equal(
-            env.events.find(GoalCompletionAttested.is)?.data.status,
+            env.events.find(GoalCompletionAttested.is)?.payload.status,
             "disabled",
         )
 
-        env.deliverSemanticEvent(
+        env.publish(
             board,
             completionRequest(runId, "forged-contract", "goal:invented"),
         )
         const forged = env.events.filter(GoalCompletionAttested.is).at(-1)
-        assert.equal(forged?.data.status, "incomplete")
-        assert.equal(forged?.data.contractId, null)
+        assert.equal(forged?.payload.status, "incomplete")
+        assert.equal(forged?.payload.contractId, null)
     })
 
     it("bounds an essay-length challenge reason in the acceptance criterion", () => {
@@ -224,7 +224,7 @@ describe("GoalGuardian", () => {
 
         const reason =
             "The mandated test script cannot execute on this runtime. ".repeat(60).trim()
-        env.deliverSemanticEvent(
+        env.publish(
             source("S1"),
             GoalInvariantChallengeRaised.create({
                 runId,
@@ -238,13 +238,13 @@ describe("GoalGuardian", () => {
 
         const proposal = env.events.find(GoalInvariantRemediationProposed.is)
         assert.ok(proposal)
-        const criterion = proposal.data.story.acceptance.find((entry) =>
+        const criterion = proposal.payload.story.acceptance.find((entry) =>
             entry.startsWith("Challenge challenge-essay"),
         )
         assert.ok(criterion)
         assert.ok(criterion.length <= 1_400, `criterion is ${criterion.length} chars`)
         assert.match(criterion, /truncated; the full reasoning is in the story description/u)
-        assert.ok(proposal.data.story.description.includes(reason))
+        assert.ok(proposal.payload.story.description.includes(reason))
     })
 
     it("turns a challenge into durable autonomous remediation and restores its evidence", () => {
@@ -267,11 +267,11 @@ describe("GoalGuardian", () => {
         guardian.setQualityAuthority(acceptanceGate)
         const env = joinWithCapture(guardian)
 
-        env.deliverSemanticEvent(
+        env.publish(
             acceptanceGate,
             passedQuality(runId, "S1", "lease-S1"),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             repository,
             StoryMerged.create({
                 runId,
@@ -280,7 +280,7 @@ describe("GoalGuardian", () => {
                 mode: "worktree",
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             source("S1"),
             GoalInvariantChallengeRaised.create({
                 runId,
@@ -294,48 +294,48 @@ describe("GoalGuardian", () => {
 
         const proposal = env.events.find(GoalInvariantRemediationProposed.is)
         assert.ok(proposal)
-        assert.deepEqual(proposal.data.story.goalInvariantIds, ["G-A1"])
-        assert.equal(proposal.data.story.model, "heavy")
-        assert.equal(proposal.data.story.title, "Resolve goal challenge G-A1")
+        assert.deepEqual(proposal.payload.story.goalInvariantIds, ["G-A1"])
+        assert.equal(proposal.payload.story.model, "heavy")
+        assert.equal(proposal.payload.story.title, "Resolve goal challenge G-A1")
         assert.equal(
-            proposal.data.reason,
+            proposal.payload.reason,
             "the cancellation race remains possible under retry",
         )
         assert.match(
-            proposal.data.story.description,
+            proposal.payload.story.description,
             /Autonomously investigate and resolve challenge challenge-remediate against G-A1\./,
         )
-        env.deliverSemanticEvent(
+        env.publish(
             board,
             GoalInvariantRemediationAdmitted.create({
                 runId,
                 contractId: contract.contractId,
-                challengeId: proposal.data.challengeId,
-                invariantId: proposal.data.invariantId,
-                proposalId: proposal.data.proposalId,
-                storyId: proposal.data.story.id,
+                challengeId: proposal.payload.challengeId,
+                invariantId: proposal.payload.invariantId,
+                proposalId: proposal.payload.proposalId,
+                storyId: proposal.payload.story.id,
                 graphVersion: 2,
                 disposition: "applied",
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             board,
             GoalStoryInvariantMapped.create({
                 runId,
                 mappingId: "goal-map-remediation",
-                storyId: proposal.data.story.id,
+                storyId: proposal.payload.story.id,
                 invariantIds: ["G-A1"],
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             acceptanceGate,
-            passedQuality(runId, proposal.data.story.id, "lease-remediation"),
+            passedQuality(runId, proposal.payload.story.id, "lease-remediation"),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             repository,
             StoryMerged.create({
                 runId,
-                storyId: proposal.data.story.id,
+                storyId: proposal.payload.story.id,
                 leaseId: "lease-remediation",
                 mode: "worktree",
             }),
@@ -344,25 +344,25 @@ describe("GoalGuardian", () => {
         const resolved = env.events
             .filter(GoalInvariantChallengeResolved.is)
             .at(-1)
-        assert.equal(resolved?.data.challengeId, "challenge-remediate")
-        assert.equal(resolved?.data.resolution, "resolved")
-        env.deliverSemanticEvent(
+        assert.equal(resolved?.payload.challengeId, "challenge-remediate")
+        assert.equal(resolved?.payload.resolution, "resolved")
+        env.publish(
             board,
             completionRequest(
                 runId,
                 "check-remediated",
                 contract.contractId,
-                ["S1", proposal.data.story.id],
+                ["S1", proposal.payload.story.id],
             ),
         )
         assert.equal(
-            env.events.filter(GoalCompletionAttested.is).at(-1)?.data.status,
+            env.events.filter(GoalCompletionAttested.is).at(-1)?.payload.status,
             "satisfied",
         )
 
         const projection = env.events
             .filter(GoalLedgerProjectionUpdated.is)
-            .at(-1)?.data.projection
+            .at(-1)?.payload.projection
         assert.ok(projection)
         assert.equal(projection.challenges[0]?.remediation?.status, "admitted")
         assert.equal(
@@ -380,17 +380,17 @@ describe("GoalGuardian", () => {
         })
         resumed.setRequestAuthority(resumedBoard)
         const resumedEnv = joinWithCapture(resumed)
-        resumedEnv.deliverSemanticEvent(
+        resumedEnv.publish(
             resumedBoard,
             completionRequest(
                 resumedRunId,
                 "check-resumed",
                 contract.contractId,
-                ["S1", proposal.data.story.id],
+                ["S1", proposal.payload.story.id],
             ),
         )
         assert.equal(
-            resumedEnv.events.find(GoalCompletionAttested.is)?.data.status,
+            resumedEnv.events.find(GoalCompletionAttested.is)?.payload.status,
             "satisfied",
         )
     })
@@ -410,9 +410,9 @@ describe("GoalGuardian", () => {
             reason: "must come through the lease-validating bridge",
         })
 
-        env.deliverSemanticEvent(source("S1"), challenge)
+        env.publish(source("S1"), challenge)
         assert.equal(env.events.some(GoalInvariantRemediationProposed.is), false)
-        env.deliverSemanticEvent(bridge, challenge)
+        env.publish(bridge, challenge)
         assert.equal(
             env.events.filter(GoalInvariantRemediationProposed.is).length,
             1,
@@ -478,11 +478,11 @@ describe("GoalGuardian", () => {
         })
         resumed.setRequestAuthority(board)
         const env = joinWithCapture(resumed)
-        env.deliverSemanticEvent(
+        env.publish(
             board,
             RunPreparationRequested.create({ runId }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             board,
             completionRequest(
                 runId,
@@ -494,21 +494,21 @@ describe("GoalGuardian", () => {
 
         const retry = env.events.find(GoalInvariantRemediationProposed.is)
         assert.ok(retry)
-        assert.equal(retry.data.challengeId, "challenge-crash-after-merge")
-        assert.notEqual(retry.data.proposalId, "proposal-R1")
-        assert.notEqual(retry.data.story.id, "R1")
+        assert.equal(retry.payload.challengeId, "challenge-crash-after-merge")
+        assert.notEqual(retry.payload.proposalId, "proposal-R1")
+        assert.notEqual(retry.payload.story.id, "R1")
         assert.equal(
-            env.events.filter(GoalCompletionAttested.is).at(-1)?.data.status,
+            env.events.filter(GoalCompletionAttested.is).at(-1)?.payload.status,
             "incomplete",
             "an old R1 critique cannot prove which restored R1 attempt passed",
         )
         const durableProjection = env.events
             .filter(GoalLedgerProjectionUpdated.is)
-            .at(-1)?.data.projection
+            .at(-1)?.payload.projection
         assert.equal(durableProjection?.challenges[0]?.resolution, undefined)
         assert.equal(
             durableProjection?.challenges[0]?.remediation?.proposalId,
-            retry.data.proposalId,
+            retry.payload.proposalId,
         )
         assert.equal(
             durableProjection?.challenges[0]?.remediation?.status,
@@ -569,7 +569,7 @@ describe("GoalGuardian", () => {
         })
         resumed.setRequestAuthority(board)
         const env = joinWithCapture(resumed)
-        env.deliverSemanticEvent(
+        env.publish(
             board,
             RunPreparationRequested.create({ runId }),
         )
@@ -577,17 +577,17 @@ describe("GoalGuardian", () => {
         const retry = env.events.find(GoalInvariantRemediationProposed.is)
         assert.ok(retry)
         assert.equal(
-            retry.data.challengeId,
+            retry.payload.challengeId,
             "challenge-persisted-before-admission",
         )
-        assert.notEqual(retry.data.proposalId, "proposal-persisted")
-        assert.notEqual(retry.data.story.id, "R-PERSISTED")
+        assert.notEqual(retry.payload.proposalId, "proposal-persisted")
+        assert.notEqual(retry.payload.story.id, "R-PERSISTED")
         const projection = env.events
             .filter(GoalLedgerProjectionUpdated.is)
-            .at(-1)?.data.projection
+            .at(-1)?.payload.projection
         assert.equal(
             projection?.challenges[0]?.remediation?.proposalId,
-            retry.data.proposalId,
+            retry.payload.proposalId,
         )
         assert.deepEqual(projection?.protocolIssues, [])
     })
@@ -604,13 +604,13 @@ describe("GoalGuardian", () => {
         guardian.setRequestAuthority(board)
         const env = joinWithCapture(guardian)
 
-        env.deliverSemanticEvent(
+        env.publish(
             board,
             RunPreparationRequested.create({ runId }),
         )
         assert.equal(env.events.some(GoalInvariantRemediationProposed.is), false)
 
-        env.deliverSemanticEvent(
+        env.publish(
             source("spoofed-board"),
             PlanningStreamClosed.create({
                 runId,
@@ -619,7 +619,7 @@ describe("GoalGuardian", () => {
                 graphVersion: 1,
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             board,
             PlanningStreamClosed.create({
                 runId,
@@ -631,7 +631,7 @@ describe("GoalGuardian", () => {
         )
         assert.equal(env.events.some(GoalInvariantRemediationProposed.is), false)
 
-        env.deliverSemanticEvent(
+        env.publish(
             board,
             PlanningStreamClosed.create({
                 runId,
@@ -642,11 +642,11 @@ describe("GoalGuardian", () => {
         )
         const proposals = env.events.filter(GoalInvariantRemediationProposed.is)
         assert.deepEqual(
-            proposals.map(({ data }) => data.invariantId).sort(),
+            proposals.map(({ payload: data }) => data.invariantId).sort(),
             contract.invariants.map(({ id }) => id).sort(),
         )
         assert.equal(
-            proposals.every(({ data }) =>
+            proposals.every(({ payload: data }) =>
                 data.story.goalInvariantIds?.length === 1 &&
                 data.story.goalInvariantIds[0] === data.invariantId
             ),
@@ -688,17 +688,17 @@ describe("GoalGuardian", () => {
         guardian.setQualityAuthority(acceptanceGate)
         const env = joinWithCapture(guardian)
 
-        env.deliverSemanticEvent(
+        env.publish(
             board,
             RunPreparationRequested.create({ runId }),
         )
         const proposals = env.events.filter(GoalInvariantRemediationProposed.is)
         assert.equal(proposals.length, 1)
         const proposal = proposals[0]!
-        assert.match(proposal.data.challengeId, /^revalidation-/u)
+        assert.match(proposal.payload.challengeId, /^revalidation-/u)
         const requestedProjection = env.events
             .filter(GoalLedgerProjectionUpdated.is)
-            .at(-1)?.data.projection
+            .at(-1)?.payload.projection
         assert.deepEqual(
             requestedProjection?.integrations.map(({ storyId }) => storyId),
             ["S1"],
@@ -710,53 +710,53 @@ describe("GoalGuardian", () => {
             [{ storyId: "S1" }],
         )
 
-        env.deliverSemanticEvent(
+        env.publish(
             board,
             GoalInvariantRemediationAdmitted.create({
                 runId,
                 contractId: contract.contractId,
-                challengeId: proposal.data.challengeId,
-                invariantId: proposal.data.invariantId,
-                proposalId: proposal.data.proposalId,
-                storyId: proposal.data.story.id,
+                challengeId: proposal.payload.challengeId,
+                invariantId: proposal.payload.invariantId,
+                proposalId: proposal.payload.proposalId,
+                storyId: proposal.payload.story.id,
                 graphVersion: 2,
                 disposition: "applied",
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             board,
             GoalStoryInvariantMapped.create({
                 runId,
                 mappingId: "mapping-revalidation",
-                storyId: proposal.data.story.id,
-                invariantIds: [proposal.data.invariantId],
+                storyId: proposal.payload.story.id,
+                invariantIds: [proposal.payload.invariantId],
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             repository,
             StoryMerged.create({
                 runId,
-                storyId: proposal.data.story.id,
+                storyId: proposal.payload.story.id,
                 leaseId: "lease-remediation",
                 mode: "worktree",
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             acceptanceGate,
             passedQuality(
                 runId,
-                proposal.data.story.id,
+                proposal.payload.story.id,
                 "lease-remediation",
             ),
         )
         assert.equal(
-            env.events.filter(GoalInvariantChallengeResolved.is).at(-1)?.data
+            env.events.filter(GoalInvariantChallengeResolved.is).at(-1)?.payload
                 .challengeId,
-            proposal.data.challengeId,
+            proposal.payload.challengeId,
         )
 
-        const storyIds = ["S1", proposal.data.story.id]
-        env.deliverSemanticEvent(
+        const storyIds = ["S1", proposal.payload.story.id]
+        env.publish(
             board,
             completionRequest(
                 runId,
@@ -766,19 +766,19 @@ describe("GoalGuardian", () => {
             ),
         )
         assert.equal(
-            env.events.filter(GoalCompletionAttested.is).at(-1)?.data.status,
+            env.events.filter(GoalCompletionAttested.is).at(-1)?.payload.status,
             "satisfied",
         )
         const completedProjection = env.events
             .filter(GoalLedgerProjectionUpdated.is)
-            .at(-1)?.data.projection
+            .at(-1)?.payload.projection
         assert.deepEqual(
             completedProjection?.qualities.map(({ storyId }) => storyId),
-            [proposal.data.story.id],
+            [proposal.payload.story.id],
             "the remediation does not forge quality evidence for S1",
         )
 
-        env.deliverSemanticEvent(
+        env.publish(
             repository,
             StoryMerged.create({
                 runId,
@@ -787,7 +787,7 @@ describe("GoalGuardian", () => {
                 mode: "worktree",
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             board,
             completionRequest(
                 runId,
@@ -797,7 +797,7 @@ describe("GoalGuardian", () => {
             ),
         )
         assert.equal(
-            env.events.filter(GoalCompletionAttested.is).at(-1)?.data.status,
+            env.events.filter(GoalCompletionAttested.is).at(-1)?.payload.status,
             "incomplete",
             "the remediation cannot cover a later, unreviewed S1 lease",
         )
@@ -818,7 +818,7 @@ describe("GoalGuardian", () => {
         })
         first.setRequestAuthority(firstBoard)
         const firstEnv = joinWithCapture(first)
-        firstEnv.deliverSemanticEvent(
+        firstEnv.publish(
             source("worker-S1"),
             GoalInvariantChallengeRaised.create({
                 runId: firstRunId,
@@ -830,12 +830,12 @@ describe("GoalGuardian", () => {
             }),
         )
         const original = firstEnv.events.find(GoalInvariantRemediationProposed.is)!
-        firstEnv.deliverSemanticEvent(
+        firstEnv.publish(
             firstBoard,
             RuntimeReplanApplied.create({
                 runId: firstRunId,
-                proposalId: original.data.proposalId,
-                sourceStoryId: `goal:${original.data.challengeId}`,
+                proposalId: original.payload.proposalId,
+                sourceStoryId: `goal:${original.payload.challengeId}`,
                 leaseId: `${firstRunId}:goal-guardian`,
                 generation: 0,
                 baseGraphVersion: 1,
@@ -844,28 +844,28 @@ describe("GoalGuardian", () => {
                 currentGraphVersion: 2,
                 reason: "admit remediation",
                 mutation: {
-                    addedStories: [original.data.story],
+                    addedStories: [original.payload.story],
                     removedStoryIds: [],
                     modifiedDeps: {},
                 },
             }),
         )
-        firstEnv.deliverSemanticEvent(
+        firstEnv.publish(
             firstBoard,
             GoalInvariantRemediationAdmitted.create({
                 runId: firstRunId,
                 contractId: contract.contractId,
-                challengeId: original.data.challengeId,
-                invariantId: original.data.invariantId,
-                proposalId: original.data.proposalId,
-                storyId: original.data.story.id,
+                challengeId: original.payload.challengeId,
+                invariantId: original.payload.invariantId,
+                proposalId: original.payload.proposalId,
+                storyId: original.payload.story.id,
                 graphVersion: 2,
                 disposition: "applied",
             }),
         )
         const beforeCrash = firstEnv.events
             .filter(GoalLedgerProjectionUpdated.is)
-            .at(-1)?.data.projection
+            .at(-1)?.payload.projection
         assert.equal(
             beforeCrash?.challenges[0]?.remediation?.status,
             "admitted",
@@ -881,7 +881,7 @@ describe("GoalGuardian", () => {
         })
         resumed.setRequestAuthority(resumedBoard)
         const resumedEnv = joinWithCapture(resumed)
-        resumedEnv.deliverSemanticEvent(
+        resumedEnv.publish(
             source("worker-S1"),
             GoalInvariantChallengeRaised.create({
                 runId: resumedRunId,
@@ -896,7 +896,7 @@ describe("GoalGuardian", () => {
             GoalInvariantRemediationProposed.is,
         )
         assert.ok(preStartRetry)
-        resumedEnv.deliverSemanticEvent(
+        resumedEnv.publish(
             resumedBoard,
             RunPreparationRequested.create({ runId: resumedRunId }),
         )
@@ -905,14 +905,14 @@ describe("GoalGuardian", () => {
         )
         const retry = retries.at(-1)
         assert.ok(retry)
-        assert.notEqual(retry.data.proposalId, original.data.proposalId)
-        assert.notEqual(retry.data.story.id, original.data.story.id)
-        assert.equal(retry.data.challengeId, original.data.challengeId)
+        assert.notEqual(retry.payload.proposalId, original.payload.proposalId)
+        assert.notEqual(retry.payload.story.id, original.payload.story.id)
+        assert.equal(retry.payload.challengeId, original.payload.challengeId)
         assert.equal(retries.length, 2)
-        assert.equal(retry.data.proposalId, preStartRetry.data.proposalId)
+        assert.equal(retry.payload.proposalId, preStartRetry.payload.proposalId)
         const replayProjection = resumedEnv.events
             .filter(GoalLedgerProjectionUpdated.is)
-            .at(-1)?.data.projection
+            .at(-1)?.payload.projection
         assert.deepEqual(replayProjection?.protocolIssues, [])
     })
 
@@ -932,12 +932,12 @@ describe("GoalGuardian", () => {
         })
         compatible.setRequestAuthority(board)
         const compatibleEnv = joinWithCapture(compatible)
-        compatibleEnv.deliverSemanticEvent(
+        compatibleEnv.publish(
             board,
             completionRequest(runId, "resume-compatible", contract.contractId),
         )
         assert.equal(
-            compatibleEnv.events.find(GoalCompletionAttested.is)?.data.status,
+            compatibleEnv.events.find(GoalCompletionAttested.is)?.payload.status,
             "satisfied",
         )
 
@@ -950,12 +950,12 @@ describe("GoalGuardian", () => {
         })
         strict.setRequestAuthority(board)
         const strictEnv = joinWithCapture(strict)
-        strictEnv.deliverSemanticEvent(
+        strictEnv.publish(
             board,
             completionRequest(runId, "resume-strict", contract.contractId),
         )
         assert.equal(
-            strictEnv.events.find(GoalCompletionAttested.is)?.data.status,
+            strictEnv.events.find(GoalCompletionAttested.is)?.payload.status,
             "incomplete",
         )
     })
@@ -967,17 +967,17 @@ describe("GoalGuardian", () => {
         guardian.setRequestAuthority(board)
         const env = joinWithCapture(guardian)
 
-        env.deliverSemanticEvent(
+        env.publish(
             board,
             completionRequest(runId, "mismatch", "goal:stale"),
         )
         const attestation = env.events.find(GoalCompletionAttested.is)
-        assert.equal(attestation?.data.status, "incomplete")
+        assert.equal(attestation?.payload.status, "incomplete")
         assert.equal(
-            attestation?.data.openInvariantIds.length,
+            attestation?.payload.openInvariantIds.length,
             guardian.contract?.invariants.length,
         )
-        assert.match(attestation?.data.reason ?? "", /correlation mismatch/)
+        assert.match(attestation?.payload.reason ?? "", /correlation mismatch/)
     })
 })
 

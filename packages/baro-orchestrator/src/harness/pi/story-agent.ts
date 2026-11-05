@@ -44,16 +44,16 @@ export class PiStoryAgent extends OneShotStoryAgent<PiRunSummary> {
             failureSignalFrom: (event) => {
                 if (
                     PiUnknownEvent.is(event) &&
-                    isCliFailureSignal(event.data.raw, event.data.piType)
+                    isCliFailureSignal(event.payload.raw, event.payload.piType)
                 ) {
-                    return event.data.raw
+                    return event.payload.raw
                 }
                 if (
                     PiSystem.is(event) &&
-                    event.data.subtype === "agent_end" &&
-                    isCliFailureSignal(event.data.raw, event.data.subtype)
+                    event.payload.subtype === "agent_end" &&
+                    isCliFailureSignal(event.payload.raw, event.payload.subtype)
                 ) {
-                    return event.data.raw
+                    return event.payload.raw
                 }
                 return undefined
             },

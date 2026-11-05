@@ -5,7 +5,7 @@
  * run-summary shape — the native lanes adopted it as the common wire form.
  */
 
-import type { Participant } from "../runtime/mozaik.js"
+import type { BusMember } from "../runtime/coordination.js"
 
 import type { ClaudeRunSummary } from "./claude/cli-participant.js"
 import type {
@@ -56,9 +56,9 @@ export interface StorySpec {
     /** Await an exact Critic verdict before completing each candidate turn. */
     requiresQualityReview?: boolean
     /** Object-identity authority allowed to review this worker's turns. */
-    turnReviewAuthority?: Participant
+    turnReviewAuthority?: BusMember
     /** Exact Bridge allowed to deliver a collective message for this lease. */
-    targetedMessageAuthority?: Participant
+    targetedMessageAuthority?: BusMember
     /** Bound for one terminal-turn review. Default: 240 seconds. */
     turnReviewTimeoutMs?: number
     /** Collective-only execution handoff. An inconclusive review closes the

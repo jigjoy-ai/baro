@@ -10,7 +10,8 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { AgenticEnvironment, FunctionCallItem, ModelMessageItem } from "../../runtime/mozaik.js"
+import { FunctionCallItem, ModelMessageItem } from "../../runtime/mozaik.js"
+import { CoordinationBus } from "../../runtime/coordination.js"
 import {
     knownMetric,
     notApplicableMetric,
@@ -100,7 +101,7 @@ export async function runDevinOneShot(opts: RunDevinOneShotOptions): Promise<str
 
     let summary: DevinRunSummary
     try {
-        participant.start(new AgenticEnvironment(`${label}-one-shot`))
+        participant.start(new CoordinationBus(`${label}-one-shot`))
         summary = await participant.done
     } finally {
         if (timer !== null) clearTimeout(timer)

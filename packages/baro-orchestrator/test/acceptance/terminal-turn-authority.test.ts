@@ -1,7 +1,8 @@
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
-import type { Participant, SemanticEvent } from "../../src/runtime/mozaik.js"
+import type { SemanticEvent } from "../../src/runtime/mozaik.js"
+import type { BusMember } from "../../src/runtime/coordination.js"
 
 import { Critic } from "../../src/harness/claude/critic.js"
 import { CriticCodex } from "../../src/harness/codex/critic.js"
@@ -18,8 +19,8 @@ import { joinWithCapture, source } from "../execution/helpers.js"
 
 interface AuthorityAwareCritic {
     onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): Promise<void>
     idle(): Promise<void>
 }
@@ -77,7 +78,7 @@ describe("terminal-turn consumer authority", () => {
 
             assert.equal(evaluations, 2, backend)
             assert.deepEqual(
-                env.events.filter(Critique.is).map((event) => event.data.turn),
+                env.events.filter(Critique.is).map((event) => event.payload.turn),
                 [1, 2],
                 backend,
             )

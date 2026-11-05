@@ -15,7 +15,7 @@ const RED: GateCommandOutcome[] = [
 function harness(gates: () => Promise<readonly GateCommandOutcome[]>) {
     const delivered: Array<{ recipientId: string; text: string }> = []
     const environment = {
-        deliverSemanticEvent(_source: unknown, event: { data: unknown }) {
+        publish(_source: unknown, event: { data: unknown }) {
             delivered.push(event.data as { recipientId: string; text: string })
         },
     }
@@ -29,7 +29,7 @@ function harness(gates: () => Promise<readonly GateCommandOutcome[]>) {
             return await gates()
         },
     })
-    ;(runner as unknown as { getEnvironments(): unknown[] }).getEnvironments = () => [environment]
+    ;(runner as unknown as { getBuses(): unknown[] }).getBuses = () => [environment]
     const write = (agentId: string) =>
         runner.onExternalFunctionCall(
             { agentId } as never,
@@ -47,7 +47,7 @@ function harness(gates: () => Promise<readonly GateCommandOutcome[]>) {
 function harnessWithPlan(plan: VerifyPlan) {
     const delivered: Array<{ recipientId: string; text: string }> = []
     const environment = {
-        deliverSemanticEvent(_source: unknown, event: { data: unknown }) {
+        publish(_source: unknown, event: { data: unknown }) {
             delivered.push(event.data as { recipientId: string; text: string })
         },
     }
@@ -57,7 +57,7 @@ function harnessWithPlan(plan: VerifyPlan) {
         settleMs: 5,
         plan,
     })
-    ;(runner as unknown as { getEnvironments(): unknown[] }).getEnvironments = () => [environment]
+    ;(runner as unknown as { getBuses(): unknown[] }).getBuses = () => [environment]
     const write = (agentId: string) =>
         runner.onExternalFunctionCall(
             { agentId } as never,

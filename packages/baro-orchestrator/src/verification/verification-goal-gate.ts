@@ -54,7 +54,7 @@ const WATCHDOG_BUDGETS = {
 type WatchdogName = keyof typeof WATCHDOG_BUDGETS
 
 export interface VerificationGoalGateHost {
-    emit(event: SemanticEvent<unknown>): void
+    emit(event: SemanticEvent<string, unknown>): void
     phase(): string
     /** running → verifying; the host stays the only phase authority. */
     enterVerifying(): void

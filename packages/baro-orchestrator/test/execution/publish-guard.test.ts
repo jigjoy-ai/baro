@@ -123,7 +123,7 @@ describe("OpenAI story lane", () => {
             assert.equal(existsSync(join(dir, "gh-ran")), false)
             const refused = env.events.filter(StoryCommandRefused.is)
             assert.deepEqual(
-                refused.map((e) => e.data),
+                refused.map((e) => e.payload),
                 [
                     {
                         storyId: "story-publish",
@@ -190,7 +190,7 @@ process.stdin.resume()
                 "publish commands are denied in story lanes: gh pr create",
             )
             assert.deepEqual(
-                env.events.filter(StoryCommandRefused.is).map((e) => e.data),
+                env.events.filter(StoryCommandRefused.is).map((e) => e.payload),
                 [
                     {
                         storyId: "story-claude-publish",

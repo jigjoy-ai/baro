@@ -13,7 +13,7 @@ describe("WorkContextProvider", () => {
     it("fails closed before request and collaboration authorities are bound", async () => {
         const provider = new WorkContextProvider("run-unbound", null)
         const env = joinWithCapture(provider)
-        env.deliverSemanticEvent(
+        env.publish(
             source("ambient-bridge"),
             CollaborationNote.create({
                 runId: "run-unbound",
@@ -21,7 +21,7 @@ describe("WorkContextProvider", () => {
                 text: "poison launch context",
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             source("ambient-board"),
             WorkContextRequested.create({
                 runId: "run-unbound",
@@ -38,7 +38,7 @@ describe("WorkContextProvider", () => {
         const bridge = source("bridge")
         provider.setRequestAuthority(board)
         provider.setCollaborationAuthority(bridge)
-        env.deliverSemanticEvent(
+        env.publish(
             board,
             WorkContextRequested.create({
                 runId: "run-unbound",
@@ -52,9 +52,9 @@ describe("WorkContextProvider", () => {
         const result = env.events.find(
             (event) =>
                 WorkContextProvided.is(event) &&
-                event.data.requestId === "bound-request",
+                event.payload.requestId === "bound-request",
         )
-        assert.equal(result?.data.context, null)
+        assert.equal(result?.payload.context, null)
     })
 
     it("accepts context requests only from the bound Board", async () => {
@@ -75,12 +75,12 @@ describe("WorkContextProvider", () => {
             hints: [],
         })
 
-        env.deliverSemanticEvent(source("observer"), request)
+        env.publish(source("observer"), request)
         await provider.idle()
         assert.deepEqual(calls, [])
         assert.equal(env.events.filter(WorkContextProvided.is).length, 0)
 
-        env.deliverSemanticEvent(board, request)
+        env.publish(board, request)
         await provider.idle()
         assert.deepEqual(calls, ["S1"])
         assert.equal(env.events.filter(WorkContextProvided.is).length, 1)
@@ -98,7 +98,7 @@ describe("WorkContextProvider", () => {
         provider.setRequestAuthority(board)
         const env = joinWithCapture(provider)
 
-        env.deliverSemanticEvent(
+        env.publish(
             board,
             WorkContextRequested.create({
                 runId: "run-context",
@@ -111,7 +111,7 @@ describe("WorkContextProvider", () => {
 
         assert.deepEqual(calls, [{ storyId: "S2", hints: ["auth", "token"] }])
         const result = env.events.find(WorkContextProvided.is)
-        assert.deepEqual(result?.data, {
+        assert.deepEqual(result?.payload, {
             runId: "run-context",
             requestId: "context-1",
             storyId: "S2",
@@ -135,11 +135,11 @@ describe("WorkContextProvider", () => {
             text: "Only response.completed carries trustworthy terminal usage.",
         })
         // A forged note with the right run id is rejected by source identity.
-        env.deliverSemanticEvent(source("untrusted"), note)
-        env.deliverSemanticEvent(bridge, note)
+        env.publish(source("untrusted"), note)
+        env.publish(bridge, note)
         // Duplicate delivery must not inflate downstream prompts.
-        env.deliverSemanticEvent(bridge, note)
-        env.deliverSemanticEvent(
+        env.publish(bridge, note)
+        env.publish(
             bridge,
             CollaborationNote.create({
                 runId: "another-run",
@@ -147,7 +147,7 @@ describe("WorkContextProvider", () => {
                 text: "wrong run",
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             board,
             WorkContextRequested.create({
                 runId: "run-notes",
@@ -161,17 +161,17 @@ describe("WorkContextProvider", () => {
         const result = env.events.find(
             (event) =>
                 WorkContextProvided.is(event) &&
-                event.data.requestId === "context-later-wave",
+                event.payload.requestId === "context-later-wave",
         )
-        assert.match(result?.data.context ?? "", /repository context/)
+        assert.match(result?.payload.context ?? "", /repository context/)
         assert.match(
-            result?.data.context ?? "",
+            result?.payload.context ?? "",
             /Shared findings from earlier agents/,
         )
-        assert.match(result?.data.context ?? "", /\[G3\].*response\.completed/)
-        assert.doesNotMatch(result?.data.context ?? "", /wrong run/)
+        assert.match(result?.payload.context ?? "", /\[G3\].*response\.completed/)
+        assert.doesNotMatch(result?.payload.context ?? "", /wrong run/)
         assert.equal(
-            (result?.data.context?.match(/trustworthy terminal usage/g) ?? [])
+            (result?.payload.context?.match(/trustworthy terminal usage/g) ?? [])
                 .length,
             1,
         )
@@ -187,7 +187,7 @@ describe("WorkContextProvider", () => {
         provider.setRequestAuthority(board)
         const env = joinWithCapture(provider)
 
-        env.deliverSemanticEvent(
+        env.publish(
             board,
             WorkContextRequested.create({
                 runId: "run-timeout",
@@ -199,6 +199,6 @@ describe("WorkContextProvider", () => {
         await provider.idle()
 
         const result = env.events.find(WorkContextProvided.is)
-        assert.equal(result?.data.context, null)
+        assert.equal(result?.payload.context, null)
     })
 })

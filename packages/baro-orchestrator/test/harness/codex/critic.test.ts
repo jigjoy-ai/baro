@@ -46,32 +46,32 @@ describe("CriticCodex", () => {
                     env.events.findIndex(Critique.is),
             )
             assert.deepEqual(
-                critiques.map((event) => event.data.turn),
+                critiques.map((event) => event.payload.turn),
                 [1, 2, 3],
             )
             assert.ok(
-                critiques.every((event) => event.data.status === "evaluated"),
+                critiques.every((event) => event.payload.status === "evaluated"),
             )
-            assert.equal(critiques[0]!.data.verdict, "fail")
-            assert.equal(critiques[0]!.data.modelUsed, "fake-codex-model")
-            assert.deepEqual(critiques[0]!.data.violatedCriteria, [
+            assert.equal(critiques[0]!.payload.verdict, "fail")
+            assert.equal(critiques[0]!.payload.modelUsed, "fake-codex-model")
+            assert.deepEqual(critiques[0]!.payload.violatedCriteria, [
                 "must include tests",
             ])
 
-            assert.equal(measurements[0]!.data.runId, "run-critic-codex")
-            assert.equal(measurements[0]!.data.phase, "critic")
-            assert.equal(measurements[0]!.data.storyId, "agent-a")
-            assert.equal(measurements[0]!.data.backend, "codex")
-            assert.equal(measurements[0]!.data.requestedModel, "fake-codex-model")
-            assert.equal(measurements[0]!.data.resolvedModel, "fake-resolved-model")
+            assert.equal(measurements[0]!.payload.runId, "run-critic-codex")
+            assert.equal(measurements[0]!.payload.phase, "critic")
+            assert.equal(measurements[0]!.payload.storyId, "agent-a")
+            assert.equal(measurements[0]!.payload.backend, "codex")
+            assert.equal(measurements[0]!.payload.requestedModel, "fake-codex-model")
+            assert.equal(measurements[0]!.payload.resolvedModel, "fake-resolved-model")
 
             assert.equal(messages.length, 2)
             assert.deepEqual(
-                messages.map((event) => event.data.metadata.emissionIndex),
+                messages.map((event) => event.payload.metadata.emissionIndex),
                 [1, 2],
             )
             assert.ok(
-                messages.every((event) => event.data.recipientId === "agent-a"),
+                messages.every((event) => event.payload.recipientId === "agent-a"),
             )
         })
     })
@@ -96,9 +96,9 @@ describe("CriticCodex", () => {
 
             const critiques = env.events.filter(Critique.is)
             assert.equal(critiques.length, 1)
-            assert.equal(critiques[0]!.data.status, "evaluated")
-            assert.equal(critiques[0]!.data.verdict, "pass")
-            assert.deepEqual(critiques[0]!.data.violatedCriteria, [])
+            assert.equal(critiques[0]!.payload.status, "evaluated")
+            assert.equal(critiques[0]!.payload.verdict, "pass")
+            assert.deepEqual(critiques[0]!.payload.violatedCriteria, [])
             assert.equal(env.events.filter(AgentTargetedMessage.is).length, 0)
             assert.equal(env.events.filter(ModelInvocationMeasured.is).length, 1)
         })
@@ -120,14 +120,14 @@ describe("CriticCodex", () => {
             const measurements = env.events.filter(ModelInvocationMeasured.is)
             assert.equal(critiques.length, 1)
             assert.equal(measurements.length, 1)
-            assert.equal(measurements[0]!.data.status, "failed")
-            assert.equal(critiques[0]!.data.status, "inconclusive")
-            assert.equal(critiques[0]!.data.verdict, "fail")
+            assert.equal(measurements[0]!.payload.status, "failed")
+            assert.equal(critiques[0]!.payload.status, "inconclusive")
+            assert.equal(critiques[0]!.payload.verdict, "fail")
             assert.match(
-                critiques[0]!.data.reasoning,
+                critiques[0]!.payload.reasoning,
                 /CriticCodex LLM call failed: spawn .*missing-codex ENOENT/,
             )
-            assert.deepEqual(critiques[0]!.data.violatedCriteria, [
+            assert.deepEqual(critiques[0]!.payload.violatedCriteria, [
                 "[critic error — could not evaluate]",
             ])
             assert.equal(env.events.filter(AgentTargetedMessage.is).length, 0)
@@ -153,9 +153,9 @@ describe("CriticCodex", () => {
             await critic.idle()
 
             const critique = env.events.filter(Critique.is)[0]!
-            assert.equal(critique.data.status, "inconclusive")
-            assert.equal(critique.data.verdict, "fail")
-            assert.match(critique.data.reasoning, /invalid verdict object/)
+            assert.equal(critique.payload.status, "inconclusive")
+            assert.equal(critique.payload.verdict, "fail")
+            assert.match(critique.payload.reasoning, /invalid verdict object/)
             assert.equal(env.events.filter(AgentTargetedMessage.is).length, 0)
             assert.equal(env.events.filter(ModelInvocationMeasured.is).length, 1)
         })
@@ -173,10 +173,10 @@ describe("CriticCodex", () => {
             await critic.idle()
 
             const critique = env.events.filter(Critique.is)[0]!
-            assert.equal(critique.data.status, "inconclusive")
-            assert.equal(critique.data.verdict, "fail")
-            assert.match(critique.data.reasoning, /could not prepare bounded acceptance evidence/)
-            assert.deepEqual(critique.data.violatedCriteria, [
+            assert.equal(critique.payload.status, "inconclusive")
+            assert.equal(critique.payload.verdict, "fail")
+            assert.match(critique.payload.reasoning, /could not prepare bounded acceptance evidence/)
+            assert.deepEqual(critique.payload.violatedCriteria, [
                 "[critic evidence preparation failed]",
             ])
             assert.equal(env.events.filter(ModelInvocationMeasured.is).length, 0)

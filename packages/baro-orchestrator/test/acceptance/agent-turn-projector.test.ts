@@ -50,7 +50,7 @@ describe("AgentTurnProjector", () => {
 
         const projected = env.events.filter(AgentTurnCompleted.is)
         assert.equal(projected.length, 1)
-        assert.deepEqual(projected[0]?.data, {
+        assert.deepEqual(projected[0]?.payload, {
             agentId: "S1",
             terminalId: "projected:S1:1",
             backend: "codex",
@@ -79,10 +79,10 @@ describe("AgentTurnProjector", () => {
 
         const projected = env.events.filter(AgentTurnCompleted.is)
         assert.equal(projected.length, 1)
-        assert.equal(projected[0]?.data.backend, "codex")
-        assert.equal(projected[0]?.data.isError, true)
-        assert.equal(projected[0]?.data.resultText, "partial answer")
-        assert.equal(projected[0]?.data.canContinue, false)
+        assert.equal(projected[0]?.payload.backend, "codex")
+        assert.equal(projected[0]?.payload.isError, true)
+        assert.equal(projected[0]?.payload.resultText, "partial answer")
+        assert.equal(projected[0]?.payload.canContinue, false)
     })
 
     it("projects OpenCode step_finish and Pi assistant message_end", async () => {
@@ -127,7 +127,7 @@ describe("AgentTurnProjector", () => {
         const projected = env.events.filter(AgentTurnCompleted.is)
         assert.equal(projected.length, 2)
         assert.deepEqual(
-            projected.map((event) => event.data),
+            projected.map((event) => event.payload),
             [
                 {
                     agentId: "OC",
@@ -184,9 +184,9 @@ describe("AgentTurnProjector", () => {
 
         const projected = env.events.filter(AgentTurnCompleted.is)
         assert.equal(projected.length, 2)
-        assert.equal(projected[1]?.data.resultText, "second turn")
-        assert.equal(projected[0]?.data.terminalId, "projected:S1:1")
-        assert.equal(projected[1]?.data.terminalId, "projected:S1:2")
+        assert.equal(projected[1]?.payload.resultText, "second turn")
+        assert.equal(projected[0]?.payload.terminalId, "projected:S1:1")
+        assert.equal(projected[1]?.payload.terminalId, "projected:S1:2")
     })
 
     it("rejects forged native sources without disturbing replay identity", async () => {
@@ -230,8 +230,8 @@ describe("AgentTurnProjector", () => {
 
         let projected = env.events.filter(AgentTurnCompleted.is)
         assert.equal(projected.length, 1)
-        assert.equal(projected[0]?.data.terminalId, "projected:S1:1")
-        assert.equal(projected[0]?.data.resultText, "first real turn")
+        assert.equal(projected[0]?.payload.terminalId, "projected:S1:1")
+        assert.equal(projected[0]?.payload.resultText, "first real turn")
 
         await projector.onExternalEvent(
             nativeCli,
@@ -245,8 +245,8 @@ describe("AgentTurnProjector", () => {
 
         projected = env.events.filter(AgentTurnCompleted.is)
         assert.equal(projected.length, 2)
-        assert.equal(projected[1]?.data.terminalId, "projected:S1:2")
-        assert.equal(projected[1]?.data.resultText, "second real turn")
+        assert.equal(projected[1]?.payload.terminalId, "projected:S1:2")
+        assert.equal(projected[1]?.payload.resultText, "second real turn")
     })
 
     it("accepts collective route metadata only from the exact leased factory", async () => {
@@ -269,7 +269,7 @@ describe("AgentTurnProjector", () => {
         const projector = new AgentTurnProjector({ outcomeAuthority: authority })
         projector.setLeaseAuthority(broker)
         const env = joinWithCapture(projector)
-        env.deliverSemanticEvent(
+        env.publish(
             broker,
             WorkLeaseGranted.create({
                 runId,
@@ -293,15 +293,15 @@ describe("AgentTurnProjector", () => {
             leaseId: "lease-1",
             generation: 1,
         })
-        env.deliverSemanticEvent(
+        env.publish(
             attacker,
             StoryRouted.create({
-                ...route.data,
+                ...route.payload,
                 backend: "claude",
                 model: "forged-model",
             }),
         )
-        env.deliverSemanticEvent(factory, route)
+        env.publish(factory, route)
         await projector.onExternalModelMessage(
             nativeCli,
             ModelMessageItem.rehydrate({ text: "real candidate" }),
@@ -317,7 +317,7 @@ describe("AgentTurnProjector", () => {
 
         const projected = env.events.filter(AgentTurnCompleted.is)
         assert.equal(projected.length, 1)
-        assert.equal(projected[0]?.data.backend, "codex")
+        assert.equal(projected[0]?.payload.backend, "codex")
     })
 
     it("publishes a collective one-shot candidate only behind the exact quiescence barrier", async () => {
@@ -341,7 +341,7 @@ describe("AgentTurnProjector", () => {
         })
         projector.setLeaseAuthority(broker)
         const env = joinWithCapture(projector)
-        env.deliverSemanticEvent(
+        env.publish(
             broker,
             WorkLeaseGranted.create({
                 runId,
@@ -379,23 +379,23 @@ describe("AgentTurnProjector", () => {
             ownedProcessGroup: true,
             quiescenceAssurance: "cooperative-observed",
         })
-        env.deliverSemanticEvent(attacker, finalized)
-        env.deliverSemanticEvent(
+        env.publish(attacker, finalized)
+        env.publish(
             worker,
             OneShotAttemptFinalized.create({
-                ...finalized.data,
+                ...finalized.payload,
                 generation: 0,
             }),
         )
         assert.equal(env.events.filter(AgentTurnCompleted.is).length, 0)
 
-        env.deliverSemanticEvent(worker, finalized)
-        env.deliverSemanticEvent(worker, finalized)
+        env.publish(worker, finalized)
+        env.publish(worker, finalized)
         const projected = env.events.filter(AgentTurnCompleted.is)
         assert.equal(projected.length, 1)
-        assert.equal(projected[0]?.data.resultText, "stable candidate bytes")
+        assert.equal(projected[0]?.payload.resultText, "stable candidate bytes")
         assert.equal(
-            projected[0]?.data.terminalId,
+            projected[0]?.payload.terminalId,
             "quiesced:run-quiescence-barrier:S1:lease-1:1:1",
         )
 
@@ -413,21 +413,21 @@ describe("AgentTurnProjector", () => {
                 raw: {},
             }),
         )
-        env.deliverSemanticEvent(worker, finalized)
+        env.publish(worker, finalized)
         assert.equal(env.events.filter(AgentTurnCompleted.is).length, 1)
 
-        env.deliverSemanticEvent(
+        env.publish(
             worker,
             OneShotAttemptFinalized.create({
-                ...finalized.data,
+                ...finalized.payload,
                 attempt: 2,
             }),
         )
         const retried = env.events.filter(AgentTurnCompleted.is)
         assert.equal(retried.length, 2)
-        assert.equal(retried[1]?.data.resultText, "second candidate bytes")
+        assert.equal(retried[1]?.payload.resultText, "second candidate bytes")
         assert.equal(
-            retried[1]?.data.terminalId,
+            retried[1]?.payload.terminalId,
             "quiesced:run-quiescence-barrier:S1:lease-1:1:2",
         )
     })
@@ -453,7 +453,7 @@ describe("AgentTurnProjector", () => {
         })
         projector.setLeaseAuthority(broker)
         const env = joinWithCapture(projector)
-        env.deliverSemanticEvent(
+        env.publish(
             broker,
             WorkLeaseGranted.create({
                 runId,
@@ -472,7 +472,7 @@ describe("AgentTurnProjector", () => {
 
         // Attempt one can settle without a projected terminal (for example an
         // abort won before the provider's buffered terminal reached the bus).
-        env.deliverSemanticEvent(
+        env.publish(
             worker,
             OneShotAttemptFinalized.create({
                 ...correlation,
@@ -501,7 +501,7 @@ describe("AgentTurnProjector", () => {
         // Registration is the attempt boundary even if the successor emits no
         // terminal event of its own.
         authority.registerTerminalAuthority(correlation, silentRetryCli)
-        env.deliverSemanticEvent(
+        env.publish(
             worker,
             OneShotAttemptFinalized.create({
                 ...correlation,
@@ -548,8 +548,8 @@ describe("AgentTurnProjector", () => {
 
         const projected = env.events.filter(AgentTurnCompleted.is)
         assert.equal(projected.length, 1)
-        assert.equal(projected[0]?.data.resultText, "retry output")
-        assert.equal(projected[0]?.data.terminalId, "projected:S1:1")
+        assert.equal(projected[0]?.payload.resultText, "retry output")
+        assert.equal(projected[0]?.payload.terminalId, "projected:S1:1")
     })
 
     it("replays only the exact active candidate for the bound gate", async () => {
@@ -563,7 +563,7 @@ describe("AgentTurnProjector", () => {
         projector.setReverificationAuthority(gate)
         const env = joinWithCapture(projector)
 
-        env.deliverSemanticEvent(
+        env.publish(
             broker,
             WorkLeaseGranted.create({
                 runId,
@@ -603,38 +603,38 @@ describe("AgentTurnProjector", () => {
             leaseId: "lease-1",
             generation: 3,
             targetTurn: 1,
-            terminalId: original.data.terminalId,
+            terminalId: original.payload.terminalId,
             attempt: 1,
             reason: "critic unavailable",
         })
-        env.deliverSemanticEvent(attacker, request)
-        env.deliverSemanticEvent(
+        env.publish(attacker, request)
+        env.publish(
             gate,
             StoryQualityReverificationRequested.create({
-                ...request.data,
+                ...request.payload,
                 requestId: "stale-generation",
                 generation: 2,
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             gate,
             StoryQualityReverificationRequested.create({
-                ...request.data,
+                ...request.payload,
                 requestId: "wrong-terminal",
                 terminalId: "some-other-candidate",
             }),
         )
         assert.equal(env.events.filter(AgentTurnCompleted.is).length, 1)
 
-        env.deliverSemanticEvent(gate, request)
-        env.deliverSemanticEvent(gate, request)
+        env.publish(gate, request)
+        env.publish(gate, request)
 
         const projected = env.events.filter(AgentTurnCompleted.is)
         assert.equal(projected.length, 2)
-        assert.equal(projected[1]?.data.resultText, original.data.resultText)
-        assert.equal(projected[1]?.data.backend, original.data.backend)
-        assert.equal(projected[1]?.data.canContinue, false)
-        assert.notEqual(projected[1]?.data.terminalId, original.data.terminalId)
-        assert.match(projected[1]?.data.terminalId ?? "", /^reverification:/)
+        assert.equal(projected[1]?.payload.resultText, original.payload.resultText)
+        assert.equal(projected[1]?.payload.backend, original.payload.backend)
+        assert.equal(projected[1]?.payload.canContinue, false)
+        assert.notEqual(projected[1]?.payload.terminalId, original.payload.terminalId)
+        assert.match(projected[1]?.payload.terminalId ?? "", /^reverification:/)
     })
 })

@@ -1,4 +1,5 @@
-import { BaseObserver, Participant, SemanticEvent } from "../../runtime/mozaik.js"
+import { SemanticEvent } from "../../runtime/mozaik.js"
+import { BusMember } from "../../runtime/coordination.js"
 
 import {
     FinalizeStarted,
@@ -9,7 +10,7 @@ import {
 import { emit } from "../../tui-protocol.js"
 
 /** Mirrors finalization lifecycle events as BaroEvents for the Rust TUI. */
-export class FinalizationForwarder extends BaseObserver {
+export class FinalizationForwarder extends BusMember {
     private collectiveAuthorities: Readonly<CollectiveFinalizationAuthorities> | null = null
 
     constructor(private readonly collectiveFailClosed = false) {
@@ -28,23 +29,23 @@ export class FinalizationForwarder extends BaseObserver {
     }
 
     override async onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): Promise<void> {
         if (!this.accepts(source)) return
         if (FinalizeStarted.is(event)) {
-            const _item: FinalizeStartedData = event.data
+            const _item: FinalizeStartedData = event.payload
             emit({ type: "finalize_start" })
             return
         }
         if (PrCreated.is(event)) {
-            const item: PrCreatedData = event.data
+            const item: PrCreatedData = event.payload
             emit({ type: "finalize_complete", pr_url: item.url })
             return
         }
     }
 
-    private accepts(source: Participant): boolean {
+    private accepts(source: BusMember): boolean {
         if (this.collectiveAuthorities) {
             return this.collectiveAuthorities.finalizer === source
         }
@@ -54,5 +55,5 @@ export class FinalizationForwarder extends BaseObserver {
 
 export interface CollectiveFinalizationAuthorities {
     /** Omitted means this run deliberately has no push/PR participant. */
-    finalizer?: Participant
+    finalizer?: BusMember
 }

@@ -9,7 +9,8 @@
  * canonical command shape and how to express it as bus events.
  */
 
-import { AgenticEnvironment, BaseObserver, SemanticEvent } from "../runtime/mozaik.js"
+import { SemanticEvent } from "../runtime/mozaik.js"
+import { BusMember, CoordinationBus } from "../runtime/coordination.js"
 
 import {
     AgentTargetedMessage,
@@ -43,8 +44,8 @@ export interface OperatorOptions {
     runId?: string
 }
 
-export class Operator extends BaseObserver {
-    private envRef: AgenticEnvironment | null = null
+export class Operator extends BusMember {
+    private envRef: CoordinationBus | null = null
     private conversationSequence = 0
 
     constructor(
@@ -54,7 +55,7 @@ export class Operator extends BaseObserver {
         super()
     }
 
-    setEnvironment(env: AgenticEnvironment): void {
+    setEnvironment(env: CoordinationBus): void {
         this.envRef = env
     }
 
@@ -107,7 +108,7 @@ export class Operator extends BaseObserver {
         }
     }
 
-    private emit(event: SemanticEvent<unknown>): void {
-        this.envRef?.deliverSemanticEvent(this, event)
+    private emit(event: SemanticEvent<string, unknown>): void {
+        this.envRef?.publish(this, event)
     }
 }

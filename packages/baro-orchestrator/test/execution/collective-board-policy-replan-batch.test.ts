@@ -55,11 +55,11 @@ describe("CollectiveBoard policy replan batching", () => {
             })
             const env = joinWithCapture(board)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "test" }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
                 RunPrepared.create({ runId, baseSha: null }),
             )
@@ -72,26 +72,26 @@ describe("CollectiveBoard policy replan batching", () => {
             const offers = await waitForCount(env.events, WorkOffered.is, 2)
 
             for (const [index, offer] of offers.entries()) {
-                const storyId = offer.data.request.storyId
+                const storyId = offer.payload.request.storyId
                 const leaseId = `lease-${storyId}`
-                env.deliverSemanticEvent(
+                env.publish(
                     source("broker"),
                     WorkLeaseGranted.create({
                         runId,
-                        offerId: offer.data.offerId,
+                        offerId: offer.payload.offerId,
                         leaseId,
                         workerId: `worker-${storyId}`,
-                        generation: offer.data.generation,
-                        request: offer.data.request,
+                        generation: offer.payload.generation,
+                        request: offer.payload.request,
                     }),
                 )
-                env.deliverSemanticEvent(
+                env.publish(
                     source(`worker-${storyId}`),
                     result(
                         runId,
                         storyId,
                         leaseId,
-                        offer.data.generation,
+                        offer.payload.generation,
                         false,
                     ),
                 )
@@ -102,7 +102,7 @@ describe("CollectiveBoard policy replan batching", () => {
                         index + 1,
                     )
                 )[index]!
-                env.deliverSemanticEvent(
+                env.publish(
                     source("surgeon"),
                     Replan.create({
                         source: `surgeon:${storyId}`,
@@ -111,7 +111,7 @@ describe("CollectiveBoard policy replan batching", () => {
                             runId,
                             storyId,
                             leaseId,
-                            generation: offer.data.generation,
+                            generation: offer.payload.generation,
                         },
                         addedStories: [
                             replacement("S14", []),
@@ -125,7 +125,7 @@ describe("CollectiveBoard policy replan batching", () => {
                         modifiedDeps: {},
                     }),
                 )
-                env.deliverSemanticEvent(
+                env.publish(
                     source("surgeon"),
                     RecoveryDecision.create({
                         runId,
@@ -135,9 +135,9 @@ describe("CollectiveBoard policy replan batching", () => {
                         reason: `split ${storyId} at a stable boundary`,
                     }),
                 )
-                env.deliverSemanticEvent(
+                env.publish(
                     source("repo"),
-                    WorkspaceCleanupCompleted.create({ ...cleanup.data }),
+                    WorkspaceCleanupCompleted.create({ ...cleanup.payload }),
                 )
             }
 
@@ -148,24 +148,24 @@ describe("CollectiveBoard policy replan batching", () => {
             )
             assert.deepEqual(
                 applied.map((event) =>
-                    event.data.mutation.addedStories.map((item) => item.id),
+                    event.payload.mutation.addedStories.map((item) => item.id),
                 ),
                 [["S14", "S15"], ["S16", "S17"]],
             )
             assert.deepEqual(
-                applied[1]?.data.mutation.addedStories[1]?.dependsOn,
+                applied[1]?.payload.mutation.addedStories[1]?.dependsOn,
                 ["S16"],
             )
             assert.match(
-                applied[1]?.data.mutation.addedStories[1]?.description ?? "",
+                applied[1]?.payload.mutation.addedStories[1]?.description ?? "",
                 /Complete S15 after the focused S14 prerequisite/,
             )
             assert.match(
-                applied[1]?.data.mutation.addedStories[1]?.description ?? "",
+                applied[1]?.payload.mutation.addedStories[1]?.description ?? "",
                 /\[\["S14","S16"\],\["S15","S17"\]\]/,
             )
             assert.match(
-                applied[1]?.data.reason ?? "",
+                applied[1]?.payload.reason ?? "",
                 /\[\["S14","S16"\],\["S15","S17"\]\]/,
             )
             assert.equal(env.events.some(RuntimeReplanRejected.is), false)
@@ -209,7 +209,7 @@ describe("CollectiveBoard policy replan batching", () => {
             const env = joinWithCapture(board)
             const offers = await startAndLeaseInitialWave(env, runId, 3)
             const byStory = new Map(
-                offers.map((offer) => [offer.data.request.storyId, offer]),
+                offers.map((offer) => [offer.payload.request.storyId, offer]),
             )
             const replans: Record<string, ReplanData> = {
                 S1: {
@@ -261,19 +261,19 @@ describe("CollectiveBoard policy replan batching", () => {
             await board.idle()
 
             assert.deepEqual(
-                rejected.map((event) => event.data.sourceStoryId).sort(),
+                rejected.map((event) => event.payload.sourceStoryId).sort(),
                 ["S1", "S2"],
             )
             assert.ok(
                 rejected.every(
                     (event) =>
-                        event.data.code === "invalid_proposal" &&
-                        /sibling conflict.*"D"/.test(event.data.reason),
+                        event.payload.code === "invalid_proposal" &&
+                        /sibling conflict.*"D"/.test(event.payload.reason),
                 ),
             )
-            assert.equal(applied.data.sourceStoryId, "S4")
+            assert.equal(applied.payload.sourceStoryId, "S4")
             assert.deepEqual(
-                applied.data.mutation.addedStories.map((item) => item.id),
+                applied.payload.mutation.addedStories.map((item) => item.id),
                 ["R4"],
             )
             const persisted = readPrd(prdPath)
@@ -332,7 +332,7 @@ describe("CollectiveBoard policy replan batching", () => {
                     const offers = await startAndLeaseInitialWave(env, runId, 3)
                     const byStory = new Map(
                         offers.map((offer) => [
-                            offer.data.request.storyId,
+                            offer.payload.request.storyId,
                             offer,
                         ]),
                     )
@@ -392,14 +392,14 @@ describe("CollectiveBoard policy replan batching", () => {
                         })),
                         rejected: rejected
                             .map((event) => ({
-                                storyId: event.data.sourceStoryId,
-                                reason: event.data.reason,
+                                storyId: event.payload.sourceStoryId,
+                                reason: event.payload.reason,
                             }))
                             .sort((left, right) =>
                                 left.storyId.localeCompare(right.storyId),
                             ),
                         applied: applied.map(
-                            (event) => event.data.sourceStoryId,
+                            (event) => event.payload.sourceStoryId,
                         ),
                     })
                 },
@@ -474,7 +474,7 @@ describe("CollectiveBoard policy replan batching", () => {
                     const offers = await startAndLeaseInitialWave(env, runId, 2)
                     const byStory = new Map(
                         offers.map((offer) => [
-                            offer.data.request.storyId,
+                            offer.payload.request.storyId,
                             offer,
                         ]),
                     )
@@ -523,12 +523,12 @@ describe("CollectiveBoard policy replan batching", () => {
                         })),
                         decisions: rejected
                             .map((event) => ({
-                                sourceStoryId: event.data.sourceStoryId,
-                                code: event.data.code,
-                                reason: event.data.reason,
-                                baseGraphVersion: event.data.baseGraphVersion,
+                                sourceStoryId: event.payload.sourceStoryId,
+                                code: event.payload.code,
+                                reason: event.payload.reason,
+                                baseGraphVersion: event.payload.baseGraphVersion,
                                 currentGraphVersion:
-                                    event.data.currentGraphVersion,
+                                    event.payload.currentGraphVersion,
                             }))
                             .sort((left, right) =>
                                 left.sourceStoryId.localeCompare(
@@ -584,7 +584,7 @@ describe("CollectiveBoard policy replan batching", () => {
             const env = joinWithCapture(board)
             const offers = await startAndLeaseInitialWave(env, runId, 2)
             const byStory = new Map(
-                offers.map((offer) => [offer.data.request.storyId, offer]),
+                offers.map((offer) => [offer.payload.request.storyId, offer]),
             )
             const first: ReplanData = {
                 source: "surgeon:S6",
@@ -630,10 +630,10 @@ describe("CollectiveBoard policy replan batching", () => {
             )
             await board.idle()
 
-            assert.equal(rejection.data.sourceStoryId, "S7")
-            assert.equal(rejection.data.code, "unknown_story")
-            assert.match(rejection.data.reason, /unknown story 'S14'/)
-            assert.equal(applied.data.sourceStoryId, "S6")
+            assert.equal(rejection.payload.sourceStoryId, "S7")
+            assert.equal(rejection.payload.code, "unknown_story")
+            assert.match(rejection.payload.reason, /unknown story 'S14'/)
+            assert.equal(applied.payload.sourceStoryId, "S6")
             const persisted = readPrd(prdPath)
             assert.deepEqual(
                 persisted.userStories.map((item) => item.id),
@@ -687,14 +687,14 @@ describe("CollectiveBoard policy replan batching", () => {
             await waitFor(env.events, RunPushRequested.is)
             await board.idle()
 
-            assert.equal(rejection.data.sourceStoryId, "S1")
-            assert.equal(rejection.data.code, "invalid_proposal")
-            assert.match(rejection.data.reason, /mutation is malformed/)
+            assert.equal(rejection.payload.sourceStoryId, "S1")
+            assert.equal(rejection.payload.code, "invalid_proposal")
+            assert.match(rejection.payload.reason, /mutation is malformed/)
             assert.equal(
                 env.events
                     .filter(ConductorState.is)
                     .some((event) =>
-                        /collective board failed/.test(event.data.detail ?? ""),
+                        /collective board failed/.test(event.payload.detail ?? ""),
                     ),
                 false,
             )
@@ -747,7 +747,7 @@ describe("CollectiveBoard policy replan batching", () => {
             provideContext(env, runId, contexts[1]!)
             const offers = await waitForCount(env.events, WorkOffered.is, 2)
             const secondOffer = offers.find(
-                (offer) => offer.data.request.storyId === "S2",
+                (offer) => offer.payload.request.storyId === "S2",
             )!
             grantOffer(env, runId, secondOffer)
             const invalidOnly: ReplanData = {
@@ -774,17 +774,17 @@ describe("CollectiveBoard policy replan batching", () => {
             await waitFor(env.events, RunPushRequested.is)
             await board.idle()
 
-            assert.equal(rejection.data.sourceStoryId, "S2")
-            assert.equal(rejection.data.code, "destructive_removal")
+            assert.equal(rejection.payload.sourceStoryId, "S2")
+            assert.equal(rejection.payload.code, "destructive_removal")
             assert.equal(
                 env.events.filter(RuntimeReplanApplied.is).length,
                 1,
             )
             const healingEvents = env.events
                 .filter(ConductorState.is)
-                .filter((event) => /healing action/.test(event.data.detail ?? ""))
+                .filter((event) => /healing action/.test(event.payload.detail ?? ""))
             assert.equal(healingEvents.length, 1)
-            assert.match(healingEvents[0]?.data.detail ?? "", /1\/1/)
+            assert.match(healingEvents[0]?.payload.detail ?? "", /1\/1/)
         })
     })
 
@@ -805,35 +805,35 @@ describe("CollectiveBoard policy replan batching", () => {
             })
             const env = joinWithCapture(board)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "test" }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
                 RunPrepared.create({ runId, baseSha: null }),
             )
             const context = await waitFor(env.events, WorkContextRequested.is)
             provideContext(env, runId, context)
             const offer = await waitFor(env.events, WorkOffered.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("broker"),
                 WorkLeaseGranted.create({
                     runId,
-                    offerId: offer.data.offerId,
+                    offerId: offer.payload.offerId,
                     leaseId: "lease-S1",
                     workerId: "worker-S1",
-                    generation: offer.data.generation,
-                    request: offer.data.request,
+                    generation: offer.payload.generation,
+                    request: offer.payload.request,
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("worker-S1"),
                 result(
                     runId,
                     "S1",
                     "lease-S1",
-                    offer.data.generation,
+                    offer.payload.generation,
                     false,
                 ),
             )
@@ -841,7 +841,7 @@ describe("CollectiveBoard policy replan batching", () => {
                 env.events,
                 WorkspaceCleanupRequested.is,
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("surgeon"),
                 Replan.create({
                     source: "surgeon:S1",
@@ -850,14 +850,14 @@ describe("CollectiveBoard policy replan batching", () => {
                         runId,
                         storyId: "S1",
                         leaseId: "lease-S1",
-                        generation: offer.data.generation,
+                        generation: offer.payload.generation,
                     },
                     addedStories: [],
                     removedStoryIds: ["S1"],
                     modifiedDeps: {},
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("surgeon"),
                 RecoveryDecision.create({
                     runId,
@@ -867,18 +867,18 @@ describe("CollectiveBoard policy replan batching", () => {
                     reason: "drop failed scope without replacement",
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
-                WorkspaceCleanupCompleted.create({ ...cleanup.data }),
+                WorkspaceCleanupCompleted.create({ ...cleanup.payload }),
             )
 
             const rejection = await waitFor(
                 env.events,
                 RuntimeReplanRejected.is,
             )
-            assert.equal(rejection.data.sourceStoryId, "S1")
-            assert.equal(rejection.data.code, "destructive_removal")
-            assert.match(rejection.data.reason, /without adding replacement/)
+            assert.equal(rejection.payload.sourceStoryId, "S1")
+            assert.equal(rejection.payload.code, "destructive_removal")
+            assert.match(rejection.payload.reason, /without adding replacement/)
         })
     })
 
@@ -901,11 +901,11 @@ describe("CollectiveBoard policy replan batching", () => {
             })
             const env = joinWithCapture(board)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "test" }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
                 RunPrepared.create({ runId, baseSha: null }),
             )
@@ -925,38 +925,38 @@ describe("CollectiveBoard policy replan batching", () => {
             )
             const offersByStory = new Map(
                 firstWaveOffers.map((offer) => [
-                    offer.data.request.storyId,
+                    offer.payload.request.storyId,
                     offer,
                 ]),
             )
             for (const offer of firstWaveOffers) {
-                const storyId = offer.data.request.storyId
-                env.deliverSemanticEvent(
+                const storyId = offer.payload.request.storyId
+                env.publish(
                     source("broker"),
                     WorkLeaseGranted.create({
                         runId,
-                        offerId: offer.data.offerId,
+                        offerId: offer.payload.offerId,
                         leaseId: `lease-${storyId}`,
                         workerId: `worker-${storyId}`,
-                        generation: offer.data.generation,
-                        request: offer.data.request,
+                        generation: offer.payload.generation,
+                        request: offer.payload.request,
                     }),
                 )
             }
 
             const prerequisite = offersByStory.get("S10")!
-            env.deliverSemanticEvent(
+            env.publish(
                 source("worker-S10"),
                 result(
                     runId,
                     "S10",
                     "lease-S10",
-                    prerequisite.data.generation,
+                    prerequisite.payload.generation,
                     true,
                 ),
             )
             await waitFor(env.events, StoryIntegrationRequested.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
                 StoryMerged.create({
                     runId,
@@ -971,30 +971,30 @@ describe("CollectiveBoard policy replan batching", () => {
             const prerequisiteContext = (
                 await waitForCount(env.events, WorkContextRequested.is, 6)
             )[5]!
-            assert.equal(prerequisiteContext.data.storyId, "S11")
+            assert.equal(prerequisiteContext.payload.storyId, "S11")
             provideContext(env, runId, prerequisiteContext)
             const prerequisiteOffer = (
                 await waitForCount(env.events, WorkOffered.is, 6)
             )[5]!
-            assert.equal(prerequisiteOffer.data.request.storyId, "S11")
-            env.deliverSemanticEvent(
+            assert.equal(prerequisiteOffer.payload.request.storyId, "S11")
+            env.publish(
                 source("broker"),
                 WorkLeaseGranted.create({
                     runId,
-                    offerId: prerequisiteOffer.data.offerId,
+                    offerId: prerequisiteOffer.payload.offerId,
                     leaseId: "lease-S11",
                     workerId: "worker-S11",
-                    generation: prerequisiteOffer.data.generation,
-                    request: prerequisiteOffer.data.request,
+                    generation: prerequisiteOffer.payload.generation,
+                    request: prerequisiteOffer.payload.request,
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("worker-S11"),
                 result(
                     runId,
                     "S11",
                     "lease-S11",
-                    prerequisiteOffer.data.generation,
+                    prerequisiteOffer.payload.generation,
                     true,
                 ),
             )
@@ -1003,8 +1003,8 @@ describe("CollectiveBoard policy replan batching", () => {
                 StoryIntegrationRequested.is,
                 2,
             )
-            assert.equal(integrations[1]?.data.storyId, "S11")
-            env.deliverSemanticEvent(
+            assert.equal(integrations[1]?.payload.storyId, "S11")
+            env.publish(
                 source("repo"),
                 StoryMerged.create({
                     runId,
@@ -1017,13 +1017,13 @@ describe("CollectiveBoard policy replan batching", () => {
             for (const [index, storyId] of siblingIds.entries()) {
                 const offer = offersByStory.get(storyId)!
                 const leaseId = `lease-${storyId}`
-                env.deliverSemanticEvent(
+                env.publish(
                     source(`worker-${storyId}`),
                     result(
                         runId,
                         storyId,
                         leaseId,
-                        offer.data.generation,
+                        offer.payload.generation,
                         false,
                     ),
                 )
@@ -1034,7 +1034,7 @@ describe("CollectiveBoard policy replan batching", () => {
                         index + 1,
                     )
                 )[index]!
-                env.deliverSemanticEvent(
+                env.publish(
                     source("surgeon"),
                     Replan.create({
                         source: `surgeon:${storyId}`,
@@ -1043,14 +1043,14 @@ describe("CollectiveBoard policy replan batching", () => {
                             runId,
                             storyId,
                             leaseId,
-                            generation: offer.data.generation,
+                            generation: offer.payload.generation,
                         },
                         addedStories: [],
                         removedStoryIds: [],
                         modifiedDeps: { [storyId]: ["S11"] },
                     }),
                 )
-                env.deliverSemanticEvent(
+                env.publish(
                     source("surgeon"),
                     RecoveryDecision.create({
                         runId,
@@ -1060,9 +1060,9 @@ describe("CollectiveBoard policy replan batching", () => {
                         reason: `${storyId} requires the iterator prerequisite`,
                     }),
                 )
-                env.deliverSemanticEvent(
+                env.publish(
                     source("repo"),
-                    WorkspaceCleanupCompleted.create({ ...cleanup.data }),
+                    WorkspaceCleanupCompleted.create({ ...cleanup.payload }),
                 )
             }
 
@@ -1072,7 +1072,7 @@ describe("CollectiveBoard policy replan batching", () => {
                 4,
             )
             assert.deepEqual(
-                applied.map((event) => event.data.graphVersion),
+                applied.map((event) => event.payload.graphVersion),
                 [2, 3, 4, 5],
             )
 
@@ -1087,10 +1087,10 @@ describe("CollectiveBoard policy replan batching", () => {
 
             const healingEvents = env.events
                 .filter(ConductorState.is)
-                .filter((event) => /healing action/.test(event.data.detail ?? ""))
+                .filter((event) => /healing action/.test(event.payload.detail ?? ""))
             assert.equal(healingEvents.length, 2)
-            assert.match(healingEvents[0]?.data.detail ?? "", /1\/3/)
-            assert.match(healingEvents[1]?.data.detail ?? "", /2\/3/)
+            assert.match(healingEvents[0]?.payload.detail ?? "", /1\/3/)
+            assert.match(healingEvents[1]?.payload.detail ?? "", /2\/3/)
             assert.equal(env.events.some(RunPushRequested.is), false)
         })
     })
@@ -1112,11 +1112,11 @@ describe("CollectiveBoard policy replan batching", () => {
             })
             const env = joinWithCapture(board)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "test" }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
                 RunPrepared.create({ runId, baseSha: null }),
             )
@@ -1126,24 +1126,24 @@ describe("CollectiveBoard policy replan batching", () => {
             )
             provideContext(env, runId, originalContext)
             const originalOffer = await waitFor(env.events, WorkOffered.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("broker"),
                 WorkLeaseGranted.create({
                     runId,
-                    offerId: originalOffer.data.offerId,
+                    offerId: originalOffer.payload.offerId,
                     leaseId: "lease-S1",
                     workerId: "worker-S1",
-                    generation: originalOffer.data.generation,
-                    request: originalOffer.data.request,
+                    generation: originalOffer.payload.generation,
+                    request: originalOffer.payload.request,
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("worker-S1"),
                 result(
                     runId,
                     "S1",
                     "lease-S1",
-                    originalOffer.data.generation,
+                    originalOffer.payload.generation,
                     false,
                 ),
             )
@@ -1151,7 +1151,7 @@ describe("CollectiveBoard policy replan batching", () => {
                 env.events,
                 WorkspaceCleanupRequested.is,
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("surgeon"),
                 Replan.create({
                     source: "surgeon:S1",
@@ -1160,7 +1160,7 @@ describe("CollectiveBoard policy replan batching", () => {
                         runId,
                         storyId: "S1",
                         leaseId: "lease-S1",
-                        generation: originalOffer.data.generation,
+                        generation: originalOffer.payload.generation,
                     },
                     removedStoryIds: ["S1"],
                     modifiedDeps: {},
@@ -1171,7 +1171,7 @@ describe("CollectiveBoard policy replan batching", () => {
                     ],
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("surgeon"),
                 RecoveryDecision.create({
                     runId,
@@ -1181,9 +1181,9 @@ describe("CollectiveBoard policy replan batching", () => {
                     reason: "split cancellation primitives while keeping a peer busy",
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
-                WorkspaceCleanupCompleted.create({ ...cleanup.data }),
+                WorkspaceCleanupCompleted.create({ ...cleanup.payload }),
             )
 
             await waitFor(env.events, RuntimeReplanApplied.is)
@@ -1197,38 +1197,38 @@ describe("CollectiveBoard policy replan batching", () => {
             }
             const nextOffers = await waitForCount(env.events, WorkOffered.is, 3)
             const s10Offer = nextOffers.find(
-                (offer) => offer.data.request.storyId === "S10",
+                (offer) => offer.payload.request.storyId === "S10",
             )!
             const peerOffer = nextOffers.find(
-                (offer) => offer.data.request.storyId === "SP",
+                (offer) => offer.payload.request.storyId === "SP",
             )!
             for (const offer of [s10Offer, peerOffer]) {
-                const storyId = offer.data.request.storyId
-                env.deliverSemanticEvent(
+                const storyId = offer.payload.request.storyId
+                env.publish(
                     source("broker"),
                     WorkLeaseGranted.create({
                         runId,
-                        offerId: offer.data.offerId,
+                        offerId: offer.payload.offerId,
                         leaseId: `lease-${storyId}`,
                         workerId: `worker-${storyId}`,
-                        generation: offer.data.generation,
-                        request: offer.data.request,
+                        generation: offer.payload.generation,
+                        request: offer.payload.request,
                     }),
                 )
             }
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("worker-S10"),
                 result(
                     runId,
                     "S10",
                     "lease-S10",
-                    s10Offer.data.generation,
+                    s10Offer.payload.generation,
                     true,
                 ),
             )
             await waitForCount(env.events, StoryIntegrationRequested.is, 1)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
                 StoryMerged.create({
                     runId,
@@ -1241,7 +1241,7 @@ describe("CollectiveBoard policy replan batching", () => {
             const admitted = (
                 await waitForCount(env.events, WorkContextRequested.is, 4)
             )[3]!
-            assert.equal(admitted.data.storyId, "S11")
+            assert.equal(admitted.payload.storyId, "S11")
             assert.equal(
                 env.events.some((event) => event.type === "level_completed"),
                 true,
@@ -1340,7 +1340,7 @@ function recovery(
         runId,
         storyId,
         leaseId: `lease-${storyId}`,
-        generation: offer.data.generation,
+        generation: offer.payload.generation,
     }
 }
 
@@ -1349,12 +1349,12 @@ function provideContext(
     runId: string,
     request: ReturnType<typeof WorkContextRequested.create>,
 ): void {
-    env.deliverSemanticEvent(
+    env.publish(
         source("context"),
         WorkContextProvided.create({
             runId,
-            requestId: request.data.requestId,
-            storyId: request.data.storyId,
+            requestId: request.payload.requestId,
+            storyId: request.payload.storyId,
             context: null,
         }),
     )
@@ -1365,11 +1365,11 @@ async function startAndLeaseInitialWave(
     runId: string,
     storyCount: number,
 ): Promise<ReturnType<typeof WorkOffered.create>[]> {
-    env.deliverSemanticEvent(
+    env.publish(
         source("operator"),
         RunStartRequest.create({ reason: "test" }),
     )
-    env.deliverSemanticEvent(
+    env.publish(
         source("repo"),
         RunPrepared.create({ runId, baseSha: null }),
     )
@@ -1389,16 +1389,16 @@ function grantOffer(
     runId: string,
     offer: ReturnType<typeof WorkOffered.create>,
 ): void {
-    const storyId = offer.data.request.storyId
-    env.deliverSemanticEvent(
+    const storyId = offer.payload.request.storyId
+    env.publish(
         source("broker"),
         WorkLeaseGranted.create({
             runId,
-            offerId: offer.data.offerId,
+            offerId: offer.payload.offerId,
             leaseId: `lease-${storyId}`,
             workerId: `worker-${storyId}`,
-            generation: offer.data.generation,
-            request: offer.data.request,
+            generation: offer.payload.generation,
+            request: offer.payload.request,
         }),
     )
 }
@@ -1411,15 +1411,15 @@ async function failWithPolicyReplan(
     cleanupOrdinal: number,
     recoverySource = source("surgeon"),
 ): Promise<void> {
-    const storyId = offer.data.request.storyId
+    const storyId = offer.payload.request.storyId
     const leaseId = `lease-${storyId}`
-    env.deliverSemanticEvent(
+    env.publish(
         source(`worker-${storyId}`),
         result(
             runId,
             storyId,
             leaseId,
-            offer.data.generation,
+            offer.payload.generation,
             false,
         ),
     )
@@ -1430,8 +1430,8 @@ async function failWithPolicyReplan(
             cleanupOrdinal,
         )
     )[cleanupOrdinal - 1]!
-    env.deliverSemanticEvent(recoverySource, Replan.create(replan))
-    env.deliverSemanticEvent(
+    env.publish(recoverySource, Replan.create(replan))
+    env.publish(
         recoverySource,
         RecoveryDecision.create({
             runId,
@@ -1441,9 +1441,9 @@ async function failWithPolicyReplan(
             reason: replan.reason,
         }),
     )
-    env.deliverSemanticEvent(
+    env.publish(
         source("repo"),
-        WorkspaceCleanupCompleted.create({ ...cleanup.data }),
+        WorkspaceCleanupCompleted.create({ ...cleanup.payload }),
     )
 }
 

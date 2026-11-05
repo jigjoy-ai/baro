@@ -1,10 +1,9 @@
 /** Baro-local ordered mailboxes and task supervision over Mozaik delivery. */
 
 import {
-    BaseObserver,
-    type Participant,
     type SemanticEvent,
 } from "./mozaik.js"
+import { BusMember } from "./coordination.js"
 
 export interface BackgroundTaskOptions {
     label: string
@@ -18,13 +17,13 @@ export interface BackgroundTaskHandle {
 }
 
 export interface SerializedEventDelivery {
-    readonly source: Participant
-    readonly event: SemanticEvent<unknown>
+    readonly source: BusMember
+    readonly event: SemanticEvent<string, unknown>
     readonly internal: boolean
 }
 
 export interface SerializedEventContext extends SerializedEventDelivery {
-    publish(event: SemanticEvent<unknown>): void
+    publish(event: SemanticEvent<string, unknown>): void
     spawnTask(
         options: BackgroundTaskOptions,
         work: () => Promise<void> | void,
@@ -117,7 +116,7 @@ class KeyedTaskTracker {
 }
 
 /** Semantic-event decisions are ordered even though Mozaik does not await them. */
-export abstract class SerializedObserver extends BaseObserver {
+export abstract class SerializedObserver extends BusMember {
     private mailboxTail: Promise<void> = Promise.resolve()
     private readonly tasks: KeyedTaskTracker
 
@@ -137,13 +136,13 @@ export abstract class SerializedObserver extends BaseObserver {
         )
     }
 
-    override onInternalEvent(event: SemanticEvent<unknown>): void {
+    override onInternalEvent(event: SemanticEvent<string, unknown>): void {
         this.enqueue({ source: this, event, internal: true })
     }
 
     override onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): void {
         this.enqueue({ source, event, internal: false })
     }
@@ -156,9 +155,9 @@ export abstract class SerializedObserver extends BaseObserver {
         _failure: SerializedObserverFailure,
     ): Promise<void> | void {}
 
-    protected publish(event: SemanticEvent<unknown>): void {
-        for (const environment of this.getEnvironments()) {
-            environment.deliverSemanticEvent(this, event)
+    protected publish(event: SemanticEvent<string, unknown>): void {
+        for (const environment of this.getBuses()) {
+            environment.publish(this, event)
         }
     }
 

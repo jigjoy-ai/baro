@@ -69,7 +69,7 @@ describe("GitCoordinator", () => {
             coordinator.setLeaseAuthority(BROKER)
             const env = joinWithCapture(coordinator)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 BROKER,
                 WorkLeaseGranted.create({
                     runId: "run-missing-seal",
@@ -86,7 +86,7 @@ describe("GitCoordinator", () => {
                     },
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 BOARD,
                 StoryIntegrationRequested.create({
                     runId: "run-missing-seal",
@@ -101,7 +101,7 @@ describe("GitCoordinator", () => {
             assert.equal(mergeCalls, 0)
             const failure = env.events.find(StoryMergeFailed.is)
             assert.ok(failure)
-            assert.match(failure.data.error, /candidate seal marker is missing/)
+            assert.match(failure.payload.error, /candidate seal marker is missing/)
         })
     })
 
@@ -125,7 +125,7 @@ describe("GitCoordinator", () => {
                 push: false,
             })
             const env = joinWithCapture(coordinator)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("ambient-broker"),
                 WorkLeaseGranted.create({
                     runId: "run-unbound",
@@ -141,7 +141,7 @@ describe("GitCoordinator", () => {
                     },
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("ambient-board"),
                 WorkspaceCleanupRequested.create({
                     runId: "run-unbound",
@@ -194,7 +194,7 @@ describe("GitCoordinator", () => {
                 timeoutSecs: 60,
             }
 
-            env.deliverSemanticEvent(
+            env.publish(
                 broker,
                 WorkLeaseGranted.create({
                     runId: "run-authority",
@@ -205,7 +205,7 @@ describe("GitCoordinator", () => {
                     request,
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 observer,
                 WorkLeaseGranted.create({
                     runId: "run-authority",
@@ -224,12 +224,12 @@ describe("GitCoordinator", () => {
                 generation: 1,
             })
 
-            env.deliverSemanticEvent(observer, cleanup)
+            env.publish(observer, cleanup)
             await coordinator.idle()
             assert.deepEqual(cleaned, [])
             assert.equal(env.events.filter(WorkspaceCleanupCompleted.is).length, 0)
 
-            env.deliverSemanticEvent(board, cleanup)
+            env.publish(board, cleanup)
             await coordinator.idle()
             assert.deepEqual(cleaned, ["S1"])
             assert.equal(env.events.filter(WorkspaceCleanupCompleted.is).length, 1)
@@ -260,7 +260,7 @@ describe("GitCoordinator", () => {
             coordinator.setEventAuthority(BOARD)
             coordinator.setLeaseAuthority(BROKER)
             const env = joinWithCapture(coordinator)
-            env.deliverSemanticEvent(
+            env.publish(
                 BOARD,
                 StoryIntegrationRequested.create({
                     runId: "run-push-failure",
@@ -270,7 +270,7 @@ describe("GitCoordinator", () => {
                     durationSecs: 1,
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 BOARD,
                 RunPushRequested.create({ runId: "run-push-failure" }),
             )
@@ -311,7 +311,7 @@ describe("GitCoordinator", () => {
                 timeoutSecs: 60,
             }
 
-            env.deliverSemanticEvent(
+            env.publish(
                 BROKER,
                 WorkLeaseGranted.create({
                     runId: "run-cleanup",
@@ -329,11 +329,11 @@ describe("GitCoordinator", () => {
                 leaseId: "lease-old",
                 generation: 1,
             })
-            env.deliverSemanticEvent(BOARD, oldCleanup)
+            env.publish(BOARD, oldCleanup)
             await coordinator.idle()
             assert.deepEqual(cleaned, ["S1"])
 
-            env.deliverSemanticEvent(
+            env.publish(
                 BROKER,
                 WorkLeaseGranted.create({
                     runId: "run-cleanup",
@@ -344,13 +344,13 @@ describe("GitCoordinator", () => {
                     request,
                 }),
             )
-            env.deliverSemanticEvent(BOARD, oldCleanup)
+            env.publish(BOARD, oldCleanup)
             await coordinator.idle()
 
             assert.deepEqual(cleaned, ["S1"])
             const completions = env.events.filter(WorkspaceCleanupCompleted.is)
             assert.equal(completions.length, 2)
-            assert.equal(completions[1]?.data.cleanupId, "cleanup-old")
+            assert.equal(completions[1]?.payload.cleanupId, "cleanup-old")
         })
     })
 
@@ -387,7 +387,7 @@ describe("GitCoordinator", () => {
                 retries: 1,
                 timeoutSecs: 60,
             }
-            env.deliverSemanticEvent(
+            env.publish(
                 BROKER,
                 WorkLeaseGranted.create({
                     runId: "run-preserve",
@@ -406,27 +406,27 @@ describe("GitCoordinator", () => {
                 generation: 3,
                 preserveForRecovery: true,
             })
-            env.deliverSemanticEvent(BOARD, cleanup)
+            env.publish(BOARD, cleanup)
             await coordinator.idle()
 
             assert.deepEqual(preserved, ["S1"])
             const completed = env.events.filter(WorkspaceCleanupCompleted.is)
             assert.equal(completed.length, 1)
-            assert.equal(completed[0]?.data.runId, "run-preserve")
-            assert.equal(completed[0]?.data.leaseId, "lease-1")
-            assert.equal(completed[0]?.data.generation, 3)
+            assert.equal(completed[0]?.payload.runId, "run-preserve")
+            assert.equal(completed[0]?.payload.leaseId, "lease-1")
+            assert.equal(completed[0]?.payload.generation, 3)
             assert.equal(
-                completed[0]?.data.preservedBranch,
+                completed[0]?.payload.preservedBranch,
                 "baro-recovery/run-preserve/S1/1",
             )
 
-            env.deliverSemanticEvent(BOARD, cleanup)
+            env.publish(BOARD, cleanup)
             await coordinator.idle()
             assert.deepEqual(preserved, ["S1"], "replay does not snapshot twice")
             const replayed = env.events.filter(WorkspaceCleanupCompleted.is)
             assert.equal(replayed.length, 2)
             assert.equal(
-                replayed[1]?.data.preservedBranch,
+                replayed[1]?.payload.preservedBranch,
                 "baro-recovery/run-preserve/S1/1",
                 "replay retains the original preservation result",
             )
@@ -456,7 +456,7 @@ describe("GitCoordinator", () => {
             coordinator.setEventAuthority(BOARD)
             coordinator.setLeaseAuthority(BROKER)
             const env = joinWithCapture(coordinator)
-            env.deliverSemanticEvent(
+            env.publish(
                 BOARD,
                 WorkspaceCleanupRequested.create({
                     runId: "run-retained",
@@ -472,10 +472,10 @@ describe("GitCoordinator", () => {
             assert.equal(env.events.filter(WorkspaceCleanupCompleted.is).length, 0)
             const failed = env.events.filter(WorkspaceCleanupFailed.is)
             assert.equal(failed.length, 1)
-            assert.equal(failed[0]?.data.leaseId, "lease-1")
-            assert.equal(failed[0]?.data.generation, 1)
-            assert.equal(failed[0]?.data.retainedBranch, "baro-wt/run-retained/S1")
-            assert.match(failed[0]?.data.error ?? "", /commit hook rejected snapshot/)
+            assert.equal(failed[0]?.payload.leaseId, "lease-1")
+            assert.equal(failed[0]?.payload.generation, 1)
+            assert.equal(failed[0]?.payload.retainedBranch, "baro-wt/run-retained/S1")
+            assert.match(failed[0]?.payload.error ?? "", /commit hook rejected snapshot/)
         })
     })
 })
@@ -508,7 +508,7 @@ describe("a merge the machine killed, not the repository", () => {
         coordinator.setEventAuthority(BOARD)
         coordinator.setLeaseAuthority(BROKER)
         const env = joinWithCapture(coordinator)
-        env.deliverSemanticEvent(
+        env.publish(
             BROKER,
             WorkLeaseGranted.create({
                 runId: "run-killed-merge",
@@ -524,7 +524,7 @@ describe("a merge the machine killed, not the repository", () => {
                 },
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             BOARD,
             StoryIntegrationRequested.create({
                 runId: "run-killed-merge",
@@ -577,7 +577,7 @@ describe("a merge the machine killed, not the repository", () => {
             const failure = env.events.find(StoryMergeFailed.is)
             assert.ok(failure)
             assert.equal(
-                failure.data.retryable,
+                failure.payload.retryable,
                 true,
                 "the run branch was never touched, so there is nothing lost",
             )
@@ -599,7 +599,7 @@ describe("a merge the machine killed, not the repository", () => {
             } as unknown as WorktreeManager)
 
             assert.equal(attempts, 1, "a conflict does not get better by repeating")
-            assert.equal(env.events.find(StoryMergeFailed.is)?.data.retryable, false)
+            assert.equal(env.events.find(StoryMergeFailed.is)?.payload.retryable, false)
         })
     })
 })
@@ -631,7 +631,7 @@ describe("GitCoordinator prepareRun roots", () => {
         })
         coordinator.setEventAuthority(BOARD)
         const env = joinWithCapture(coordinator)
-        env.deliverSemanticEvent(BOARD, RunPreparationRequested.create({ runId: "run-prepare" }))
+        env.publish(BOARD, RunPreparationRequested.create({ runId: "run-prepare" }))
         await coordinator.idle()
         return env
     }
@@ -658,7 +658,7 @@ describe("GitCoordinator prepareRun roots", () => {
             assert.equal(prepared, 1)
             const ready = env.events.find(RunPrepared.is)
             assert.ok(ready)
-            assert.equal(ready.data.baseSha, git(integrationRoot, ["rev-parse", "HEAD"]))
+            assert.equal(ready.payload.baseSha, git(integrationRoot, ["rev-parse", "HEAD"]))
             assert.equal(git(repoRoot, ["branch", "--show-current"]), "main")
             assert.equal(git(repoRoot, ["branch", "--list", "baro/other"]), "")
         })
@@ -678,9 +678,9 @@ describe("GitCoordinator prepareRun roots", () => {
             })
 
             const ready = env.events.find(RunPrepared.is)
-            assert.ok(ready, JSON.stringify(env.events.find(RunPreparationFailed.is)?.data))
+            assert.ok(ready, JSON.stringify(env.events.find(RunPreparationFailed.is)?.payload))
             assert.equal(git(dir, ["branch", "--show-current"]), "baro/goal")
-            assert.equal(ready.data.baseSha, git(dir, ["rev-parse", "HEAD"]))
+            assert.equal(ready.payload.baseSha, git(dir, ["rev-parse", "HEAD"]))
         })
     })
 
@@ -696,7 +696,7 @@ describe("GitCoordinator prepareRun roots", () => {
             const env = await prepare({ repoRoot: dir, integrationRoot: dir, integrationWorktree })
 
             assert.equal(env.events.some(RunPrepared.is), false)
-            assert.match(env.events.find(RunPreparationFailed.is)?.data.error ?? "", /worktree add refused/)
+            assert.match(env.events.find(RunPreparationFailed.is)?.payload.error ?? "", /worktree add refused/)
         })
     })
 })

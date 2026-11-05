@@ -110,18 +110,18 @@ describe("SurgeonPi", () => {
 
             const replans = env.events.filter(Replan.is)
             assert.equal(replans.length, 1)
-            assert.deepEqual(replans[0]!.data.addedStories, [])
-            assert.deepEqual(replans[0]!.data.removedStoryIds, ["S1"])
-            assert.deepEqual(replans[0]!.data.modifiedDeps, {})
-            assert.match(replans[0]!.data.reason, /deterministic skip: S1 exhausted 3 attempts/)
-            assert.match(replans[0]!.data.reason, /pi fallback after error:/)
+            assert.deepEqual(replans[0]!.payload.addedStories, [])
+            assert.deepEqual(replans[0]!.payload.removedStoryIds, ["S1"])
+            assert.deepEqual(replans[0]!.payload.modifiedDeps, {})
+            assert.match(replans[0]!.payload.reason, /deterministic skip: S1 exhausted 3 attempts/)
+            assert.match(replans[0]!.payload.reason, /pi fallback after error:/)
 
             const measured = env.events.filter(ModelInvocationMeasured.is)
             assert.equal(measured.length, 1)
-            assert.equal(measured[0]!.data.status, "failed")
-            assert.equal(measured[0]!.data.phase, "surgeon")
-            assert.equal(measured[0]!.data.backend, "pi")
-            assert.equal(measured[0]!.data.tokens.inputTotal.state, "unknown")
+            assert.equal(measured[0]!.payload.status, "failed")
+            assert.equal(measured[0]!.payload.phase, "surgeon")
+            assert.equal(measured[0]!.payload.backend, "pi")
+            assert.equal(measured[0]!.payload.tokens.inputTotal.state, "unknown")
             assert.ok(
                 env.events.findIndex(ModelInvocationMeasured.is) <
                     env.events.findIndex(Replan.is),
@@ -172,7 +172,7 @@ describe("SurgeonPi", () => {
                 await surgeon.onExternalEvent(
                     source("story-agent"),
                     StoryResult.create({
-                        ...failure.data,
+                        ...failure.payload,
                         runId: "run-pi-telemetry",
                         leaseId: "lease-S1",
                         generation: 5,
@@ -182,23 +182,23 @@ describe("SurgeonPi", () => {
 
                 const replans = env.events.filter(Replan.is)
                 assert.equal(replans.length, 1)
-                assert.equal(replans[0]!.data.reason, "prereq: missing setup")
-                assert.deepEqual(replans[0]!.data.addedStories, [added])
-                assert.deepEqual(replans[0]!.data.removedStoryIds, ["S1"])
-                assert.deepEqual(replans[0]!.data.modifiedDeps, { S2: ["S1a"] })
+                assert.equal(replans[0]!.payload.reason, "prereq: missing setup")
+                assert.deepEqual(replans[0]!.payload.addedStories, [added])
+                assert.deepEqual(replans[0]!.payload.removedStoryIds, ["S1"])
+                assert.deepEqual(replans[0]!.payload.modifiedDeps, { S2: ["S1a"] })
 
                 const measured = env.events.filter(ModelInvocationMeasured.is)
                 assert.equal(measured.length, 1)
                 assert.equal(
-                    measured[0]!.data.invocationId,
+                    measured[0]!.payload.invocationId,
                     "run-pi-telemetry:surgeon:S1:1:lease:lease-S1:generation:5:provider:1",
                 )
-                assert.equal(measured[0]!.data.runId, "run-pi-telemetry")
-                assert.equal(measured[0]!.data.storyId, "S1")
-                assert.equal(measured[0]!.data.turn, 1)
-                assert.equal(measured[0]!.data.provider, "provider-test")
-                assert.equal(measured[0]!.data.requestedModel, "model-test")
-                assert.equal(measured[0]!.data.status, "succeeded")
+                assert.equal(measured[0]!.payload.runId, "run-pi-telemetry")
+                assert.equal(measured[0]!.payload.storyId, "S1")
+                assert.equal(measured[0]!.payload.turn, 1)
+                assert.equal(measured[0]!.payload.provider, "provider-test")
+                assert.equal(measured[0]!.payload.requestedModel, "model-test")
+                assert.equal(measured[0]!.payload.status, "succeeded")
                 assert.ok(
                     env.events.findIndex(ModelInvocationMeasured.is) <
                         env.events.findIndex(Replan.is),
@@ -228,11 +228,11 @@ describe("SurgeonPi", () => {
 
                 const replan = env.events.find(Replan.is)
                 assert.ok(replan)
-                assert.match(replan.data.reason, /pi fallback after error: no JSON object found/)
+                assert.match(replan.payload.reason, /pi fallback after error: no JSON object found/)
                 const measured = env.events.filter(ModelInvocationMeasured.is)
                 assert.equal(measured.length, 1)
-                assert.equal(measured[0]!.data.status, "succeeded")
-                assert.equal(measured[0]!.data.tokens.inputTotal.state, "unknown")
+                assert.equal(measured[0]!.payload.status, "succeeded")
+                assert.equal(measured[0]!.payload.tokens.inputTotal.state, "unknown")
                 assert.ok(
                     env.events.findIndex(ModelInvocationMeasured.is) <
                         env.events.findIndex(Replan.is),
@@ -281,8 +281,8 @@ describe("SurgeonPi", () => {
 
                 const replans = env.events.filter(Replan.is)
                 assert.equal(replans.length, 1)
-                assert.equal(replans[0]!.data.reason, "rewire: keep dependent reachable")
-                assert.deepEqual(replans[0]!.data.modifiedDeps, { S2: ["S1a"] })
+                assert.equal(replans[0]!.payload.reason, "rewire: keep dependent reachable")
+                assert.deepEqual(replans[0]!.payload.modifiedDeps, { S2: ["S1a"] })
             },
         )
     })

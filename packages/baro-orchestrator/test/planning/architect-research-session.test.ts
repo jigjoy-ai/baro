@@ -3,7 +3,7 @@ import { chmodSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, it } from "node:test"
 
-import { AgenticEnvironment, BaseObserver } from "../../src/runtime/mozaik.js"
+import { CoordinationBus, BusMember } from "../../src/runtime/coordination.js"
 import {
     ScoutDispatched,
     ScoutFindingPublished,
@@ -12,9 +12,9 @@ import {
 import { runArchitectResearchSession } from "../../src/planning/adapters/architect-research-session.js"
 import { withTempDir } from "../execution/helpers.js"
 
-class Capture extends BaseObserver {
-    readonly events: SemanticEvent<unknown>[] = []
-    override onExternalEvent(_source: unknown, event: SemanticEvent<unknown>): void {
+class Capture extends BusMember {
+    readonly events: SemanticEvent<string, unknown>[] = []
+    override onExternalEvent(_source: unknown, event: SemanticEvent<string, unknown>): void {
         this.events.push(event)
     }
 }
@@ -74,7 +74,7 @@ process.exit(0);
 describe("architect research session", () => {
     it("carries a finding to the scouts still reading", async () => {
         await withTempDir("baro-research-session-", async (dir) => {
-            const env = new AgenticEnvironment("research-test")
+            const env = new CoordinationBus("research-test")
             const capture = new Capture()
             capture.join(env)
 
@@ -103,7 +103,7 @@ describe("architect research session", () => {
             assert.equal(dispatched.length, 2)
             const published = capture.events.filter(ScoutFindingPublished.is)
             assert.deepEqual(
-                published.map((event) => event.data.ok),
+                published.map((event) => event.payload.ok),
                 [true, true],
                 "every answer reaches the bus as an event",
             )

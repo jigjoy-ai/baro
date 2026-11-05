@@ -48,7 +48,7 @@ describe("Sentry", () => {
 
         const notices = env.events.filter((event) => Coordination.is(event))
         assert.equal(notices.length, 1, "only first overlap for a path emits notice")
-        assert.deepEqual(notices[0].data, {
+        assert.deepEqual(notices[0].payload, {
             fromAgentId: "S2",
             recipientId: "S1",
             kind: "notice",
@@ -118,9 +118,9 @@ describe("Sentry warns about a file whose owner already finished", () => {
 
         const notices = env.events.filter(Coordination.is)
         assert.equal(notices.length, 1)
-        assert.equal(notices[0]!.data.recipientId, "S6")
-        assert.match(notices[0]!.data.reason, /declared by story S1/)
-        assert.match(notices[0]!.data.reason, /help message|dispute|block/)
+        assert.equal(notices[0]!.payload.recipientId, "S6")
+        assert.match(notices[0]!.payload.reason, /declared by story S1/)
+        assert.match(notices[0]!.payload.reason, /help message|dispute|block/)
     })
 
     it("says nothing when a story writes its own declared file", async () => {

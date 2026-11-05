@@ -156,7 +156,7 @@ describe("CollectiveBoard progressive planning", () => {
                 },
             },
         }
-        const events: Array<SemanticEvent<unknown>> = []
+        const events: Array<SemanticEvent<string, unknown>> = []
         let graphAdmissions = 0
         const coordinator = new ProgressivePlanningCoordinator({
             runId,
@@ -206,8 +206,8 @@ describe("CollectiveBoard progressive planning", () => {
         )
         assert.equal(graphAdmissions, 1, "unknown mapping was rejected before admission")
         const rejected = events.filter(PlanFragmentRejected.is).at(-1)
-        assert.equal(rejected?.data.code, "invalid_fragment")
-        assert.match(rejected?.data.reason ?? "", /unknown invariant.*G-A99/i)
+        assert.equal(rejected?.payload.code, "invalid_fragment")
+        assert.match(rejected?.payload.reason ?? "", /unknown invariant.*G-A99/i)
     })
 
     it("closes an incomplete final union so GoalGuardian can remediate it", () => {
@@ -243,7 +243,7 @@ describe("CollectiveBoard progressive planning", () => {
                 },
             },
         }
-        const events: Array<SemanticEvent<unknown>> = []
+        const events: Array<SemanticEvent<string, unknown>> = []
         let afterCloseCalls = 0
         const coordinator = new ProgressivePlanningCoordinator({
             runId,
@@ -284,8 +284,8 @@ describe("CollectiveBoard progressive planning", () => {
         assert.equal(currentPrd.runtimeGraph?.planning?.status, "completed")
         assert.equal(afterCloseCalls, 1)
         const closed = events.find(PlanningStreamClosed.is)
-        assert.equal(closed?.data.status, "completed")
-        assert.equal(closed?.data.reason, undefined)
+        assert.equal(closed?.payload.status, "completed")
+        assert.equal(closed?.payload.reason, undefined)
     })
 
     it("accepts planning events only from the exact bound feed object", async () => {
@@ -314,14 +314,14 @@ describe("CollectiveBoard progressive planning", () => {
                 [story("S1")],
             )
 
-            env.deliverSemanticEvent(lookalike, proposal)
+            env.publish(lookalike, proposal)
             await flush()
             assert.equal(env.events.filter(PlanFragmentAdmitted.is).length, 0)
             assert.deepEqual(readPrd(prdPath).userStories, [])
 
-            env.deliverSemanticEvent(planningAuthority, proposal)
+            env.publish(planningAuthority, proposal)
             const admitted = await waitFor(env.events, PlanFragmentAdmitted.is)
-            assert.deepEqual(admitted.data.storyIds, ["S1"])
+            assert.deepEqual(admitted.payload.storyIds, ["S1"])
             assert.deepEqual(
                 readPrd(prdPath).userStories.map((entry) => entry.id),
                 ["S1"],
@@ -348,7 +348,7 @@ describe("CollectiveBoard progressive planning", () => {
 
             await waitFor(env.events, RunPushRequested.is)
             assert.equal(env.events.some(WorkOffered.is), false)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
                 RunPushed.create({ runId, pushed: false }),
             )
@@ -380,13 +380,13 @@ describe("CollectiveBoard progressive planning", () => {
             assert.equal(env.events.some(RunVerificationRequested.is), false)
             assert.equal(env.events.some(RunPushRequested.is), false)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("planner"),
                 fragment(runId, planningId, "prefix", 1, [story("S1")]),
             )
             const admittedPrefix = await waitFor(env.events, PlanFragmentAdmitted.is)
-            assert.deepEqual(admittedPrefix.data.storyIds, ["S1"])
-            assert.equal(admittedPrefix.data.graphVersion, 2)
+            assert.deepEqual(admittedPrefix.payload.storyIds, ["S1"])
+            assert.equal(admittedPrefix.payload.graphVersion, 2)
 
             const s1Offer = await offerFor(env, runId, "S1")
             const duringPlanning = readPrd(prdPath)
@@ -397,7 +397,7 @@ describe("CollectiveBoard progressive planning", () => {
                 "S1 was offered while Planner was still open",
             )
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("planner"),
                 PlanningStreamCompleted.create({
                     runId,
@@ -406,7 +406,7 @@ describe("CollectiveBoard progressive planning", () => {
                 }),
             )
             const closed = await waitFor(env.events, PlanningStreamClosed.is)
-            assert.equal(closed.data.status, "completed")
+            assert.equal(closed.payload.status, "completed")
             assert.deepEqual(
                 readPrd(prdPath).runtimeGraph?.planning?.admittedStoryIds,
                 ["S1", "S2"],
@@ -422,7 +422,7 @@ describe("CollectiveBoard progressive planning", () => {
             await completeStory(env, runId, s2Offer, "lease-s2")
 
             await waitFor(env.events, RunPushRequested.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
                 RunPushed.create({ runId, pushed: false }),
             )
@@ -459,12 +459,12 @@ describe("CollectiveBoard progressive planning", () => {
             const largeStory = (id: string, dependsOn: string[] = []) =>
                 story(id, dependsOn, { acceptance: canonicalCriteria })
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("planner"),
                 fragment(runId, planningId, "prefix", 1, [largeStory("S1")]),
             )
             await waitFor(env.events, PlanFragmentAdmitted.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("planner"),
                 fragment(runId, planningId, "suffix", 2, [
                     largeStory("S2", ["S1"]),
@@ -524,24 +524,24 @@ describe("CollectiveBoard progressive planning", () => {
             const env = joinWithCapture(board)
             await start(env, runId)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("planner"),
                 fragment(runId, planningId, "unsafe", 1, [story("S2", ["S1"])]),
             )
             const rejected = await waitFor(env.events, PlanFragmentRejected.is)
-            assert.equal(rejected.data.code, "graph_rejected")
+            assert.equal(rejected.payload.code, "graph_rejected")
             assert.deepEqual(readPrd(prdPath).userStories, [])
             assert.equal(readPrd(prdPath).runtimeGraph?.planning?.nextOrdinal, 1)
 
             const valid = fragment(runId, planningId, "foundation", 1, [story("S1")])
-            env.deliverSemanticEvent(source("planner"), valid)
+            env.publish(source("planner"), valid)
             await waitFor(env.events, PlanFragmentAdmitted.is)
-            env.deliverSemanticEvent(source("planner"), valid)
+            env.publish(source("planner"), valid)
             await waitForCount(env.events, PlanFragmentAdmitted.is, 2)
-            assert.equal(env.events.filter(PlanFragmentAdmitted.is)[1]?.data.replay, true)
+            assert.equal(env.events.filter(PlanFragmentAdmitted.is)[1]?.payload.replay, true)
             assert.equal(readPrd(prdPath).userStories.length, 1)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("planner"),
                 fragment(runId, planningId, "foundation", 1, [
                     story("S1", [], { title: "conflicting replay" }),
@@ -552,7 +552,7 @@ describe("CollectiveBoard progressive planning", () => {
                 PlanFragmentRejected.is,
                 2,
             )
-            assert.equal(conflict[1]?.data.code, "fragment_id_conflict")
+            assert.equal(conflict[1]?.payload.code, "fragment_id_conflict")
             assert.equal(readPrd(prdPath).userStories[0]?.title, "Story S1")
         })
     })
@@ -574,7 +574,7 @@ describe("CollectiveBoard progressive planning", () => {
             const env = joinWithCapture(board)
             await start(env, runId)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("planner"),
                 fragment(runId, planningId, "complete-prefix", 1, [story("S1")]),
             )
@@ -585,18 +585,18 @@ describe("CollectiveBoard progressive planning", () => {
                 planningId,
                 finalPrd: bootstrapPrd([story("S1")]),
             })
-            env.deliverSemanticEvent(source("planner"), completion)
+            env.publish(source("planner"), completion)
             await waitFor(env.events, PlanningStreamClosed.is)
 
-            env.deliverSemanticEvent(source("planner"), completion)
+            env.publish(source("planner"), completion)
             const replayed = await waitForCount(
                 env.events,
                 PlanningStreamClosed.is,
                 2,
             )
-            assert.equal(replayed[1]?.data.status, "completed")
+            assert.equal(replayed[1]?.payload.status, "completed")
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("planner"),
                 PlanningStreamCompleted.create({
                     runId,
@@ -607,7 +607,7 @@ describe("CollectiveBoard progressive planning", () => {
                 }),
             )
             const rejected = await waitFor(env.events, PlanFragmentRejected.is)
-            assert.equal(rejected.data.code, "final_plan_mismatch")
+            assert.equal(rejected.payload.code, "final_plan_mismatch")
             assert.equal(
                 readPrd(prdPath).runtimeGraph?.planning?.status,
                 "completed",
@@ -615,7 +615,7 @@ describe("CollectiveBoard progressive planning", () => {
             assert.equal(
                 env.events
                     .filter(PlanningStreamClosed.is)
-                    .some((event) => event.data.status === "failed"),
+                    .some((event) => event.payload.status === "failed"),
                 false,
             )
         })
@@ -638,13 +638,13 @@ describe("CollectiveBoard progressive planning", () => {
             })
             const env = joinWithCapture(board)
             await start(env, runId)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("planner"),
                 fragment(runId, planningId, "prefix", 1, [story("S1")]),
             )
             const offer = await offerFor(env, runId, "S1")
             const leaseId = "lease-failure-s1"
-            env.deliverSemanticEvent(
+            env.publish(
                 source("broker"),
                 WorkLeaseGranted.create({
                     runId,
@@ -657,7 +657,7 @@ describe("CollectiveBoard progressive planning", () => {
             )
             await flush()
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("planner"),
                 PlanningStreamFailed.create({
                     runId,
@@ -667,10 +667,10 @@ describe("CollectiveBoard progressive planning", () => {
                 }),
             )
             const closed = await waitFor(env.events, PlanningStreamClosed.is)
-            assert.equal(closed.data.status, "failed")
+            assert.equal(closed.payload.status, "failed")
             assert.equal(env.events.some(RunPushRequested.is), false)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("planner"),
                 PlanningStreamCompleted.create({
                     runId,
@@ -686,13 +686,13 @@ describe("CollectiveBoard progressive planning", () => {
             assert.equal(
                 env.events
                     .filter(PlanningStreamClosed.is)
-                    .some((event) => event.data.status === "completed"),
+                    .some((event) => event.payload.status === "completed"),
                 false,
             )
 
             const appliedBeforeFailure =
                 env.events.filter(RuntimeReplanApplied.is).length
-            env.deliverSemanticEvent(
+            env.publish(
                 source("S1"),
                 RuntimeReplanProposed.create({
                     runId,
@@ -709,7 +709,7 @@ describe("CollectiveBoard progressive planning", () => {
                     },
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 board,
                 Replan.create({
                     source: "surgeon:test",
@@ -736,7 +736,7 @@ describe("CollectiveBoard progressive planning", () => {
                 env.events.some(
                     (event) =>
                         WorkContextRequested.is(event) &&
-                        (event.data.storyId === "S2" || event.data.storyId === "S3"),
+                        (event.payload.storyId === "S2" || event.payload.storyId === "S3"),
                 ),
                 false,
             )
@@ -744,13 +744,13 @@ describe("CollectiveBoard progressive planning", () => {
                 env.events.some(
                     (event) =>
                         WorkOffered.is(event) &&
-                        (event.data.request.storyId === "S2" ||
-                            event.data.request.storyId === "S3"),
+                        (event.payload.request.storyId === "S2" ||
+                            event.payload.request.storyId === "S3"),
                 ),
                 false,
             )
             assert.equal(env.events.some(RecoveryStarted.is), false)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
                 RunPushed.create({ runId, pushed: false }),
             )
@@ -925,11 +925,11 @@ function fragment(
 }
 
 async function start(env: CapturedEnvironment, runId: string): Promise<void> {
-    env.deliverSemanticEvent(
+    env.publish(
         source("operator"),
         RunStartRequest.create({ reason: "test" }),
     )
-    env.deliverSemanticEvent(
+    env.publish(
         source("repo"),
         RunPrepared.create({ runId, baseSha: null }),
     )
@@ -944,13 +944,13 @@ async function offerFor(
     const context = await waitFor(
         env.events,
         (event): event is ReturnType<typeof WorkContextRequested.create> =>
-            WorkContextRequested.is(event) && event.data.storyId === storyId,
+            WorkContextRequested.is(event) && event.payload.storyId === storyId,
     )
-    env.deliverSemanticEvent(
+    env.publish(
         source("context"),
         WorkContextProvided.create({
             runId,
-            requestId: context.data.requestId,
+            requestId: context.payload.requestId,
             storyId,
             context: null,
         }),
@@ -958,9 +958,9 @@ async function offerFor(
     const offer = await waitFor(
         env.events,
         (event): event is ReturnType<typeof WorkOffered.create> =>
-            WorkOffered.is(event) && event.data.request.storyId === storyId,
+            WorkOffered.is(event) && event.payload.request.storyId === storyId,
     )
-    return offer.data
+    return offer.payload
 }
 
 async function completeStory(
@@ -970,7 +970,7 @@ async function completeStory(
     leaseId: string,
 ): Promise<void> {
     const storyId = offer.request.storyId
-    env.deliverSemanticEvent(
+    env.publish(
         source("broker"),
         WorkLeaseGranted.create({
             runId,
@@ -981,7 +981,7 @@ async function completeStory(
             request: offer.request,
         }),
     )
-    env.deliverSemanticEvent(
+    env.publish(
         source(`worker-${storyId}`),
         StoryResult.create({
             runId,
@@ -997,9 +997,9 @@ async function completeStory(
     await waitFor(
         env.events,
         (event): event is ReturnType<typeof StoryIntegrationRequested.create> =>
-            StoryIntegrationRequested.is(event) && event.data.storyId === storyId,
+            StoryIntegrationRequested.is(event) && event.payload.storyId === storyId,
     )
-    env.deliverSemanticEvent(
+    env.publish(
         source("repo"),
         StoryMerged.create({
             runId,
@@ -1015,16 +1015,16 @@ function readPrd(path: string): PrdFile {
     return JSON.parse(readFileSync(path, "utf8")) as PrdFile
 }
 
-async function waitFor<T extends SemanticEvent<unknown>>(
-    events: readonly SemanticEvent<unknown>[],
-    guard: (event: SemanticEvent<unknown>) => event is T,
+async function waitFor<T extends SemanticEvent<string, unknown>>(
+    events: readonly SemanticEvent<string, unknown>[],
+    guard: (event: SemanticEvent<string, unknown>) => event is T,
 ): Promise<T> {
     return (await waitForCount(events, guard, 1))[0]!
 }
 
-async function waitForCount<T extends SemanticEvent<unknown>>(
-    events: readonly SemanticEvent<unknown>[],
-    guard: (event: SemanticEvent<unknown>) => event is T,
+async function waitForCount<T extends SemanticEvent<string, unknown>>(
+    events: readonly SemanticEvent<string, unknown>[],
+    guard: (event: SemanticEvent<string, unknown>) => event is T,
     count: number,
 ): Promise<T[]> {
     for (let attempt = 0; attempt < 200; attempt += 1) {

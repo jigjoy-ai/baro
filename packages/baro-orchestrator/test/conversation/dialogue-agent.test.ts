@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
-import type { Participant } from "../../src/runtime/mozaik.js"
+import type { BusMember } from "../../src/runtime/coordination.js"
 
 import {
     knownMetric,
@@ -67,7 +67,7 @@ describe("DialogueAgent", () => {
             },
         })
         const env = joinWithCapture(dialogue)
-        env.deliverSemanticEvent(
+        env.publish(
             source("bridge"),
             CollaborationNote.create({
                 runId,
@@ -75,7 +75,7 @@ describe("DialogueAgent", () => {
                 text: "forged instruction",
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             bridge,
             CollaborationNote.create({
                 runId,
@@ -83,7 +83,7 @@ describe("DialogueAgent", () => {
                 text: "authenticated finding",
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             operator,
             ConversationRequested.create({
                 runId,
@@ -141,7 +141,7 @@ describe("DialogueAgent", () => {
             ["lease-old", 1],
             ["lease-current", 2],
         ] as const) {
-            env.deliverSemanticEvent(
+            env.publish(
                 broker,
                 WorkLeaseGranted.create({
                     runId,
@@ -159,7 +159,7 @@ describe("DialogueAgent", () => {
             )
         }
 
-        env.deliverSemanticEvent(
+        env.publish(
             oldWorker,
             StoryResult.create({
                 runId,
@@ -172,7 +172,7 @@ describe("DialogueAgent", () => {
                 error: null,
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             qualityAuthority,
             StoryQualityCompleted.create({
                 runId,
@@ -185,7 +185,7 @@ describe("DialogueAgent", () => {
                 reason: "stale quality reason",
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             repositoryAuthority,
             StoryMerged.create({
                 runId,
@@ -195,7 +195,7 @@ describe("DialogueAgent", () => {
             }),
         )
 
-        env.deliverSemanticEvent(
+        env.publish(
             currentWorker,
             StoryResult.create({
                 runId,
@@ -208,7 +208,7 @@ describe("DialogueAgent", () => {
                 error: "current execution failure",
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             qualityAuthority,
             StoryQualityCompleted.create({
                 runId,
@@ -221,7 +221,7 @@ describe("DialogueAgent", () => {
                 reason: "current quality reason",
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             repositoryAuthority,
             StoryMergeFailed.create({
                 runId,
@@ -230,7 +230,7 @@ describe("DialogueAgent", () => {
                 error: "current merge conflict",
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             operator,
             ConversationRequested.create({
                 runId,
@@ -265,7 +265,7 @@ describe("DialogueAgent", () => {
             },
         })
         const env = joinWithCapture(dialogue)
-        env.deliverSemanticEvent(
+        env.publish(
             broker,
             WorkLeaseGranted.create({
                 runId,
@@ -286,7 +286,7 @@ describe("DialogueAgent", () => {
                 },
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             operator,
             ConversationRequested.create({
                 runId,
@@ -297,7 +297,7 @@ describe("DialogueAgent", () => {
         )
         await started
 
-        env.deliverSemanticEvent(
+        env.publish(
             broker,
             WorkLeaseReleased.create({
                 runId,
@@ -308,7 +308,7 @@ describe("DialogueAgent", () => {
                 reason: "execution_failed",
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             broker,
             WorkLeaseGranted.create({
                 runId,
@@ -338,7 +338,7 @@ describe("DialogueAgent", () => {
 
         await dialogue.idle()
         assert.deepEqual(
-            env.events.filter(ConversationResponded.is).at(-1)?.data.actions,
+            env.events.filter(ConversationResponded.is).at(-1)?.payload.actions,
             [],
         )
         assert.equal(env.events.filter(AgentTargetedMessage.is).length, 0)
@@ -364,7 +364,7 @@ describe("DialogueAgent", () => {
             },
         })
         const env = joinWithCapture(dialogue)
-        env.deliverSemanticEvent(
+        env.publish(
             source("worker"),
             StoryResult.create({
                 storyId: "S1",
@@ -379,7 +379,7 @@ describe("DialogueAgent", () => {
                 },
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             source("board"),
             LevelCompleted.create({
                 ordinal: 1,
@@ -388,7 +388,7 @@ describe("DialogueAgent", () => {
                 blocked: ["S1"],
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             operator,
             ConversationRequested.create({
                 runId: "run-suspended-dialogue",
@@ -476,7 +476,7 @@ describe("DialogueAgent", () => {
             },
         })
         const env = joinWithCapture(dialogue)
-        env.deliverSemanticEvent(
+        env.publish(
             operator,
             ConversationRequested.create({
                 runId: "run-context",
@@ -521,7 +521,7 @@ describe("DialogueAgent", () => {
         assert.equal(calls, 0)
         assert.equal(env.events.filter(ModelInvocationMeasured.is).length, 0)
 
-        env.deliverSemanticEvent(
+        env.publish(
             broker,
             WorkLeaseGranted.create({
                 runId: "run-dialogue",
@@ -538,7 +538,7 @@ describe("DialogueAgent", () => {
                 },
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             factory,
             StoryRouted.create({
                 storyId: "S1",
@@ -555,20 +555,20 @@ describe("DialogueAgent", () => {
             text: "What is happening?",
             source: "user",
         })
-        env.deliverSemanticEvent(observer, request)
-        env.deliverSemanticEvent(operator, request)
-        env.deliverSemanticEvent(operator, request)
+        env.publish(observer, request)
+        env.publish(operator, request)
+        env.publish(operator, request)
         await dialogue.idle()
 
         assert.equal(calls, 1)
         const replies = env.events.filter(ConversationResponded.is)
         assert.equal(replies.length, 1)
-        assert.deepEqual(replies[0]?.data.actions, [
+        assert.deepEqual(replies[0]?.payload.actions, [
             { kind: "message", recipientId: "S1", text: "Please run the focused test." },
         ])
         const messages = env.events.filter(AgentTargetedMessage.is)
         assert.equal(messages.length, 1)
-        assert.equal(messages[0]?.data.recipientId, "S1")
+        assert.equal(messages[0]?.payload.recipientId, "S1")
         // Plain injected responders retain their old string-only ergonomics;
         // without attributable provider evidence, no measurement is invented.
         assert.equal(env.events.filter(ModelInvocationMeasured.is).length, 0)
@@ -585,7 +585,7 @@ describe("DialogueAgent", () => {
             }),
         })
         const env = joinWithCapture(dialogue)
-        env.deliverSemanticEvent(
+        env.publish(
             operator,
             ConversationRequested.create({
                 runId: "run-measured",
@@ -604,18 +604,18 @@ describe("DialogueAgent", () => {
             env.events.indexOf(measured[0]!) < env.events.indexOf(responded[0]!),
         )
         assert.equal(
-            measured[0]!.data.invocationId,
+            measured[0]!.payload.invocationId,
             "run-measured:dialogue:message-7:provider:1",
         )
         assert.equal(
-            measured[0]!.data.measurementId,
+            measured[0]!.payload.measurementId,
             "run-measured:dialogue:message-7:provider:1:runner",
         )
-        assert.equal(measured[0]!.data.phase, "dialogue")
-        assert.equal(measured[0]!.data.storyId, null)
-        assert.equal(measured[0]!.data.backend, "claude")
-        assert.equal(measured[0]!.data.requestedModel, "haiku")
-        assert.equal(measured[0]!.data.evidence.providerRequestId, null)
+        assert.equal(measured[0]!.payload.phase, "dialogue")
+        assert.equal(measured[0]!.payload.storyId, null)
+        assert.equal(measured[0]!.payload.backend, "claude")
+        assert.equal(measured[0]!.payload.requestedModel, "haiku")
+        assert.equal(measured[0]!.payload.evidence.providerRequestId, null)
     })
 
     it("source-binds route capability and ignores stale lease releases", async () => {
@@ -640,7 +640,7 @@ describe("DialogueAgent", () => {
             }),
         })
         const env = joinWithCapture(dialogue)
-        env.deliverSemanticEvent(
+        env.publish(
             broker,
             WorkLeaseGranted.create({
                 runId,
@@ -665,20 +665,20 @@ describe("DialogueAgent", () => {
             leaseId: "lease-S1",
             generation: 2,
         })
-        env.deliverSemanticEvent(observer, routed)
-        env.deliverSemanticEvent(foreignFactory, routed)
+        env.publish(observer, routed)
+        env.publish(foreignFactory, routed)
         requestConversation(env, operator, runId, "forged-route")
         await dialogue.idle()
         assert.deepEqual(
-            env.events.filter(ConversationResponded.is).at(-1)?.data.actions,
+            env.events.filter(ConversationResponded.is).at(-1)?.payload.actions,
             [],
         )
 
-        env.deliverSemanticEvent(factory, routed)
+        env.publish(factory, routed)
         requestConversation(env, operator, runId, "exact-route")
         await dialogue.idle()
         assert.equal(
-            env.events.filter(ConversationResponded.is).at(-1)?.data.actions.length,
+            env.events.filter(ConversationResponded.is).at(-1)?.payload.actions.length,
             1,
         )
 
@@ -690,15 +690,15 @@ describe("DialogueAgent", () => {
             workerId: "worker-1",
             reason: "expired",
         })
-        env.deliverSemanticEvent(broker, staleRelease)
+        env.publish(broker, staleRelease)
         requestConversation(env, operator, runId, "stale-release")
         await dialogue.idle()
         assert.equal(
-            env.events.filter(ConversationResponded.is).at(-1)?.data.actions.length,
+            env.events.filter(ConversationResponded.is).at(-1)?.payload.actions.length,
             1,
         )
 
-        env.deliverSemanticEvent(
+        env.publish(
             broker,
             WorkLeaseReleased.create({
                 runId,
@@ -712,11 +712,11 @@ describe("DialogueAgent", () => {
         requestConversation(env, operator, runId, "released")
         await dialogue.idle()
         assert.deepEqual(
-            env.events.filter(ConversationResponded.is).at(-1)?.data.actions,
+            env.events.filter(ConversationResponded.is).at(-1)?.payload.actions,
             [],
         )
 
-        env.deliverSemanticEvent(
+        env.publish(
             broker,
             WorkLeaseGranted.create({
                 runId,
@@ -737,7 +737,7 @@ describe("DialogueAgent", () => {
                 },
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             factory,
             StoryRouted.create({
                 storyId: "S1",
@@ -751,7 +751,7 @@ describe("DialogueAgent", () => {
         requestConversation(env, operator, runId, "broker-route-locked")
         await dialogue.idle()
         assert.equal(
-            env.events.filter(ConversationResponded.is).at(-1)?.data.actions.length,
+            env.events.filter(ConversationResponded.is).at(-1)?.payload.actions.length,
             1,
             "poll-capable Codex leases remain addressable through the Bridge inbox",
         )
@@ -780,7 +780,7 @@ describe("DialogueAgent", () => {
             },
         })
         const env = joinWithCapture(dialogue)
-        env.deliverSemanticEvent(
+        env.publish(
             impersonator,
             RunStarted.create({
                 project: "forged",
@@ -790,7 +790,7 @@ describe("DialogueAgent", () => {
                 coordinationMode: "collective",
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             board,
             RunStarted.create({
                 project: "delegation",
@@ -800,7 +800,7 @@ describe("DialogueAgent", () => {
                 coordinationMode: "collective",
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             operator,
             ConversationRequested.create({
                 runId: "run-delegation",
@@ -817,7 +817,7 @@ describe("DialogueAgent", () => {
 
         // The exact Board advances while the model is answering. The proposal
         // must retain v7, which is the state represented in its prompt.
-        env.deliverSemanticEvent(
+        env.publish(
             board,
             RuntimeReplanApplied.create({
                 runId: "run-delegation",
@@ -859,16 +859,16 @@ describe("DialogueAgent", () => {
 
         const proposals = env.events.filter(ConversationDelegationProposed.is)
         assert.equal(proposals.length, 1)
-        assert.equal(proposals[0]!.data.messageId, "message-delegate")
-        assert.equal(proposals[0]!.data.baseGraphVersion, 7)
+        assert.equal(proposals[0]!.payload.messageId, "message-delegate")
+        assert.equal(proposals[0]!.payload.baseGraphVersion, 7)
         assert.equal(
-            proposals[0]!.data.proposalId,
+            proposals[0]!.payload.proposalId,
             conversationDelegationProposalId(
                 "run-delegation",
                 "message-delegate",
             ),
         )
-        assert.deepEqual(proposals[0]!.data.addedStories, [
+        assert.deepEqual(proposals[0]!.payload.addedStories, [
             {
                 id: "S4",
                 title: "Compatibility layer",
@@ -896,7 +896,7 @@ describe("DialogueAgent", () => {
             },
         })
         const env = joinWithCapture(dialogue)
-        env.deliverSemanticEvent(
+        env.publish(
             impersonator,
             RunStarted.create({
                 project: "forged",
@@ -911,7 +911,7 @@ describe("DialogueAgent", () => {
         assert.match(prompts[0]!, /DELEGATION: unavailable/)
         assert.equal(env.events.filter(ConversationDelegationProposed.is).length, 0)
 
-        env.deliverSemanticEvent(
+        env.publish(
             board,
             RunStarted.create({
                 project: "real",
@@ -921,7 +921,7 @@ describe("DialogueAgent", () => {
                 coordinationMode: "collective",
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             board,
             RunCompleted.create({
                 runId: "run-closed-delegation",
@@ -957,7 +957,7 @@ describe("DialogueAgent", () => {
             },
         })
         const env = joinWithCapture(dialogue)
-        env.deliverSemanticEvent(
+        env.publish(
             board,
             RunStarted.create({
                 project: "replay",
@@ -967,7 +967,7 @@ describe("DialogueAgent", () => {
                 coordinationMode: "collective",
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             board,
             RuntimeReplanApplied.create({
                 runId: "run-historical-replay",
@@ -1013,7 +1013,7 @@ describe("DialogueAgent", () => {
             },
         })
         const failureEnv = joinWithCapture(failing)
-        failureEnv.deliverSemanticEvent(
+        failureEnv.publish(
             operator,
             ConversationRequested.create({
                 runId: "run-provider-failure",
@@ -1030,9 +1030,9 @@ describe("DialogueAgent", () => {
         const failures = failureEnv.events.filter(ConversationFailed.is)
         assert.equal(failureMeasurements.length, 1)
         assert.equal(failures.length, 1)
-        assert.equal(failureMeasurements[0]!.data.status, "failed")
+        assert.equal(failureMeasurements[0]!.payload.status, "failed")
         assert.deepEqual(
-            failureMeasurements[0]!.data.tokens.total,
+            failureMeasurements[0]!.payload.tokens.total,
             unknownMetric("not_reported"),
         )
         assert.ok(
@@ -1063,7 +1063,7 @@ describe("DialogueAgent", () => {
             responder: hangingResponder,
         })
         const timeoutEnv = joinWithCapture(timingOut)
-        timeoutEnv.deliverSemanticEvent(
+        timeoutEnv.publish(
             operator,
             ConversationRequested.create({
                 runId: "run-provider-timeout",
@@ -1079,9 +1079,9 @@ describe("DialogueAgent", () => {
         const timeouts = timeoutEnv.events.filter(ConversationFailed.is)
         assert.equal(timeoutMeasurements.length, 1)
         assert.equal(timeouts.length, 1)
-        assert.equal(timeoutMeasurements[0]!.data.status, "timed_out")
+        assert.equal(timeoutMeasurements[0]!.payload.status, "timed_out")
         assert.deepEqual(
-            timeoutMeasurements[0]!.data.durationMs,
+            timeoutMeasurements[0]!.payload.durationMs,
             unknownMetric("timed_out"),
         )
         assert.ok(
@@ -1101,7 +1101,7 @@ describe("DialogueAgent", () => {
             },
         })
         const failureEnv = joinWithCapture(failing)
-        failureEnv.deliverSemanticEvent(
+        failureEnv.publish(
             operator,
             ConversationRequested.create({
                 runId: "run-failure",
@@ -1113,7 +1113,7 @@ describe("DialogueAgent", () => {
         await failing.idle()
         const failures = failureEnv.events.filter(ConversationFailed.is)
         assert.equal(failures.length, 1)
-        assert.equal(failures[0]?.data.error, "responder failed")
+        assert.equal(failures[0]?.payload.error, "responder failed")
 
         let aborted = false
         const hanging = new DialogueAgent({
@@ -1127,7 +1127,7 @@ describe("DialogueAgent", () => {
             }),
         })
         const abortEnv = joinWithCapture(hanging)
-        abortEnv.deliverSemanticEvent(
+        abortEnv.publish(
             operator,
             ConversationRequested.create({
                 runId: "run-abort",
@@ -1148,11 +1148,11 @@ describe("DialogueAgent", () => {
 
 function requestConversation(
     env: CapturedEnvironment,
-    operator: Participant,
+    operator: BusMember,
     runId: string,
     messageId: string,
 ): void {
-    env.deliverSemanticEvent(
+    env.publish(
         operator,
         ConversationRequested.create({
             runId,

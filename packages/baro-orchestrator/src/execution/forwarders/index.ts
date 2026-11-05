@@ -1,4 +1,4 @@
-import { AgenticEnvironment, type Participant } from "../../runtime/mozaik.js"
+import { CoordinationBus, type BusMember } from "../../runtime/coordination.js"
 
 import type { ModelInvocationPhase } from "../../telemetry/model-telemetry.js"
 import type { StoryOutcomeAuthority } from "../../runtime/story-outcome-authority.js"
@@ -20,10 +20,10 @@ import { TokenUsageForwarder } from "./token-usage.js"
 export interface BaroEventForwarders {
     readonly dag: DagForwarder
     readonly progress: ProgressForwarder
-    setLegacyReplanAuthority(authority: Participant): void
-    setRuntimeReplanAuthority(authority: Participant): void
-    setRepositoryAuthority(authority: Participant): void
-    setInterventionAuthority(authority: Participant): void
+    setLegacyReplanAuthority(authority: BusMember): void
+    setRuntimeReplanAuthority(authority: BusMember): void
+    setRepositoryAuthority(authority: BusMember): void
+    setInterventionAuthority(authority: BusMember): void
     sealCollectivePresentationAuthorities(
         authorities: CollectivePresentationAuthorities,
     ): void
@@ -31,14 +31,14 @@ export interface BaroEventForwarders {
 
 export interface CollectivePresentationAuthorities
     extends CollectiveCoordinationAuthorities {
-    repository: Participant
+    repository: BusMember
     outcomeAuthority: StoryOutcomeAuthority
-    modelTelemetryCollector: Participant
+    modelTelemetryCollector: BusMember
     /** Raw Critic remains a telemetry authority, not a collective UI authority. */
-    critique?: Participant
-    surgeon?: Participant
-    dialogue?: Participant
-    finalizer?: Participant
+    critique?: BusMember
+    surgeon?: BusMember
+    dialogue?: BusMember
+    finalizer?: BusMember
 }
 
 const ALL_MODEL_PHASES: readonly ModelInvocationPhase[] = [
@@ -53,7 +53,7 @@ const ALL_MODEL_PHASES: readonly ModelInvocationPhase[] = [
 ]
 
 export function joinBaroEventForwarders(
-    env: AgenticEnvironment,
+    env: CoordinationBus,
     options: { collective?: boolean } = {},
 ): BaroEventForwarders {
     const dag = new DagForwarder()
@@ -79,18 +79,18 @@ export function joinBaroEventForwarders(
     return {
         dag,
         progress,
-        setLegacyReplanAuthority(authority: Participant): void {
+        setLegacyReplanAuthority(authority: BusMember): void {
             dag.setLegacyReplanAuthority(authority)
             progress.setLegacyReplanAuthority(authority)
         },
-        setRuntimeReplanAuthority(authority: Participant): void {
+        setRuntimeReplanAuthority(authority: BusMember): void {
             dag.setRuntimeReplanAuthority(authority)
             progress.setRuntimeReplanAuthority(authority)
         },
-        setRepositoryAuthority(authority: Participant): void {
+        setRepositoryAuthority(authority: BusMember): void {
             progress.setRepositoryAuthority(authority)
         },
-        setInterventionAuthority(authority: Participant): void {
+        setInterventionAuthority(authority: BusMember): void {
             coordination.setInterventionAuthority(authority)
         },
         sealCollectivePresentationAuthorities(

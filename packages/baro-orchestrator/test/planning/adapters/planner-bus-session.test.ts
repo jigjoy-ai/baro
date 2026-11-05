@@ -5,11 +5,9 @@ import { fileURLToPath } from "node:url"
 import { describe, it } from "node:test"
 
 import {
-    AgenticEnvironment,
-    BaseObserver,
-    type Participant,
     type SemanticEvent,
 } from "../../../src/runtime/mozaik.js"
+import { BusMember, CoordinationBus } from "../../../src/runtime/coordination.js"
 import {
     ModelInvocationMeasured,
     PlanFragmentAdmitted,
@@ -87,7 +85,7 @@ const ENVELOPE: GoalEnvelope = {
 
 /** Simulates the Board: every proposed fragment is admitted at graph v7
  *  with one pruned edge, so the receipt the model sees is the host's. */
-class StubFeed extends BaseObserver {
+class StubFeed extends BusMember {
     readonly opened: PlanningOpenCommand[] = []
     readonly fragments: PlanFragmentCommand[] = []
     readonly completions: PlanCompleteCommand[] = []
@@ -109,8 +107,8 @@ class StubFeed extends BaseObserver {
             replay: false,
             droppedEdges: ["S9->S1"],
         })
-        for (const environment of this.getEnvironments()) {
-            environment.deliverSemanticEvent(this, admitted)
+        for (const environment of this.getBuses()) {
+            environment.publish(this, admitted)
         }
     }
 
@@ -298,12 +296,12 @@ async function exerciseBaroMcp(target) {
     return path
 }
 
-class EventCapture extends BaseObserver {
-    readonly events: SemanticEvent<unknown>[] = []
+class EventCapture extends BusMember {
+    readonly events: SemanticEvent<string, unknown>[] = []
 
     override onExternalEvent(
-        _source: Participant,
-        event: SemanticEvent<unknown>,
+        _source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): void {
         this.events.push(event)
     }
@@ -312,7 +310,7 @@ class EventCapture extends BaseObserver {
 describe("planner bus session", () => {
     it("runs the planner on the bus with authoritative fragment receipts", async () => {
         await withTempDir("baro-planner-bus-", async (dir) => {
-            const env = new AgenticEnvironment("planner-bus-session")
+            const env = new CoordinationBus("planner-bus-session")
             const feed = new StubFeed()
             feed.join(env)
             const capture = new EventCapture()
@@ -359,17 +357,17 @@ describe("planner bus session", () => {
             // The session is the runner-evidence producer for its planner.
             const measured = capture.events.filter(ModelInvocationMeasured.is)
             assert.equal(measured.length, 1)
-            assert.equal(measured[0]!.data.phase, "planner")
-            assert.equal(measured[0]!.data.runId, "run-bus-1")
-            assert.equal(measured[0]!.data.backend, "claude")
-            assert.equal(measured[0]!.data.requestedModel, "opus")
-            assert.equal(measured[0]!.data.status, "succeeded")
+            assert.equal(measured[0]!.payload.phase, "planner")
+            assert.equal(measured[0]!.payload.runId, "run-bus-1")
+            assert.equal(measured[0]!.payload.backend, "claude")
+            assert.equal(measured[0]!.payload.requestedModel, "opus")
+            assert.equal(measured[0]!.payload.status, "succeeded")
         })
     })
 
     it("discards a drifted restatement and completes from the host's admitted copies", async () => {
         await withTempDir("baro-planner-bus-retry-", async (dir) => {
-            const env = new AgenticEnvironment("planner-bus-retry")
+            const env = new CoordinationBus("planner-bus-retry")
             const feed = new StubFeed()
             feed.join(env)
 
@@ -413,7 +411,7 @@ describe("planner bus session", () => {
 
     it("composes the published prefix when the terminal restatement never arrives", async () => {
         await withTempDir("baro-planner-bus-prose-", async (dir) => {
-            const env = new AgenticEnvironment("planner-bus-prose")
+            const env = new CoordinationBus("planner-bus-prose")
             const feed = new StubFeed()
             feed.join(env)
 
@@ -459,7 +457,7 @@ describe("planner bus session", () => {
 
     it("still fails prose finalization when nothing was ever published", async () => {
         await withTempDir("baro-planner-bus-prose-empty-", async (dir) => {
-            const env = new AgenticEnvironment("planner-bus-prose-empty")
+            const env = new CoordinationBus("planner-bus-prose-empty")
             const feed = new StubFeed()
             feed.join(env)
 
@@ -498,7 +496,7 @@ describe("planner bus session", () => {
 
     it("adopts the bootstrap-seeded planning latch instead of minting its own", async () => {
         await withTempDir("baro-planner-bus-seeded-", async (dir) => {
-            const env = new AgenticEnvironment("planner-bus-seeded")
+            const env = new CoordinationBus("planner-bus-seeded")
             const feed = new StubFeed()
             feed.join(env)
 
@@ -544,7 +542,7 @@ describe("planner bus session", () => {
 
     for (const backend of ["codex", "opencode", "pi"]) {
         it(`refuses a ${backend} planner instead of falling through to the OpenAI API (#193)`, async () => {
-            const env = new AgenticEnvironment(`planner-bus-${backend}`)
+            const env = new CoordinationBus(`planner-bus-${backend}`)
             const feed = new StubFeed()
             feed.join(env)
 

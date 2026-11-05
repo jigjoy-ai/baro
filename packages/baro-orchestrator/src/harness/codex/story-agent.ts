@@ -51,9 +51,9 @@ export class CodexStoryAgent extends OneShotStoryAgent<CodexRunSummary> {
                     targetedMessageCorrelation: correlationOf(spec),
                 }),
             failureSignalFrom: (event) =>
-                (CodexSystem.is(event) && event.data.subtype === "error") ||
-                (CodexTurnEvent.is(event) && event.data.phase === "failed")
-                    ? event.data.raw
+                (CodexSystem.is(event) && event.payload.subtype === "error") ||
+                (CodexTurnEvent.is(event) && event.payload.phase === "failed")
+                    ? event.payload.raw
                     : undefined,
             // Codex reports turn failures explicitly, so a clean exit with no
             // failure signal is trusted as-is.

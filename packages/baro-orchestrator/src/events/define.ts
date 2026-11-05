@@ -1,6 +1,6 @@
 /** Shared event factory: wire type string + frozen-snapshot create() + is() guard. Wire `type` strings are frozen (see ../semantic-events.ts). */
 
-import { SemanticEvent } from "../runtime/mozaik.js"
+import { SemanticEvent, UNSTAMPED_PRODUCER } from "../runtime/mozaik.js"
 
 /**
  * One event "kind": wire type string + typed `create()` factory + `is()`
@@ -9,16 +9,16 @@ import { SemanticEvent } from "../runtime/mozaik.js"
 export function defineSemanticEvent<TData>(type: string) {
     return {
         type,
-        create: (data: TData): SemanticEvent<TData> => {
+        create: (data: TData): SemanticEvent<string, TData> => {
             // Mozaik delivers the same event object synchronously to every
             // subscriber, while several Baro participants defer decisions to
             // an async mailbox. Snapshot and freeze at the producer boundary
             // so an earlier subscriber cannot rewrite what a later authority
             // observes, and callers cannot mutate an event after publishing it.
             const snapshot = deepFreezeSemanticData(structuredClone(data))
-            return Object.freeze(new SemanticEvent<TData>(type, snapshot))
+            return Object.freeze(SemanticEvent.create(type, UNSTAMPED_PRODUCER, snapshot))
         },
-        is: (event: SemanticEvent<unknown>): event is SemanticEvent<TData> =>
+        is: (event: SemanticEvent<string, unknown>): event is SemanticEvent<string, TData> =>
             event.type === type,
     } as const
 }

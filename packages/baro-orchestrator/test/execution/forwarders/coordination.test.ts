@@ -31,7 +31,7 @@ type OptionalCollectiveFamily = "coordination" | "quality" | "intervention"
 interface CollectivePresentationCase {
     name: string
     family: RequiredCollectiveFamily | OptionalCollectiveFamily
-    event: SemanticEvent<unknown>
+    event: SemanticEvent<string, unknown>
     expectedText: string
 }
 
@@ -224,7 +224,7 @@ function optionalCollectivePresentationCases(): CollectivePresentationCase[] {
     ]
 }
 
-function rawWorkClaim(): SemanticEvent<unknown> {
+function rawWorkClaim(): SemanticEvent<string, unknown> {
     return WorkClaimed.create({
         runId: "run-1",
         offerId: "offer-1",

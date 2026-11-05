@@ -9,7 +9,6 @@
  */
 
 import {
-    BaseObserver,
     FunctionCallItem,
     FunctionCallOutputItem,
     Gpt54,
@@ -18,15 +17,13 @@ import {
     Gpt55,
     ModelContext,
     ModelMessageItem,
-    Participant,
     SemanticEvent,
     SystemMessageItem,
     UserMessageItem,
     type GenerativeModel,
-    type Tool,
-} from "../../runtime/mozaik.js"
+    type Tool, toWire } from "../../runtime/mozaik.js"
 
-import { AgenticEnvironment } from "../../runtime/mozaik.js"
+import { CoordinationBus, BusMember } from "../../runtime/coordination.js"
 import type { GatewayBillingCoordinator } from "../../telemetry/billing/index.js"
 import {
     isProviderCallTimeout,
@@ -156,11 +153,11 @@ export interface OpenAIStoryAgentOptions {
     apiKey?: string
     /** Only this participant may decide a runtime DAG proposal. The tool is
      * unavailable when this or the story's collective correlation is absent. */
-    runtimeReplanDecisionAuthority?: Participant
+    runtimeReplanDecisionAuthority?: BusMember
     /** How long a propose_replan call waits for its exact Board decision. */
     runtimeReplanDecisionTimeoutMs?: number
     /** Exact Critic whose verdict completes or resumes a reviewed turn. */
-    turnReviewAuthority?: Participant
+    turnReviewAuthority?: BusMember
     /** Bound for one terminal-turn review. Default: 240 seconds. */
     turnReviewTimeoutMs?: number
     /** Exact lease capability made available to the contained native shell.
@@ -182,15 +179,15 @@ interface ResolvedOpenAIStoryAgentOptions {
     suspensionQuiescenceTimeoutMs: number
     baseUrl: string
     apiKey: string
-    runtimeReplanDecisionAuthority: Participant | null
+    runtimeReplanDecisionAuthority: BusMember | null
     runtimeReplanDecisionTimeoutMs: number
-    turnReviewAuthority: Participant | null
+    turnReviewAuthority: BusMember | null
     turnReviewTimeoutMs: number
 }
 
 let openAIStoryProducerSequence = 0
 
-export class OpenAIStoryAgent extends BaseObserver {
+export class OpenAIStoryAgent extends BusMember {
     private readonly spec: Required<
         Pick<
             StorySpec,
@@ -212,12 +209,12 @@ export class OpenAIStoryAgent extends BaseObserver {
         PendingRuntimeReplan
     >()
 
-    private envRef: AgenticEnvironment | null = null
+    private envRef: CoordinationBus | null = null
     private readonly abortController = new AbortController()
     private abortReason: string | null = null
     private abortFailure: StoryFailureData | undefined
     /** Optional explicit bus identity for the terminal outcome. */
-    private resultAuthority: Participant | null = null
+    private resultAuthority: BusMember | null = null
     private currentPhase: AgentPhase = "idle"
     private startedAt: number | null = null
     private readonly terminalProducerId = ++openAIStoryProducerSequence
@@ -331,7 +328,7 @@ export class OpenAIStoryAgent extends BaseObserver {
                 collaboration: opts.collaboration,
                 denyPublish: true,
                 onCommandRefused: (command, reason) =>
-                    this.envRef?.deliverSemanticEvent(
+                    this.envRef?.publish(
                         this,
                         StoryCommandRefused.create({
                             storyId: this.spec.id,
@@ -376,14 +373,14 @@ export class OpenAIStoryAgent extends BaseObserver {
         return this.currentPhase
     }
 
-    setResultAuthority(source: Participant): void {
+    setResultAuthority(source: BusMember): void {
         if (this.resultAuthority && this.resultAuthority !== source) {
             throw new Error(`result authority already set for ${this.spec.id}`)
         }
         this.resultAuthority = source
     }
 
-    run(env: AgenticEnvironment): Promise<StoryOutcome> {
+    run(env: CoordinationBus): Promise<StoryOutcome> {
         if (this.startedAt != null) return this.done
         this.envRef = env
         this.startedAt = Date.now()
@@ -397,26 +394,26 @@ export class OpenAIStoryAgent extends BaseObserver {
     }
 
     override async onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): Promise<void> {
         if (
             source === this.opts.runtimeReplanDecisionAuthority &&
             (RuntimeReplanApplied.is(event) || RuntimeReplanRejected.is(event))
         ) {
-            const pending = this.pendingRuntimeReplans.get(event.data.proposalId)
+            const pending = this.pendingRuntimeReplans.get(event.payload.proposalId)
             if (
                 pending &&
-                this.matchesRuntimeReplanDecision(event.data) &&
-                event.data.baseGraphVersion === pending.baseGraphVersion &&
+                this.matchesRuntimeReplanDecision(event.payload) &&
+                event.payload.baseGraphVersion === pending.baseGraphVersion &&
                 (RuntimeReplanApplied.is(event)
-                    ? event.data.previousGraphVersion === pending.baseGraphVersion
+                    ? event.payload.previousGraphVersion === pending.baseGraphVersion
                     : true)
             ) {
                 pending.resolve(
                     RuntimeReplanApplied.is(event)
-                        ? { status: "applied", data: event.data }
-                        : { status: "rejected", data: event.data },
+                        ? { status: "applied", data: event.payload }
+                        : { status: "rejected", data: event.payload },
                 )
             }
             return
@@ -427,29 +424,29 @@ export class OpenAIStoryAgent extends BaseObserver {
             GateRuleAnnounced.is(event) &&
             source === this.opts.runtimeReplanDecisionAuthority &&
             this.liveSurface !== null &&
-            event.data.gateId === "write-surface" &&
-            event.data.surface !== undefined &&
-            event.data.runId === this.spec.runId &&
-            event.data.storyId === this.spec.id &&
-            event.data.leaseId === this.spec.leaseId &&
-            event.data.generation === this.spec.generation &&
-            event.data.graphVersion > this.appliedSurfaceGraphVersion
+            event.payload.gateId === "write-surface" &&
+            event.payload.surface !== undefined &&
+            event.payload.runId === this.spec.runId &&
+            event.payload.storyId === this.spec.id &&
+            event.payload.leaseId === this.spec.leaseId &&
+            event.payload.generation === this.spec.generation &&
+            event.payload.graphVersion > this.appliedSurfaceGraphVersion
         ) {
-            this.appliedSurfaceGraphVersion = event.data.graphVersion
+            this.appliedSurfaceGraphVersion = event.payload.graphVersion
             this.liveSurface.writes.splice(
                 0,
                 this.liveSurface.writes.length,
-                ...event.data.surface.writes,
+                ...event.payload.surface.writes,
             )
             for (const path of Object.keys(this.liveSurface.ownedElsewhere)) {
                 delete this.liveSurface.ownedElsewhere[path]
             }
             Object.assign(
                 this.liveSurface.ownedElsewhere,
-                event.data.surface.ownedElsewhere,
+                event.payload.surface.ownedElsewhere,
             )
             this.pendingRuleUpdates.push(
-                this.renderSurfaceRuleUpdate(event.data.graphVersion),
+                this.renderSurfaceRuleUpdate(event.payload.graphVersion),
             )
             return
         }
@@ -457,7 +454,7 @@ export class OpenAIStoryAgent extends BaseObserver {
             AgentTargetedMessage.is(event) &&
             acceptsTargetedMessage(
                 source,
-                event.data,
+                event.payload,
                 this.spec.id,
                 this.spec.targetedMessageAuthority,
                 this.spec,
@@ -470,28 +467,28 @@ export class OpenAIStoryAgent extends BaseObserver {
                 this.spec.requiresQualityReview &&
                 (source === this.opts.turnReviewAuthority ||
                     source === this.spec.targetedMessageAuthority) &&
-                typeof event.data.metadata.terminalId === "string"
+                typeof event.payload.metadata.terminalId === "string"
             ) return
             // A peer's discovery informs the work in progress: it reaches the
             // model at the next round boundary instead of the turn mailbox,
             // because a turn message asks for another reviewed turn and a
             // finished story must not reopen for a note. Corrective feedback
             // keeps turn semantics — demanding another turn is its purpose.
-            if (isPeerAwareness(event.data.metadata)) {
-                this.pendingPeerNotes.push(event.data.text)
+            if (isPeerAwareness(event.payload.metadata)) {
+                this.pendingPeerNotes.push(event.payload.text)
                 return
             }
-            this.turnMessages.deliver(event.data.text)
+            this.turnMessages.deliver(event.payload.text)
             return
         }
         if (
             this.spec.requiresQualityReview &&
             source === this.opts.turnReviewAuthority &&
             Critique.is(event) &&
-            event.data.agentId === this.spec.id &&
-            event.data.terminalId
+            event.payload.agentId === this.spec.id &&
+            event.payload.terminalId
         ) {
-            this.turnReviews.deliver(event.data)
+            this.turnReviews.deliver(event.payload)
         }
     }
 
@@ -593,7 +590,7 @@ export class OpenAIStoryAgent extends BaseObserver {
             : 0
         const success = this.currentPhase === "done"
 
-        this.envRef?.deliverSemanticEvent(
+        this.envRef?.publish(
             this.resultAuthority ?? this,
             StoryResult.create({
                 storyId: this.spec.id,
@@ -634,7 +631,7 @@ export class OpenAIStoryAgent extends BaseObserver {
         // Echo the prompt on the bus so Cartographer renders it the same
         // way as the Claude side's user echoes.
         const userMessageText = this.spec.prompt
-        this.envRef?.deliverSemanticEvent(
+        this.envRef?.publish(
             this,
             AgentUserMessage.create({
                 agentId: this.spec.id,
@@ -642,7 +639,7 @@ export class OpenAIStoryAgent extends BaseObserver {
             }),
         )
 
-        let context = ModelContext.create(this.spec.id)
+        let context = ModelContext.create()
             .addContextItem(SystemMessageItem.create(this.storySystemPrompt()))
             .addContextItem(UserMessageItem.create(userMessageText))
 
@@ -657,7 +654,7 @@ export class OpenAIStoryAgent extends BaseObserver {
             // stream-json mapper produces.
             const usageJson = turnResult.usage.isEmpty ? null : turnResult.usage.toJSON()
             const terminalId = this.nextTerminalId(attempt, turn)
-            this.envRef?.deliverSemanticEvent(
+            this.envRef?.publish(
                 this,
                 AgentResult.create({
                     agentId: this.spec.id,
@@ -750,7 +747,7 @@ export class OpenAIStoryAgent extends BaseObserver {
                 }
                 const feedback = disposition.feedback
                 context = context.addContextItem(UserMessageItem.create(feedback))
-                this.envRef?.deliverSemanticEvent(
+                this.envRef?.publish(
                     this,
                     AgentUserMessage.create({
                         agentId: this.spec.id,
@@ -777,7 +774,7 @@ export class OpenAIStoryAgent extends BaseObserver {
             context = context.addContextItem(
                 UserMessageItem.create(message),
             )
-            this.envRef?.deliverSemanticEvent(
+            this.envRef?.publish(
                 this,
                 AgentUserMessage.create({
                     agentId: this.spec.id,
@@ -907,7 +904,7 @@ export class OpenAIStoryAgent extends BaseObserver {
                 ...this.pendingPeerNotes.splice(0),
             ]) {
                 context = context.addContextItem(UserMessageItem.create(update))
-                this.envRef?.deliverSemanticEvent(
+                this.envRef?.publish(
                     this,
                     AgentUserMessage.create({
                         agentId: this.spec.id,
@@ -933,7 +930,7 @@ export class OpenAIStoryAgent extends BaseObserver {
                 for (const item of result.items) {
                     if (item.type === "function_call") {
                         if (toolsAllowed) {
-                            await this.envRef?.deliverFunctionCall(
+                            await this.envRef?.publishFunctionCall(
                                 this,
                                 item as FunctionCallItem,
                             )
@@ -941,9 +938,9 @@ export class OpenAIStoryAgent extends BaseObserver {
                         context = context.addContextItem(item)
                         calls.push(item as FunctionCallItem)
                     } else if (item.type === "message") {
-                        await this.envRef?.deliverModelMessage(this, item as ModelMessageItem)
+                        await this.envRef?.publishModelMessage(this, item as ModelMessageItem)
                         context = context.addContextItem(item)
-                        const json = (item as ModelMessageItem).toJSON() as {
+                        const json = toWire((item as ModelMessageItem)) as {
                             content: Array<{ text: string }>
                         }
                         const text = json.content?.[0]?.text ?? ""
@@ -1050,7 +1047,7 @@ export class OpenAIStoryAgent extends BaseObserver {
                 }
                 const outItem = FunctionCallOutputItem.create(call.callId, output)
                 if (toolsAllowed) {
-                    await this.envRef?.deliverFunctionCallOutput(this, outItem)
+                    await this.envRef?.publishFunctionCallOutput(this, outItem)
                 }
                 context = context.addContextItem(outItem)
             }
@@ -1313,7 +1310,7 @@ export class OpenAIStoryAgent extends BaseObserver {
         })
 
         try {
-            this.envRef?.deliverSemanticEvent(
+            this.envRef?.publish(
                 this,
                 RuntimeReplanProposed.create({
                     runId: this.spec.runId!,
@@ -1432,7 +1429,7 @@ export class OpenAIStoryAgent extends BaseObserver {
         if (this.abortController.signal.aborted && next !== "aborted") return
         if (next === this.currentPhase) return
         this.currentPhase = next
-        this.envRef?.deliverSemanticEvent(
+        this.envRef?.publish(
             this,
             AgentState.create({
                 agentId: this.spec.id,

@@ -127,18 +127,18 @@ describe("SurgeonCodex", () => {
 
             const replans = env.events.filter(Replan.is)
             assert.equal(replans.length, 1)
-            assert.deepEqual(replans[0]!.data.addedStories, [])
-            assert.deepEqual(replans[0]!.data.removedStoryIds, ["S1"])
-            assert.deepEqual(replans[0]!.data.modifiedDeps, {})
-            assert.match(replans[0]!.data.reason, /deterministic skip: S1 exhausted 3 attempts/)
-            assert.match(replans[0]!.data.reason, /codex fallback after error:/)
+            assert.deepEqual(replans[0]!.payload.addedStories, [])
+            assert.deepEqual(replans[0]!.payload.removedStoryIds, ["S1"])
+            assert.deepEqual(replans[0]!.payload.modifiedDeps, {})
+            assert.match(replans[0]!.payload.reason, /deterministic skip: S1 exhausted 3 attempts/)
+            assert.match(replans[0]!.payload.reason, /codex fallback after error:/)
 
             const measured = env.events.filter(ModelInvocationMeasured.is)
             assert.equal(measured.length, 1)
-            assert.equal(measured[0]!.data.status, "failed")
-            assert.equal(measured[0]!.data.phase, "surgeon")
-            assert.equal(measured[0]!.data.backend, "codex")
-            assert.equal(measured[0]!.data.tokens.inputTotal.state, "unknown")
+            assert.equal(measured[0]!.payload.status, "failed")
+            assert.equal(measured[0]!.payload.phase, "surgeon")
+            assert.equal(measured[0]!.payload.backend, "codex")
+            assert.equal(measured[0]!.payload.tokens.inputTotal.state, "unknown")
             assert.ok(
                 env.events.findIndex(ModelInvocationMeasured.is) <
                     env.events.findIndex(Replan.is),
@@ -188,7 +188,7 @@ describe("SurgeonCodex", () => {
                 await surgeon.onExternalEvent(
                     source("story-agent"),
                     StoryResult.create({
-                        ...failure.data,
+                        ...failure.payload,
                         runId: "run-codex-telemetry",
                         leaseId: "lease-S1",
                         generation: 3,
@@ -198,22 +198,22 @@ describe("SurgeonCodex", () => {
 
                 const replans = env.events.filter(Replan.is)
                 assert.equal(replans.length, 1)
-                assert.equal(replans[0]!.data.reason, "prereq: missing setup")
-                assert.deepEqual(replans[0]!.data.addedStories, [added])
-                assert.deepEqual(replans[0]!.data.removedStoryIds, ["S1"])
-                assert.deepEqual(replans[0]!.data.modifiedDeps, { S2: ["S1a"] })
+                assert.equal(replans[0]!.payload.reason, "prereq: missing setup")
+                assert.deepEqual(replans[0]!.payload.addedStories, [added])
+                assert.deepEqual(replans[0]!.payload.removedStoryIds, ["S1"])
+                assert.deepEqual(replans[0]!.payload.modifiedDeps, { S2: ["S1a"] })
 
                 const measured = env.events.filter(ModelInvocationMeasured.is)
                 assert.equal(measured.length, 1)
                 assert.equal(
-                    measured[0]!.data.invocationId,
+                    measured[0]!.payload.invocationId,
                     "run-codex-telemetry:surgeon:S1:1:lease:lease-S1:generation:3:provider:1",
                 )
-                assert.equal(measured[0]!.data.runId, "run-codex-telemetry")
-                assert.equal(measured[0]!.data.storyId, "S1")
-                assert.equal(measured[0]!.data.turn, 1)
-                assert.equal(measured[0]!.data.requestedModel, "gpt-test")
-                assert.equal(measured[0]!.data.status, "succeeded")
+                assert.equal(measured[0]!.payload.runId, "run-codex-telemetry")
+                assert.equal(measured[0]!.payload.storyId, "S1")
+                assert.equal(measured[0]!.payload.turn, 1)
+                assert.equal(measured[0]!.payload.requestedModel, "gpt-test")
+                assert.equal(measured[0]!.payload.status, "succeeded")
                 assert.ok(
                     env.events.findIndex(ModelInvocationMeasured.is) <
                         env.events.findIndex(Replan.is),
@@ -255,16 +255,16 @@ describe("SurgeonCodex", () => {
 
                 const replans = env.events.filter(Replan.is)
                 assert.equal(replans.length, 1)
-                assert.deepEqual(replans[0]!.data.addedStories, [])
-                assert.deepEqual(replans[0]!.data.removedStoryIds, ["S1"])
-                assert.deepEqual(replans[0]!.data.modifiedDeps, {})
-                assert.match(replans[0]!.data.reason, /deterministic skip: S1 exhausted 3 attempts/)
-                assert.match(replans[0]!.data.reason, /codex fallback after error: no JSON object found/)
+                assert.deepEqual(replans[0]!.payload.addedStories, [])
+                assert.deepEqual(replans[0]!.payload.removedStoryIds, ["S1"])
+                assert.deepEqual(replans[0]!.payload.modifiedDeps, {})
+                assert.match(replans[0]!.payload.reason, /deterministic skip: S1 exhausted 3 attempts/)
+                assert.match(replans[0]!.payload.reason, /codex fallback after error: no JSON object found/)
 
                 const measured = env.events.filter(ModelInvocationMeasured.is)
                 assert.equal(measured.length, 1)
-                assert.equal(measured[0]!.data.status, "succeeded")
-                assert.equal(measured[0]!.data.tokens.inputTotal.state, "unknown")
+                assert.equal(measured[0]!.payload.status, "succeeded")
+                assert.equal(measured[0]!.payload.tokens.inputTotal.state, "unknown")
                 assert.ok(
                     env.events.findIndex(ModelInvocationMeasured.is) <
                         env.events.findIndex(Replan.is),
@@ -337,7 +337,7 @@ describe("SurgeonCodex", () => {
             ["recovery_evaluation_started", "replan", "recovery_decision"],
         )
         assert.match(
-            env.events.find(Replan.is)!.data.reason,
+            env.events.find(Replan.is)!.payload.reason,
             /acceptance quality gate failed: acceptance mismatch/,
         )
         assert.equal(env.events.filter(ModelInvocationMeasured.is).length, 0)

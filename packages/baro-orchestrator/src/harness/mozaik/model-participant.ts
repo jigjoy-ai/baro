@@ -13,21 +13,18 @@
  */
 
 import {
-    BaseObserver,
     FunctionCallItem,
     FunctionCallOutputItem,
     ModelContext,
     ModelMessageItem,
     SystemMessageItem,
     UserMessageItem,
-    type AgenticEnvironment,
     type ContextItem,
     type GenerativeModel,
-    type Participant,
     type SemanticEvent,
     type Tool,
-    type TokenUsage,
-} from "../../runtime/mozaik.js"
+    type TokenUsage, toWire } from "../../runtime/mozaik.js"
+import { BusMember, type CoordinationBus } from "../../runtime/coordination.js"
 import {
     AgentResult,
     AgentState,
@@ -86,7 +83,7 @@ export interface MozaikModelParticipantOptions {
      */
     readonly quietTimeoutMs?: number
     /** The only bus voice allowed to hand this session a targeted message. */
-    readonly targetedMessageAuthority?: Participant
+    readonly targetedMessageAuthority?: BusMember
     readonly targetedMessageCorrelation?: {
         runId: string
         leaseId: string
@@ -170,7 +167,7 @@ const ROUND_BACKSTOP_SECS = 20 * 60
 const NO_QUIET_DEADLINE = 0
 
 export class MozaikModelParticipant
-    extends BaseObserver
+    extends BusMember
     implements InteractiveModelParticipant<MozaikSessionSummary>
 {
     readonly agentId: string
@@ -193,7 +190,7 @@ export class MozaikModelParticipant
     private readonly messages: string[] = []
     private resolveDone!: (summary: MozaikSessionSummary) => void
     private failure: Error | null = null
-    private envRef: AgenticEnvironment | null = null
+    private envRef: CoordinationBus | null = null
     private started = false
     private inputClosed = false
     private settled = false
@@ -222,7 +219,7 @@ export class MozaikModelParticipant
         })
     }
 
-    start(environment: AgenticEnvironment): void {
+    start(environment: CoordinationBus): void {
         if (this.started) return
         this.started = true
         this.envRef = environment
@@ -245,20 +242,20 @@ export class MozaikModelParticipant
      * still answers, only alone.
      */
     override onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): void {
         if (!AgentTargetedMessage.is(event)) return
         if (
             !acceptsTargetedMessage(
                 source,
-                event.data,
+                event.payload,
                 this.agentId,
                 this.opts.targetedMessageAuthority,
                 this.opts.targetedMessageCorrelation ?? {},
             )
         ) return
-        this.sendUserMessage(event.data.text)
+        this.sendUserMessage(event.payload.text)
     }
 
     /** No more input is coming. The session ends after the model settles. */
@@ -346,12 +343,12 @@ export class MozaikModelParticipant
      * the only place a native phase's tokens are ever reported.
      */
     private publishTurn(
-        env: AgenticEnvironment,
+        env: CoordinationBus,
         text: string,
         usage: UsageAccumulator,
     ): void {
         this.turns += 1
-        env.deliverSemanticEvent(
+        env.publish(
             this,
             AgentResult.create({
                 agentId: this.agentId,
@@ -369,7 +366,7 @@ export class MozaikModelParticipant
     }
 
     private emitState(phase: "starting" | "running" | "done" | "failed"): void {
-        this.envRef?.deliverSemanticEvent(
+        this.envRef?.publish(
             this,
             AgentState.create({ agentId: this.agentId, phase, detail: "" }),
         )
@@ -379,7 +376,7 @@ export class MozaikModelParticipant
         const env = this.envRef
         if (!env) return
         this.emitState("starting")
-        let context = ModelContext.create(this.agentId).addContextItem(
+        let context = ModelContext.create().addContextItem(
             SystemMessageItem.create(this.opts.systemPrompt),
         )
 
@@ -406,7 +403,7 @@ export class MozaikModelParticipant
                 const pending = this.inbox.splice(0, this.inbox.length)
                 for (const text of pending) {
                     context = context.addContextItem(UserMessageItem.create(text))
-                    env.deliverSemanticEvent(
+                    env.publish(
                         this,
                         AgentUserMessage.create({ agentId: this.agentId, text }),
                     )
@@ -459,11 +456,11 @@ export class MozaikModelParticipant
                 const calls: FunctionCallItem[] = []
                 for (const item of round.items) {
                     if (item.type === "function_call") {
-                        await env.deliverFunctionCall(this, item as FunctionCallItem)
+                        await env.publishFunctionCall(this, item as FunctionCallItem)
                         context = context.addContextItem(item)
                         calls.push(item as FunctionCallItem)
                     } else if (item.type === "message") {
-                        await env.deliverModelMessage(this, item as ModelMessageItem)
+                        await env.publishModelMessage(this, item as ModelMessageItem)
                         context = context.addContextItem(item)
                         const text = textOf(item as ModelMessageItem)
                         this.messages.push(text)
@@ -488,7 +485,7 @@ export class MozaikModelParticipant
                               this.abortController.signal,
                           )
                     const outItem = FunctionCallOutputItem.create(call.callId, output)
-                    await env.deliverFunctionCallOutput(this, outItem)
+                    await env.publishFunctionCallOutput(this, outItem)
                     context = context.addContextItem(outItem)
                     this.onActivity?.()
                 }
@@ -570,7 +567,7 @@ export class MozaikModelParticipant
 }
 
 function textOf(item: ModelMessageItem): string {
-    const json = item.toJSON() as { content?: Array<{ text?: string }> }
+    const json = toWire(item) as { content?: Array<{ text?: string }> }
     return json.content?.[0]?.text ?? ""
 }
 

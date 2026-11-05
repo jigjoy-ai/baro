@@ -28,7 +28,7 @@ function json(item: unknown): any {
 }
 
 function itemEvents(items: unknown[]) {
-    return items.filter(CodexItemEvent.is).map((item) => item.data)
+    return items.filter(CodexItemEvent.is).map((item) => item.payload)
 }
 
 function assertNoMozaikBuiltins(items: unknown[]) {
@@ -69,9 +69,9 @@ describe("mapCodexEvent", () => {
 
         assert.equal(result.threadId, "thread-1")
         assert.ok(system)
-        assert.equal(system.data.agentId, agentId)
-        assert.equal(system.data.subtype, "thread.started")
-        assert.deepEqual(system.data.raw, event)
+        assert.equal(system.payload.agentId, agentId)
+        assert.equal(system.payload.subtype, "thread.started")
+        assert.deepEqual(system.payload.raw, event)
     })
 
     it("maps thread.completed to CodexSystem", () => {
@@ -80,9 +80,9 @@ describe("mapCodexEvent", () => {
         const system = result.items.find(CodexSystem.is)
 
         assert.ok(system)
-        assert.equal(system.data.agentId, agentId)
-        assert.equal(system.data.subtype, "thread.completed")
-        assert.deepEqual(system.data.raw, event)
+        assert.equal(system.payload.agentId, agentId)
+        assert.equal(system.payload.subtype, "thread.completed")
+        assert.deepEqual(system.payload.raw, event)
     })
 
     it("maps turn lifecycle events to CodexTurnEvent phases", () => {
@@ -92,9 +92,9 @@ describe("mapCodexEvent", () => {
             const turn = result.items.find(CodexTurnEvent.is)
 
             assert.ok(turn)
-            assert.equal(turn.data.agentId, agentId)
-            assert.equal(turn.data.phase, phase)
-            assert.deepEqual(turn.data.raw, event)
+            assert.equal(turn.payload.agentId, agentId)
+            assert.equal(turn.payload.phase, phase)
+            assert.deepEqual(turn.payload.raw, event)
         }
     })
 
@@ -104,9 +104,9 @@ describe("mapCodexEvent", () => {
         const system = result.items.find(CodexSystem.is)
 
         assert.ok(system)
-        assert.equal(system.data.agentId, agentId)
-        assert.equal(system.data.subtype, "error")
-        assert.deepEqual(system.data.raw, event)
+        assert.equal(system.payload.agentId, agentId)
+        assert.equal(system.payload.subtype, "error")
+        assert.deepEqual(system.payload.raw, event)
     })
 
     it("maps item.started to CodexItemEvent only", () => {
@@ -272,8 +272,8 @@ describe("mapCodexEvent", () => {
         const unknown = result.items.find(CodexUnknownEvent.is)
 
         assert.ok(unknown)
-        assert.equal(unknown.data.agentId, agentId)
-        assert.equal(unknown.data.codexType, "unexpected.event")
-        assert.deepEqual(unknown.data.raw, event)
+        assert.equal(unknown.payload.agentId, agentId)
+        assert.equal(unknown.payload.codexType, "unexpected.event")
+        assert.deepEqual(unknown.payload.raw, event)
     })
 })

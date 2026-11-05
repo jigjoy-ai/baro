@@ -1,8 +1,8 @@
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 
-import { AgenticEnvironment, BaseObserver } from "../runtime/mozaik.js"
-import type { FunctionCallOutputItem, Participant, SemanticEvent } from "../runtime/mozaik.js"
+import { CoordinationBus, BusMember } from "../runtime/coordination.js"
+import type { FunctionCallOutputItem, SemanticEvent } from "../runtime/mozaik.js"
 import { AgentResult, ClaudeStreamChunk } from "../events/harness-stream.js"
 import { ClaudeCliParticipant } from "../harness/claude/cli-participant.js"
 import type { HostFunction } from "../harness/lane-adapter.js"
@@ -274,7 +274,7 @@ export async function runOperator(options: OperatorOptions, ui: OperatorUi): Pro
         ],
     })
 
-    const env = new AgenticEnvironment("baro-operator")
+    const env = new CoordinationBus("baro-operator")
     const renderer = new Renderer(ui, (result) => {
         editedThisTurn.clear()
         ui.turnDone(result)
@@ -342,7 +342,7 @@ export async function runOperator(options: OperatorOptions, ui: OperatorUi): Pro
     }
 }
 
-class Renderer extends BaseObserver {
+class Renderer extends BusMember {
     /** Tool calls in flight, by content block index; input arrives as JSON deltas. */
     private readonly toolBlocks = new Map<number, { id: string; name: string; json: string }>()
     /** Calls drawn as a line, by tool_use id. A result whose call was never
@@ -361,20 +361,20 @@ class Renderer extends BaseObserver {
         super()
     }
 
-    override onExternalFunctionCallOutput(_source: Participant, item: FunctionCallOutputItem): void {
+    override onExternalFunctionCallOutput(_source: BusMember, item: FunctionCallOutputItem): void {
         if (!this.drawnCalls.delete(item.callId)) return
         this.ui.toolResult(summarizeToolOutput(item.output))
     }
 
-    override onExternalEvent(_source: Participant, event: SemanticEvent<unknown>): void {
+    override onExternalEvent(_source: BusMember, event: SemanticEvent<string, unknown>): void {
         if (ClaudeStreamChunk.is(event)) {
-            this.render(event.data.raw)
+            this.render(event.payload.raw)
             return
         }
-        if (AgentResult.is(event) && event.data.agentId === AGENT_ID) {
+        if (AgentResult.is(event) && event.payload.agentId === AGENT_ID) {
             this.textInTurn = false
             this.breakPending = false
-            this.onResult({ durationMs: event.data.durationMs, totalCostUsd: event.data.totalCostUsd })
+            this.onResult({ durationMs: event.payload.durationMs, totalCostUsd: event.payload.totalCostUsd })
         }
     }
 

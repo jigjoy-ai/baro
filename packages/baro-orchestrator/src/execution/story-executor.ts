@@ -6,7 +6,7 @@
  * `generation` from the request into that terminal result.
  */
 
-import { AgenticEnvironment, type Participant } from "../runtime/mozaik.js"
+import { CoordinationBus, type BusMember } from "../runtime/coordination.js"
 
 import type { GatewayBillingCoordinator } from "../telemetry/billing/index.js"
 import type { StorySpawnRequestData } from "../semantic-events.js"
@@ -31,7 +31,7 @@ export interface StoryExecOpts {
     effort?: string
     /** Repository/Board participant authorized to decide native runtime DAG
      * proposals. Omitted outside correlated collective execution. */
-    runtimeReplanDecisionAuthority?: Participant
+    runtimeReplanDecisionAuthority?: BusMember
     /** Bound for a native story tool to receive its correlated decision. */
     runtimeReplanDecisionTimeoutMs?: number
     /** A run-level gate proves the whole tree; the native shell refuses
@@ -39,16 +39,16 @@ export interface StoryExecOpts {
     scopedVerification?: boolean
     /** Exact Critic participant whose terminal-turn verdict may resume a
      * continuation-capable worker. */
-    turnReviewAuthority?: Participant
+    turnReviewAuthority?: BusMember
     /** Exact AgentTurnProjector that issues terminal IDs for one-shot CLIs. */
-    terminalTurnAuthority?: Participant
+    terminalTurnAuthority?: BusMember
     /** Collective safety boundary: a spawned provider CLI must earn a
      * positive process-tree quiescence certificate before its worktree can
      * be reused or released. Custom executors must preserve this contract. */
     requireProcessQuiescenceCertification?: boolean
     /** Exact Bridge for correlated collective message delivery. Custom
      * executors must propagate and enforce this capability. */
-    targetedMessageAuthority?: Participant
+    targetedMessageAuthority?: BusMember
     turnReviewTimeoutMs?: number
     /** True only when collective AcceptanceGate remains the final integration
      * authority after a continuation-capable worker exits. */
@@ -66,12 +66,12 @@ export interface StoryExecOpts {
      * that will source StoryResult before emitting a result or returning from
      * start(). Legacy execution leaves this unset.
      */
-    registerResultAuthority?: (source: Participant) => void
+    registerResultAuthority?: (source: BusMember) => void
     /**
      * Register an exact nested producer of terminal-turn evidence before it
      * joins the bus. Collective policy consumers reject unregistered sources.
      */
-    registerTerminalAuthority?: (source: Participant) => void
+    registerTerminalAuthority?: (source: BusMember) => void
 }
 
 export interface StoryCollaborationAccess {
@@ -87,7 +87,7 @@ export interface StoryCollaborationAccess {
 
 export interface StoryExecution {
     /** Release bus membership / resources after the StoryResult lands. */
-    dispose(env: AgenticEnvironment): void
+    dispose(env: CoordinationBus): void
     /**
      * Abort early (Supervisor uses this on a detected stall); the agent then
      * settles with a failed StoryResult, which the Surgeon reacts to.
@@ -111,7 +111,7 @@ export interface StoryExecutor {
         req: StorySpawnRequestData,
         route: StoryRoute,
         cwd: string,
-        env: AgenticEnvironment,
+        env: CoordinationBus,
         opts: StoryExecOpts,
     ): StoryExecution
 }
@@ -126,7 +126,7 @@ type AnyStoryAgent =
 
 interface TerminalSourceRegistrant {
     setTerminalSourceRegistrar(
-        register: (source: Participant) => void,
+        register: (source: BusMember) => void,
     ): void
 }
 
@@ -142,7 +142,7 @@ export class LocalStoryExecutor implements StoryExecutor {
         req: StorySpawnRequestData,
         route: StoryRoute,
         cwd: string,
-        env: AgenticEnvironment,
+        env: CoordinationBus,
         opts: StoryExecOpts,
     ): StoryExecution {
         if (
@@ -328,7 +328,7 @@ export class LocalStoryExecutor implements StoryExecutor {
         void agent.run(env)
 
         return {
-            dispose: (e: AgenticEnvironment) => agent.leave(e),
+            dispose: (e: CoordinationBus) => agent.leave(e),
             abort: () => (agent as { abort?: () => void }).abort?.(),
             ...("suspend" in agent && typeof agent.suspend === "function"
                 ? {

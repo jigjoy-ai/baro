@@ -28,9 +28,9 @@
 import { mkdirSync, writeFileSync } from "fs"
 import { join } from "path"
 
-import { BaseObserver, Participant, SemanticEvent } from "../runtime/mozaik.js"
+import { SemanticEvent } from "../runtime/mozaik.js"
 
-import { AgenticEnvironment } from "../runtime/mozaik.js"
+import { CoordinationBus, BusMember } from "../runtime/coordination.js"
 import { buildDag } from "../runtime-graph/dag.js"
 import { getHeadSha } from "./git.js"
 import { BARO_COAUTHOR_TRAILER, loadPrd, type PrdFile, type PrdStory } from "../prd.js"
@@ -96,18 +96,18 @@ interface StoryRecord {
     levelOrdinal: number | null
 }
 
-export class Finalizer extends BaseObserver {
+export class Finalizer extends BusMember {
     private readonly opts: Required<Omit<
         FinalizerOptions,
         "baseSha" | "onLog" | "runId" | "outcomeAuthority"
     >> &
         Pick<FinalizerOptions, "onLog">
-    private envRef: AgenticEnvironment | null = null
+    private envRef: CoordinationBus | null = null
     private readonly runId: string | null
     private readonly outcomeAuthority: StoryOutcomeAuthority | null
-    private coordinationAuthority: Participant | null = null
-    private repositoryAuthority: Participant | null = null
-    private verifierAuthority: Participant | null = null
+    private coordinationAuthority: BusMember | null = null
+    private repositoryAuthority: BusMember | null = null
+    private verifierAuthority: BusMember | null = null
     /** Trusted automatic gates captured before any story can edit manifests. */
     private readonly baselineVerifyPlan: VerifyPlan
 
@@ -160,11 +160,11 @@ export class Finalizer extends BaseObserver {
         }
     }
 
-    setEnvironment(env: AgenticEnvironment): void {
+    setEnvironment(env: CoordinationBus): void {
         this.envRef = env
     }
 
-    setCoordinationAuthority(authority: Participant): void {
+    setCoordinationAuthority(authority: BusMember): void {
         this.coordinationAuthority = bindAuthority(
             this.coordinationAuthority,
             authority,
@@ -172,7 +172,7 @@ export class Finalizer extends BaseObserver {
         )
     }
 
-    setRepositoryAuthority(authority: Participant): void {
+    setRepositoryAuthority(authority: BusMember): void {
         this.repositoryAuthority = bindAuthority(
             this.repositoryAuthority,
             authority,
@@ -180,7 +180,7 @@ export class Finalizer extends BaseObserver {
         )
     }
 
-    setVerifierAuthority(authority: Participant): void {
+    setVerifierAuthority(authority: BusMember): void {
         this.verifierAuthority = bindAuthority(
             this.verifierAuthority,
             authority,
@@ -189,8 +189,8 @@ export class Finalizer extends BaseObserver {
     }
 
     override async onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): Promise<void> {
         if (RunStarted.is(event)) {
             if (!this.matchesAuthority(source, this.coordinationAuthority)) return
@@ -208,7 +208,7 @@ export class Finalizer extends BaseObserver {
 
         if (LevelStarted.is(event)) {
             if (!this.matchesAuthority(source, this.coordinationAuthority)) return
-            const { ordinal, storyIds } = event.data
+            const { ordinal, storyIds } = event.payload
             this.levels.set(ordinal, [...storyIds])
             for (const id of storyIds) {
                 if (!this.stories.has(id)) {
@@ -231,9 +231,9 @@ export class Finalizer extends BaseObserver {
         if (StoryMergeFailed.is(event)) {
             if (
                 !this.matchesAuthority(source, this.repositoryAuthority) ||
-                !this.matchesRun(event.data.runId)
+                !this.matchesRun(event.payload.runId)
             ) return
-            const d = event.data
+            const d = event.payload
             if (d.branch) this.mergeFailed.set(d.storyId, d.branch)
             return
         }
@@ -241,21 +241,21 @@ export class Finalizer extends BaseObserver {
         if (StoryMerged.is(event)) {
             if (
                 !this.matchesAuthority(source, this.repositoryAuthority) ||
-                !this.matchesRun(event.data.runId)
+                !this.matchesRun(event.payload.runId)
             ) return
             // A bounded collective recovery can integrate a story after an
             // earlier merge failure. Do not leave a successful run mislabeled
             // as a checkpoint or advertise a stale recovery branch.
-            this.mergeFailed.delete(event.data.storyId)
+            this.mergeFailed.delete(event.payload.storyId)
             return
         }
 
         if (StoryResult.is(event)) {
             if (
                 this.outcomeAuthority &&
-                !this.outcomeAuthority.matchesResult(source, event.data)
+                !this.outcomeAuthority.matchesResult(source, event.payload)
             ) return
-            const d = event.data
+            const d = event.payload
             const existing = this.stories.get(d.storyId) ?? {
                 id: d.storyId,
                 title: "",
@@ -277,11 +277,11 @@ export class Finalizer extends BaseObserver {
             if (
                 (this.verifierAuthority === null && this.runId !== null) ||
                 !this.matchesAuthority(source, this.verifierAuthority) ||
-                !this.matchesRun(event.data.runId, true)
+                !this.matchesRun(event.payload.runId, true)
             ) return
             this.objectiveVerification = {
-                runId: event.data.runId,
-                result: verificationResult(event.data),
+                runId: event.payload.runId,
+                result: verificationResult(event.payload),
             }
             return
         }
@@ -289,7 +289,7 @@ export class Finalizer extends BaseObserver {
         if (RunCompleted.is(event)) {
             if (
                 !this.matchesAuthority(source, this.coordinationAuthority) ||
-                !this.matchesRun(event.data.runId)
+                !this.matchesRun(event.payload.runId)
             ) return
             if (this.finalizePromise) return
             // Wrap finalize() so a bug inside this participant never
@@ -297,15 +297,15 @@ export class Finalizer extends BaseObserver {
             // succeeded by the time we get here — losing the PR is a
             // recoverable annoyance, killing the process and orphaning
             // Claude children is not.
-            this.finalizePromise = this.safeFinalize(event.data)
+            this.finalizePromise = this.safeFinalize(event.payload)
             await this.finalizePromise
             return
         }
     }
 
     private matchesAuthority(
-        source: Participant,
-        authority: Participant | null,
+        source: BusMember,
+        authority: BusMember | null,
     ): boolean {
         // Standalone Finalizer users without a run identity historically had
         // no explicit authority registry. Orchestrate always supplies runId
@@ -593,8 +593,8 @@ export class Finalizer extends BaseObserver {
 
     // ─── Bus & env helpers ──────────────────────────────────────────
 
-    private emit(event: SemanticEvent<unknown>): void {
-        this.envRef?.deliverSemanticEvent(this, event)
+    private emit(event: SemanticEvent<string, unknown>): void {
+        this.envRef?.publish(this, event)
     }
 
     private log(line: string): void {
@@ -1109,10 +1109,10 @@ export class Finalizer extends BaseObserver {
 }
 
 function bindAuthority(
-    current: Participant | null,
-    authority: Participant,
+    current: BusMember | null,
+    authority: BusMember,
     label: string,
-): Participant {
+): BusMember {
     if (current && current !== authority) {
         throw new Error(`Finalizer ${label} authority is already bound`)
     }

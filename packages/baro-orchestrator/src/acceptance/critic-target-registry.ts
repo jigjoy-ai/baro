@@ -1,4 +1,5 @@
-import { BaseObserver, type Participant, type SemanticEvent } from "../runtime/mozaik.js"
+import { type SemanticEvent } from "../runtime/mozaik.js"
+import { BusMember } from "../runtime/coordination.js"
 
 import {
     Replan,
@@ -40,9 +41,9 @@ function criticCriteriaForStory(
     ]
 }
 
-export class CriticTargetRegistry extends BaseObserver {
-    private legacyReplanAuthority: Participant | null = null
-    private runtimeReplanAuthority: Participant | null = null
+export class CriticTargetRegistry extends BusMember {
+    private legacyReplanAuthority: BusMember | null = null
+    private runtimeReplanAuthority: BusMember | null = null
     private readonly seenRuntimeProposals = new Set<string>()
     private latestRuntimeGraphVersion = 0
 
@@ -53,7 +54,7 @@ export class CriticTargetRegistry extends BaseObserver {
         super()
     }
 
-    setLegacyReplanAuthority(authority: Participant): void {
+    setLegacyReplanAuthority(authority: BusMember): void {
         if (
             this.legacyReplanAuthority &&
             this.legacyReplanAuthority !== authority
@@ -65,7 +66,7 @@ export class CriticTargetRegistry extends BaseObserver {
         this.legacyReplanAuthority = authority
     }
 
-    setRuntimeReplanAuthority(authority: Participant): void {
+    setRuntimeReplanAuthority(authority: BusMember): void {
         if (
             this.runtimeReplanAuthority &&
             this.runtimeReplanAuthority !== authority
@@ -76,18 +77,18 @@ export class CriticTargetRegistry extends BaseObserver {
     }
 
     override onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): void {
         if (Replan.is(event)) {
             return
         }
         if (ReplanApplied.is(event)) {
             if (source !== this.legacyReplanAuthority) return
-            for (const storyId of event.data.removedStoryIds) {
+            for (const storyId of event.payload.removedStoryIds) {
                 this.targets.delete(storyId)
             }
-            for (const story of event.data.addedStories) {
+            for (const story of event.payload.addedStories) {
                 if (story.acceptance?.length) {
                     this.targets.set(story.id, this.criteriaFor(story))
                 } else {
@@ -99,18 +100,18 @@ export class CriticTargetRegistry extends BaseObserver {
         if (RuntimeReplanApplied.is(event)) {
             if (source !== this.runtimeReplanAuthority) return
             if (
-                this.seenRuntimeProposals.has(event.data.proposalId) ||
-                (event.data.currentGraphVersion !== undefined &&
-                    event.data.graphVersion < event.data.currentGraphVersion) ||
-                event.data.graphVersion <= this.latestRuntimeGraphVersion
+                this.seenRuntimeProposals.has(event.payload.proposalId) ||
+                (event.payload.currentGraphVersion !== undefined &&
+                    event.payload.graphVersion < event.payload.currentGraphVersion) ||
+                event.payload.graphVersion <= this.latestRuntimeGraphVersion
             ) return
-            this.seenRuntimeProposals.add(event.data.proposalId)
+            this.seenRuntimeProposals.add(event.payload.proposalId)
             this.latestRuntimeGraphVersion =
-                event.data.currentGraphVersion ?? event.data.graphVersion
-            for (const storyId of event.data.mutation.removedStoryIds) {
+                event.payload.currentGraphVersion ?? event.payload.graphVersion
+            for (const storyId of event.payload.mutation.removedStoryIds) {
                 this.targets.delete(storyId)
             }
-            for (const story of event.data.mutation.addedStories) {
+            for (const story of event.payload.mutation.addedStories) {
                 if (story.acceptance?.length) {
                     this.targets.set(story.id, this.criteriaFor(story))
                 } else {

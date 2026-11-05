@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { after, describe, it } from "node:test"
 
-import { BaseObserver } from "../../src/runtime/mozaik.js"
+import { BusMember } from "../../src/runtime/coordination.js"
 import { StoryMergeFailed, StoryMerged } from "../../src/semantic-events.js"
 import {
     PrdStatusObserver,
@@ -68,7 +68,7 @@ function emptyPrd(): PrdFile {
     } as PrdFile
 }
 
-class FakeRepository extends BaseObserver {}
+class FakeRepository extends BusMember {}
 
 describe("what prd.json knows while the run is still going", () => {
     it("records a merge the moment it lands, not at run end", () => {

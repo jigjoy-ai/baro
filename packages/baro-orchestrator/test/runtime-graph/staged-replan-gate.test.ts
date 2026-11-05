@@ -75,10 +75,10 @@ function harness() {
     const host: StagedReplanGateHost = {
         emit: (event) => {
             if (WorkOfferRetractionRequested.is(event)) {
-                calls.requests.push(event.data)
+                calls.requests.push(event.payload)
             }
             if (RuntimeReplanRetractionTimedOut.is(event)) {
-                calls.timeouts.push(event.data)
+                calls.timeouts.push(event.payload)
             }
         },
         planningFailed: () => false,

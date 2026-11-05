@@ -14,7 +14,7 @@ describe("recoveryInput", () => {
             error: "tests failed",
         })
 
-        assert.equal(recoveryInput(event), event.data)
+        assert.equal(recoveryInput(event), event.payload)
     })
 
     it("keeps provider capacity out of every Surgeon backend", () => {
@@ -84,7 +84,7 @@ describe("recoveryInput", () => {
                 error: code,
                 failure: { kind: "verification", code },
             })
-            assert.equal(recoveryInput(event), event.data, code)
+            assert.equal(recoveryInput(event), event.payload, code)
         }
     })
 })

@@ -46,8 +46,8 @@ export class OpenCodeStoryAgent extends OneShotStoryAgent<OpenCodeRunSummary> {
                 }),
             failureSignalFrom: (event) =>
                 OpenCodeUnknownEvent.is(event) &&
-                isCliFailureSignal(event.data.raw, event.data.openCodeType)
-                    ? event.data.raw
+                isCliFailureSignal(event.payload.raw, event.payload.openCodeType)
+                    ? event.payload.raw
                     : undefined,
             // `opencode run` exits 0 even on a refusal or no-op (verified
             // empirically), so success needs positive evidence: the agent

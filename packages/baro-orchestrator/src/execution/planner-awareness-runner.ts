@@ -9,8 +9,8 @@
  * planned against what actually happened rather than what was hoped.
  */
 
-import type { Participant, SemanticEvent } from "../runtime/mozaik.js"
-import { BaseObserver } from "../runtime/mozaik.js"
+import type { SemanticEvent } from "../runtime/mozaik.js"
+import { BusMember } from "../runtime/coordination.js"
 import { AgentTargetedMessage } from "../events/collaboration.js"
 import { StoryMerged, StoryMergeFailed } from "../events/integration.js"
 import { WorkBlocked } from "../events/execution.js"
@@ -22,17 +22,17 @@ export interface PlannerAwarenessRunnerOptions {
     /** The planner participant's bus agentId (see plannerBusAgentId). */
     readonly plannerAgentId: string
     /** Only this participant's merges are believed. */
-    readonly integrationAuthority?: Participant
+    readonly integrationAuthority?: BusMember
 }
 
-export class PlannerAwarenessRunner extends BaseObserver {
+export class PlannerAwarenessRunner extends BusMember {
     constructor(private readonly opts: PlannerAwarenessRunnerOptions) {
         super()
     }
 
     override onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): void {
         // A throw here escapes the runtime uncaught (see overlap-awareness).
         try {
@@ -46,11 +46,11 @@ export class PlannerAwarenessRunner extends BaseObserver {
     }
 
     private narrate(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): string | null {
         if (StoryResult.is(event)) {
-            const data = event.data
+            const data = event.payload
             if (data.runId !== undefined && data.runId !== this.opts.runId) {
                 return null
             }
@@ -63,7 +63,7 @@ export class PlannerAwarenessRunner extends BaseObserver {
             )
         }
         if (StoryMerged.is(event)) {
-            if (event.data.runId !== undefined && event.data.runId !== this.opts.runId) {
+            if (event.payload.runId !== undefined && event.payload.runId !== this.opts.runId) {
                 return null
             }
             if (
@@ -73,34 +73,34 @@ export class PlannerAwarenessRunner extends BaseObserver {
                 return null
             }
             return (
-                `[execution] story ${event.data.storyId} completed and merged. ` +
+                `[execution] story ${event.payload.storyId} completed and merged. ` +
                 `Its declared write surface now exists in the repository.`
             )
         }
         if (StoryMergeFailed.is(event)) {
-            if (event.data.runId !== undefined && event.data.runId !== this.opts.runId) {
+            if (event.payload.runId !== undefined && event.payload.runId !== this.opts.runId) {
                 return null
             }
             return (
-                `[execution] story ${event.data.storyId} finished but its merge ` +
-                `FAILED: ${event.data.error}. Later stories that depend on its ` +
+                `[execution] story ${event.payload.storyId} finished but its merge ` +
+                `FAILED: ${event.payload.error}. Later stories that depend on its ` +
                 `files may build on ground that is not there.`
             )
         }
         if (WorkBlocked.is(event)) {
-            if (event.data.runId !== this.opts.runId) return null
+            if (event.payload.runId !== this.opts.runId) return null
             return (
-                `[execution] story ${event.data.storyId} is blocked on ` +
-                `${event.data.requiredStoryIds.join(", ")}: ${event.data.reason}`
+                `[execution] story ${event.payload.storyId} is blocked on ` +
+                `${event.payload.requiredStoryIds.join(", ")}: ${event.payload.reason}`
             )
         }
         if (RunVerificationCompleted.is(event)) {
-            if (event.data.runId !== this.opts.runId) return null
-            const failed = event.data.commands.filter(
+            if (event.payload.runId !== this.opts.runId) return null
+            const failed = event.payload.commands.filter(
                 (command) => command.status === "failed",
             )
             return failed.length === 0
-                ? `[execution] run verification passed (${event.data.commands.length} command(s)).`
+                ? `[execution] run verification passed (${event.payload.commands.length} command(s)).`
                 : `[execution] run verification FAILED: ` +
                       failed
                           .map((command) => `${command.command}: ${command.tail ?? ""}`)
@@ -118,8 +118,8 @@ export class PlannerAwarenessRunner extends BaseObserver {
                 runId: this.opts.runId,
             },
         })
-        for (const environment of this.getEnvironments()) {
-            environment.deliverSemanticEvent(this, event as SemanticEvent<unknown>)
+        for (const environment of this.getBuses()) {
+            environment.publish(this, event as SemanticEvent<string, unknown>)
         }
     }
 }

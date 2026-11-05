@@ -17,7 +17,7 @@ import {
     type ServerResponse,
 } from "node:http"
 import { basename, join } from "node:path"
-import type { Participant } from "../runtime/mozaik.js"
+import type { BusMember } from "../runtime/coordination.js"
 
 import { inboxFilenameForAgentId } from "../../scripts/collaboration-inbox-path.mjs"
 
@@ -245,9 +245,9 @@ export class CollaborationBridge extends SerializedObserver {
     private brokerServer: Server | null = null
     private brokerStart: Promise<void> | null = null
     private brokerEndpoint: string | null = null
-    private leaseAuthority: Participant | null = null
-    private decisionAuthority: Participant | null = null
-    private messageIntentAuthorities: ReadonlySet<Participant> | null = null
+    private leaseAuthority: BusMember | null = null
+    private decisionAuthority: BusMember | null = null
+    private messageIntentAuthorities: ReadonlySet<BusMember> | null = null
 
     constructor(private readonly opts: CollaborationBridgeOptions) {
         super()
@@ -275,14 +275,14 @@ export class CollaborationBridge extends SerializedObserver {
         }
     }
 
-    setLeaseAuthority(authority: Participant): void {
+    setLeaseAuthority(authority: BusMember): void {
         if (this.leaseAuthority && this.leaseAuthority !== authority) {
             throw new Error("collaboration bridge lease authority is already bound")
         }
         this.leaseAuthority = authority
     }
 
-    setDecisionAuthority(authority: Participant): void {
+    setDecisionAuthority(authority: BusMember): void {
         if (this.decisionAuthority && this.decisionAuthority !== authority) {
             throw new Error("collaboration bridge decision authority is already bound")
         }
@@ -291,7 +291,7 @@ export class CollaborationBridge extends SerializedObserver {
 
     /** Seal the exact participants allowed to submit message intents. Worker
      * outbox messages enter through this Bridge's lease capability instead. */
-    setMessageIntentAuthorities(authorities: readonly Participant[]): void {
+    setMessageIntentAuthorities(authorities: readonly BusMember[]): void {
         if (this.messageIntentAuthorities) {
             throw new Error(
                 "collaboration bridge message intent authorities are already sealed",
@@ -440,63 +440,63 @@ export class CollaborationBridge extends SerializedObserver {
 
     protected override handleEvent(context: SerializedEventContext): void {
         const { event } = context
-        if (WorkLeaseGranted.is(event) && event.data.runId === this.opts.runId) {
+        if (WorkLeaseGranted.is(event) && event.payload.runId === this.opts.runId) {
             if (
                 context.source !== this.leaseAuthority &&
                 this.opts.unsafeAllowUnboundAuthorities !== true
             ) return
-            const agentId = event.data.request.storyId
+            const agentId = event.payload.request.storyId
             const previousLeaseId = this.activeLeaseByStory.get(agentId)
             const previous = previousLeaseId
                 ? this.activeLeases.get(previousLeaseId)
                 : undefined
             if (
-                previous?.leaseId === event.data.leaseId &&
-                previous.generation === event.data.generation
+                previous?.leaseId === event.payload.leaseId &&
+                previous.generation === event.payload.generation
             ) return
             if (
                 previous &&
-                (event.data.generation < previous.generation ||
-                    (event.data.generation === previous.generation &&
-                        event.data.leaseId !== previous.leaseId))
+                (event.payload.generation < previous.generation ||
+                    (event.payload.generation === previous.generation &&
+                        event.payload.leaseId !== previous.leaseId))
             ) return
             if (
                 previousLeaseId &&
-                (previousLeaseId !== event.data.leaseId ||
-                    previous?.generation !== event.data.generation)
+                (previousLeaseId !== event.payload.leaseId ||
+                    previous?.generation !== event.payload.generation)
             ) {
                 this.revokeCapability(previousLeaseId)
                 this.activeLeases.delete(previousLeaseId)
                 this.agentsByLease.delete(previousLeaseId)
             }
-            this.agentsByLease.set(event.data.leaseId, agentId)
-            this.activeLeases.set(event.data.leaseId, {
+            this.agentsByLease.set(event.payload.leaseId, agentId)
+            this.activeLeases.set(event.payload.leaseId, {
                 storyId: agentId,
-                leaseId: event.data.leaseId,
-                generation: event.data.generation,
+                leaseId: event.payload.leaseId,
+                generation: event.payload.generation,
                 launchGraphVersion: positiveIntegerOrNull(
-                    event.data.request.graphVersion,
+                    event.payload.request.graphVersion,
                 ),
                 deliveryMode:
                     this.opts.unsafeAllowFilesystemTransport === true
                         ? "poll"
                         : null,
             })
-            this.activeLeaseByStory.set(agentId, event.data.leaseId)
+            this.activeLeaseByStory.set(agentId, event.payload.leaseId)
             this.activeAgents.add(agentId)
-            this.announceNewOwnership(agentId, event.data.request.surface?.writes)
+            this.announceNewOwnership(agentId, event.payload.request.surface?.writes)
             // A stable story id may be leased repeatedly. Never expose a
             // previous execution's inbox to the new capability.
             this.resetInbox(agentId)
             if (this.opts.unsafeAllowFilesystemTransport === true) {
-                const active = this.activeLeases.get(event.data.leaseId)!
+                const active = this.activeLeases.get(event.payload.leaseId)!
                 const pending = this.pendingInbox.get(agentId) ?? []
                 this.pendingInbox.delete(agentId)
                 for (const intent of pending) this.deliverMessage(intent, active)
             }
             return
         }
-        if (WorkLeaseReleased.is(event) && event.data.runId === this.opts.runId) {
+        if (WorkLeaseReleased.is(event) && event.payload.runId === this.opts.runId) {
             if (
                 context.source !== this.leaseAuthority &&
                 this.opts.unsafeAllowUnboundAuthorities !== true
@@ -510,28 +510,28 @@ export class CollaborationBridge extends SerializedObserver {
             if (this.opts.unsafeAllowFilesystemTransport === true) {
                 this.consumeAvailableOutbox()
             }
-            const active = this.activeLeases.get(event.data.leaseId)
-            if (active?.storyId === event.data.storyId) {
+            const active = this.activeLeases.get(event.payload.leaseId)
+            if (active?.storyId === event.payload.storyId) {
                 // `consumeAvailableOutbox` above is the revocation barrier:
                 // records atomically committed before it retain attribution;
                 // anything committed after it is stale, including notes. A
                 // stale note could otherwise influence Dialogue indirectly.
-                this.agentsByLease.delete(event.data.leaseId)
-                this.revokeCapability(event.data.leaseId)
-                this.activeLeases.delete(event.data.leaseId)
+                this.agentsByLease.delete(event.payload.leaseId)
+                this.revokeCapability(event.payload.leaseId)
+                this.activeLeases.delete(event.payload.leaseId)
                 if (
-                    this.activeLeaseByStory.get(event.data.storyId) ===
-                    event.data.leaseId
+                    this.activeLeaseByStory.get(event.payload.storyId) ===
+                    event.payload.leaseId
                 ) {
-                    this.activeLeaseByStory.delete(event.data.storyId)
-                    this.activeAgents.delete(event.data.storyId)
+                    this.activeLeaseByStory.delete(event.payload.storyId)
+                    this.activeAgents.delete(event.payload.storyId)
                 }
             }
             return
         }
         if (
             (RuntimeReplanApplied.is(event) || RuntimeReplanRejected.is(event)) &&
-            event.data.runId === this.opts.runId
+            event.payload.runId === this.opts.runId
         ) {
             if (
                 context.source !== this.decisionAuthority &&
@@ -542,7 +542,7 @@ export class CollaborationBridge extends SerializedObserver {
         }
         if (
             (WorkBlockAccepted.is(event) || WorkBlockRejected.is(event)) &&
-            event.data.runId === this.opts.runId
+            event.payload.runId === this.opts.runId
         ) {
             if (
                 context.source !== this.decisionAuthority &&
@@ -553,13 +553,13 @@ export class CollaborationBridge extends SerializedObserver {
         }
         if (
             GoalLedgerProjectionPersisted.is(event) &&
-            event.data.runId === this.opts.runId
+            event.payload.runId === this.opts.runId
         ) {
             if (
                 context.source !== this.decisionAuthority &&
                 this.opts.unsafeAllowUnboundAuthorities !== true
             ) return
-            this.onGoalLedgerProjectionPersisted(event.data)
+            this.onGoalLedgerProjectionPersisted(event.payload)
             return
         }
         if (AgentTargetedMessage.is(event)) {
@@ -572,16 +572,16 @@ export class CollaborationBridge extends SerializedObserver {
                 this.messageIntentAuthorities?.has(context.source) !== true &&
                 this.opts.unsafeAllowUnboundAuthorities !== true
             ) return
-            this.routeMessageIntent(event.data)
+            this.routeMessageIntent(event.payload)
             return
         }
-        if (PeerHelpRequested.is(event) && event.data.runId === this.opts.runId) {
+        if (PeerHelpRequested.is(event) && event.payload.runId === this.opts.runId) {
             // Worker help is routed synchronously when its active outbox
             // record is consumed. This event is its audit projection only.
             if (context.source !== this) return
             return
         }
-        if (RunCompleted.is(event) && event.data.runId === this.opts.runId) {
+        if (RunCompleted.is(event) && event.payload.runId === this.opts.runId) {
             if (
                 context.source !== this.decisionAuthority &&
                 this.opts.unsafeAllowUnboundAuthorities !== true
@@ -1103,7 +1103,7 @@ export class CollaborationBridge extends SerializedObserver {
                 deliveryId: randomUUID(),
                 ts: new Date().toISOString(),
                 type: event.type,
-                data: event.data,
+                data: event.payload,
             }
             // Reserve enough space for the fail-closed gap marker even before
             // the first rejection. The GET response therefore remains within
@@ -1144,7 +1144,7 @@ export class CollaborationBridge extends SerializedObserver {
         if (this.opts.unsafeAllowFilesystemTransport === true) {
             this.writeUnsafeInbox(active.storyId, {
                 type: event.type,
-                data: event.data,
+                data: event.payload,
             })
         }
         this.publish(event)
@@ -1425,13 +1425,13 @@ export class CollaborationBridge extends SerializedObserver {
             | ReturnType<typeof RuntimeReplanApplied.create>
             | ReturnType<typeof RuntimeReplanRejected.create>,
     ): void {
-        const pending = this.pendingReplans.get(event.data.proposalId)
-        if (!pending || !sameCorrelation(pending, event.data)) return
-        this.resolvedDecisionWrites.set(event.data.proposalId, {
+        const pending = this.pendingReplans.get(event.payload.proposalId)
+        if (!pending || !sameCorrelation(pending, event.payload)) return
+        this.resolvedDecisionWrites.set(event.payload.proposalId, {
             status: RuntimeReplanApplied.is(event) ? "applied" : "rejected",
-            ...event.data,
+            ...event.payload,
         })
-        this.flushResolvedDecision(event.data.proposalId)
+        this.flushResolvedDecision(event.payload.proposalId)
     }
 
     private onWorkBlockDecision(
@@ -1439,13 +1439,13 @@ export class CollaborationBridge extends SerializedObserver {
             | ReturnType<typeof WorkBlockAccepted.create>
             | ReturnType<typeof WorkBlockRejected.create>,
     ): void {
-        const pending = this.pendingBlocks.get(event.data.blockId)
-        if (!pending || !sameBlockCorrelation(pending, event.data)) return
-        this.resolvedDecisionWrites.set(event.data.blockId, {
+        const pending = this.pendingBlocks.get(event.payload.blockId)
+        if (!pending || !sameBlockCorrelation(pending, event.payload)) return
+        this.resolvedDecisionWrites.set(event.payload.blockId, {
             status: WorkBlockAccepted.is(event) ? "accepted" : "rejected",
-            ...event.data,
+            ...event.payload,
         })
-        this.flushResolvedDecision(event.data.blockId)
+        this.flushResolvedDecision(event.payload.blockId)
     }
 
     private queueDecision(

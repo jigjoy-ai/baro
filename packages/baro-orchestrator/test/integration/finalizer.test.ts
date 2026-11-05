@@ -278,7 +278,7 @@ describe("Finalizer", () => {
             await finalizer.onExternalEvent(
                 verifier,
                 RunVerificationCompleted.create({
-                    ...verification.data,
+                    ...verification.payload,
                     runId: "other-run",
                 }),
             )
@@ -299,7 +299,7 @@ describe("Finalizer", () => {
             assert.equal(state.finalizePromise, null)
             await finalizer.onExternalEvent(
                 coordinator,
-                RunCompleted.create({ ...completed.data, runId: "other-run" }),
+                RunCompleted.create({ ...completed.payload, runId: "other-run" }),
             )
             assert.equal(state.finalizePromise, null)
             await finalizer.onExternalEvent(coordinator, completed)
@@ -384,7 +384,7 @@ describe("Finalizer", () => {
 
             const event = env.events.find((e) => PrCreated.is(e))
             assert.ok(event, "PrCreated emitted for skipped PR")
-            assert.deepEqual(event.data, {
+            assert.deepEqual(event.payload, {
                 url: null,
                 branch: "baro/finalizer-test",
                 baseBranch: "main",
@@ -535,10 +535,10 @@ describe("Finalizer", () => {
                 )
                 await finalizer.complete()
 
-                assert.deepEqual(env.events.find(FinalizeStarted.is)?.data, {
+                assert.deepEqual(env.events.find(FinalizeStarted.is)?.payload, {
                     branch: "baro/fake-pr",
                 })
-                assert.deepEqual(env.events.find(PrCreated.is)?.data, {
+                assert.deepEqual(env.events.find(PrCreated.is)?.payload, {
                     url: "https://github.com/acme/baro/pull/123",
                     branch: "baro/fake-pr",
                     baseBranch: "main",
@@ -1002,8 +1002,8 @@ describe("Finalizer", () => {
                 // A PR was opened (work not stranded) from the integration branch,
                 // which was fast-forwarded onto the recovered commit.
                 const pr = env.events.find(PrCreated.is)
-                assert.equal(pr?.data.url, "https://github.com/acme/baro/pull/77")
-                assert.equal(pr?.data.branch, "baro/salvage")
+                assert.equal(pr?.payload.url, "https://github.com/acme/baro/pull/77")
+                assert.equal(pr?.payload.branch, "baro/salvage")
                 assert.ok(existsSync(join(dir, "feature.txt")), "integration branch fast-forwarded onto the recovered commit")
 
                 const calls = readFileSync(argsPath, "utf8").trim().split("\n").map((l) => JSON.parse(l) as string[])

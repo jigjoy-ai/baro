@@ -4,30 +4,29 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import {
-    AgenticEnvironment,
-    type Participant,
     type SemanticEvent,
 } from "../../src/runtime/mozaik.js"
+import { type BusMember, CoordinationBus } from "../../src/runtime/coordination.js"
 
-export type CapturedEnvironment = AgenticEnvironment & {
-    events: SemanticEvent<unknown>[]
+export type CapturedEnvironment = CoordinationBus & {
+    events: SemanticEvent<string, unknown>[]
 }
 
-export function source(agentId: string): Participant {
-    return { agentId } as unknown as Participant
+export function source(agentId: string): BusMember {
+    return { agentId } as unknown as BusMember
 }
 
 export function captureEnv(): CapturedEnvironment {
-    const events: SemanticEvent<unknown>[] = []
-    const env = new AgenticEnvironment("participant-test") as CapturedEnvironment
-    const deliverSemanticEvent = env.deliverSemanticEvent.bind(env)
+    const events: SemanticEvent<string, unknown>[] = []
+    const env = new CoordinationBus("participant-test") as CapturedEnvironment
+    const deliverSemanticEvent = env.publish.bind(env)
 
     Object.defineProperty(env, "events", {
         enumerable: true,
         value: events,
     })
 
-    env.deliverSemanticEvent = (sourceParticipant, event) => {
+    env.publish = (sourceParticipant, event) => {
         events.push(event)
         deliverSemanticEvent(sourceParticipant, event)
     }

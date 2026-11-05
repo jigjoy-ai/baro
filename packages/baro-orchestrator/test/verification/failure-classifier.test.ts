@@ -64,7 +64,7 @@ async function verifyWith(
     })
     verifier.setRequestAuthority(BOARD)
     const env = joinWithCapture(verifier)
-    env.deliverSemanticEvent(
+    env.publish(
         BOARD,
         RunVerificationRequested.create({
             runId,
@@ -367,12 +367,12 @@ describe("run verification evidence and the retry-classified event", () => {
             },
         ])
 
-        const command = completed.data.commands[0]!
+        const command = completed.payload.commands[0]!
         assert.equal(command.failureBucket, "regression")
         assert.equal(command.remedy, "none")
 
         assert.equal(classified.length, 1)
-        assert.deepEqual(classified[0]!.data, {
+        assert.deepEqual(classified[0]!.payload, {
             runId: "run-regression",
             verificationId: "run-regression:verification:1",
             command: "npm run test",
@@ -395,15 +395,15 @@ describe("run verification evidence and the retry-classified event", () => {
             },
         ])
 
-        const command = completed.data.commands[0]!
+        const command = completed.payload.commands[0]!
         assert.equal(command.status, "passed")
         assert.equal(command.failureBucket, "environment")
         assert.equal(command.remedy, "install-dependencies")
 
         assert.equal(classified.length, 1)
-        assert.equal(classified[0]!.data.retried, true)
+        assert.equal(classified[0]!.payload.retried, true)
         // The bounded first-attempt tail, not the (green) second attempt.
-        assert.equal(classified[0]!.data.tail, "Error: Cannot find module 'tsx'")
+        assert.equal(classified[0]!.payload.tail, "Error: Cannot find module 'tsx'")
     })
 
     it("judges the first attempt's tail, not the retry's", async () => {
@@ -418,8 +418,8 @@ describe("run verification evidence and the retry-classified event", () => {
             },
         ])
         assert.equal(classified.length, 1)
-        assert.equal(classified[0]!.data.bucket, "time-ceiling")
-        assert.equal(classified[0]!.data.remedy, "lift-ceiling")
+        assert.equal(classified[0]!.payload.bucket, "time-ceiling")
+        assert.equal(classified[0]!.payload.remedy, "lift-ceiling")
     })
 
     it("prefers the runner's environment observation over the tail text", async () => {
@@ -433,9 +433,9 @@ describe("run verification evidence and the retry-classified event", () => {
                 tail: "verification cwd missing: /tmp/baro-worktrees/run-1/S2",
             },
         ])
-        assert.equal(completed.data.commands[0]!.failureBucket, "environment")
-        assert.equal(completed.data.commands[0]!.remedy, "rematerialize-worktree")
-        assert.equal(classified[0]!.data.signalId, "verification-cwd-missing")
+        assert.equal(completed.payload.commands[0]!.failureBucket, "environment")
+        assert.equal(completed.payload.commands[0]!.remedy, "rematerialize-worktree")
+        assert.equal(classified[0]!.payload.signalId, "verification-cwd-missing")
     })
 
     it("leaves passing and skipped commands unclassified and silent", async () => {
@@ -448,7 +448,7 @@ describe("run verification evidence and the retry-classified event", () => {
                 tail: "no lint script",
             },
         ])
-        for (const command of completed.data.commands) {
+        for (const command of completed.payload.commands) {
             assert.equal(command.failureBucket, undefined)
             assert.equal(command.remedy, undefined)
         }
@@ -481,9 +481,9 @@ describe("run verification evidence and the retry-classified event", () => {
             verificationId: "run-replay:verification:1",
         })
 
-        env.deliverSemanticEvent(BOARD, request)
+        env.publish(BOARD, request)
         await verifier.idle()
-        env.deliverSemanticEvent(BOARD, request)
+        env.publish(BOARD, request)
         await verifier.idle()
 
         assert.equal(env.events.filter(RunVerificationCompleted.is).length, 2)
@@ -605,10 +605,10 @@ describe("classifying failures verifyBuild actually produced", () => {
             // End to end: the same tail carried through the run-verifier lands
             // on the evidence and on exactly one event.
             const { completed, classified } = await verifyWith("run-env-e2e", [command])
-            assert.equal(completed.data.commands[0]!.failureBucket, "environment")
-            assert.equal(completed.data.commands[0]!.remedy, "install-dependencies")
+            assert.equal(completed.payload.commands[0]!.failureBucket, "environment")
+            assert.equal(completed.payload.commands[0]!.remedy, "install-dependencies")
             assert.equal(classified.length, 1)
-            assert.equal(classified[0]!.data.retried, true)
+            assert.equal(classified[0]!.payload.retried, true)
         })
     })
 

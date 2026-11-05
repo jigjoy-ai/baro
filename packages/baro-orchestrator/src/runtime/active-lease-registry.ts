@@ -12,22 +12,22 @@ export class ActiveLeaseRegistry {
         { runId: string; leaseId: string; generation: number }
     >()
 
-    observe(event: SemanticEvent<unknown>, runId: string | undefined): boolean {
+    observe(event: SemanticEvent<string, unknown>, runId: string | undefined): boolean {
         if (WorkLeaseGranted.is(event)) {
-            if (!runId || event.data.runId === runId) {
-                this.byStory.set(event.data.request.storyId, {
-                    runId: event.data.runId,
-                    leaseId: event.data.leaseId,
-                    generation: event.data.generation,
+            if (!runId || event.payload.runId === runId) {
+                this.byStory.set(event.payload.request.storyId, {
+                    runId: event.payload.runId,
+                    leaseId: event.payload.leaseId,
+                    generation: event.payload.generation,
                 })
             }
             return true
         }
         if (WorkLeaseReleased.is(event)) {
-            if (!runId || event.data.runId === runId) {
-                const lease = this.byStory.get(event.data.storyId)
-                if (lease?.leaseId === event.data.leaseId) {
-                    this.byStory.delete(event.data.storyId)
+            if (!runId || event.payload.runId === runId) {
+                const lease = this.byStory.get(event.payload.storyId)
+                if (lease?.leaseId === event.payload.leaseId) {
+                    this.byStory.delete(event.payload.storyId)
                 }
             }
             return true

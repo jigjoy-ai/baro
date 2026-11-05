@@ -37,25 +37,25 @@ describe("Critic", () => {
 
         assert.equal(critiques.length, 3)
         assert.deepEqual(
-            critiques.map((event) => event.data.turn),
+            critiques.map((event) => event.payload.turn),
             [1, 2, 3],
         )
-        assert.equal(critiques[0]!.data.verdict, "fail")
-        assert.equal(critiques[0]!.data.reasoning, "Missing tests")
-        assert.deepEqual(critiques[0]!.data.violatedCriteria, [
+        assert.equal(critiques[0]!.payload.verdict, "fail")
+        assert.equal(critiques[0]!.payload.reasoning, "Missing tests")
+        assert.deepEqual(critiques[0]!.payload.violatedCriteria, [
             "must include tests",
         ])
 
         assert.equal(messages.length, 2)
         assert.deepEqual(
-            messages.map((event) => event.data.metadata.emissionIndex),
+            messages.map((event) => event.payload.metadata.emissionIndex),
             [1, 2],
         )
         assert.deepEqual(
-            messages.map((event) => event.data.recipientId),
+            messages.map((event) => event.payload.recipientId),
             ["agent-a", "agent-a"],
         )
-        assert.match(messages[0]!.data.text, /Missing tests/)
+        assert.match(messages[0]!.payload.text, /Missing tests/)
     })
 
     it("emits pass critiques without corrective messages", async () => {
@@ -79,11 +79,11 @@ describe("Critic", () => {
         const messages = env.events.filter(AgentTargetedMessage.is)
 
         assert.equal(critiques.length, 1)
-        assert.equal(critiques[0]!.data.agentId, "agent-a")
-        assert.equal(critiques[0]!.data.verdict, "pass")
-        assert.equal(critiques[0]!.data.reasoning, "All criteria satisfied")
-        assert.deepEqual(critiques[0]!.data.violatedCriteria, [])
-        assert.equal(critiques[0]!.data.modelUsed, "fake-claude-model")
+        assert.equal(critiques[0]!.payload.agentId, "agent-a")
+        assert.equal(critiques[0]!.payload.verdict, "pass")
+        assert.equal(critiques[0]!.payload.reasoning, "All criteria satisfied")
+        assert.deepEqual(critiques[0]!.payload.violatedCriteria, [])
+        assert.equal(critiques[0]!.payload.modelUsed, "fake-claude-model")
         assert.equal(messages.length, 0)
     })
 
@@ -166,7 +166,7 @@ describe("Critic", () => {
 
         assert.equal(evaluations, 2)
         assert.deepEqual(
-            env.events.filter(Critique.is).map((event) => event.data.turn),
+            env.events.filter(Critique.is).map((event) => event.payload.turn),
             [1, 2],
         )
     })
@@ -241,7 +241,7 @@ describe("Critic", () => {
                     env.events.indexOf(critiques[0]!),
             )
 
-            const item = measured[0]!.data
+            const item = measured[0]!.payload
             assert.equal(item.invocationId, "run-critic:critic:agent-a:1")
             assert.equal(
                 item.measurementId,
@@ -308,14 +308,14 @@ describe("Critic", () => {
             const measured = env.events.filter(ModelInvocationMeasured.is)
             const critiques = env.events.filter(Critique.is)
             assert.equal(measured.length, 1)
-            assert.equal(measured[0]!.data.status, "succeeded")
+            assert.equal(measured[0]!.payload.status, "succeeded")
             assert.deepEqual(
-                measured[0]!.data.tokens.total,
+                measured[0]!.payload.tokens.total,
                 knownMetric(3, "derived"),
             )
             assert.equal(critiques.length, 1)
-            assert.equal(critiques[0]!.data.verdict, "fail")
-            assert.match(critiques[0]!.data.reasoning, /no JSON object found/)
+            assert.equal(critiques[0]!.payload.verdict, "fail")
+            assert.match(critiques[0]!.payload.reasoning, /no JSON object found/)
         })
     })
 
@@ -353,14 +353,14 @@ describe("Critic", () => {
 
                 const measured = env.events.filter(ModelInvocationMeasured.is)
                 assert.equal(measured.length, 1, item.name)
-                assert.equal(measured[0]!.data.status, item.status, item.name)
+                assert.equal(measured[0]!.payload.status, item.status, item.name)
                 assert.deepEqual(
-                    measured[0]!.data.tokens.inputTotal,
+                    measured[0]!.payload.tokens.inputTotal,
                     unknownMetric(item.reason),
                     item.name,
                 )
                 assert.deepEqual(
-                    measured[0]!.data.cost.equivalentUsd,
+                    measured[0]!.payload.cost.equivalentUsd,
                     unknownMetric(item.reason),
                     item.name,
                 )

@@ -10,9 +10,9 @@ import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { setTimeout as setTimeoutPromise } from "timers/promises"
 
-import { BaseObserver, Participant, SemanticEvent } from "../../runtime/mozaik.js"
+import { SemanticEvent } from "../../runtime/mozaik.js"
 
-import { AgenticEnvironment } from "../../runtime/mozaik.js"
+import { CoordinationBus, BusMember } from "../../runtime/coordination.js"
 import {
     AgentResult,
     AgentState,
@@ -50,7 +50,7 @@ import {
 import { criticInput } from "../../acceptance/critic-input.js"
 import { StreamingTurnLifecycle } from "../../acceptance/turn-review.js"
 
-export class StoryAgent extends BaseObserver {
+export class StoryAgent extends BusMember {
     private readonly spec: Required<
         Pick<
             StorySpec,
@@ -67,10 +67,10 @@ export class StoryAgent extends BaseObserver {
     > &
         StorySpec
 
-    private envRef: AgenticEnvironment | null = null
+    private envRef: CoordinationBus | null = null
     /** Optional explicit bus identity for the terminal outcome. */
-    private resultAuthority: Participant | null = null
-    private terminalSourceRegistrar: ((source: Participant) => void) | null = null
+    private resultAuthority: BusMember | null = null
+    private terminalSourceRegistrar: ((source: BusMember) => void) | null = null
     private currentClaude: ClaudeCliParticipant | null = null
     private currentPhase: AgentPhase = "idle"
     private startedAt: number | null = null
@@ -139,7 +139,7 @@ export class StoryAgent extends BaseObserver {
         return this.currentClaude
     }
 
-    setResultAuthority(source: Participant): void {
+    setResultAuthority(source: BusMember): void {
         if (this.resultAuthority && this.resultAuthority !== source) {
             throw new Error(`result authority already set for ${this.spec.id}`)
         }
@@ -147,7 +147,7 @@ export class StoryAgent extends BaseObserver {
     }
 
     setTerminalSourceRegistrar(
-        register: (source: Participant) => void,
+        register: (source: BusMember) => void,
     ): void {
         if (this.terminalSourceRegistrar && this.terminalSourceRegistrar !== register) {
             throw new Error(`terminal source registrar already set for ${this.spec.id}`)
@@ -156,7 +156,7 @@ export class StoryAgent extends BaseObserver {
     }
 
     /** Idempotent; returns the `done` promise. */
-    run(environment: AgenticEnvironment): Promise<StoryOutcome> {
+    run(environment: CoordinationBus): Promise<StoryOutcome> {
         if (this.startedAt != null) {
             return this.done
         }
@@ -173,21 +173,21 @@ export class StoryAgent extends BaseObserver {
      * doing it here too would double-deliver.
      */
     override async onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): Promise<void> {
         if (
             AgentTargetedMessage.is(event) &&
             acceptsTargetedMessage(
                 source,
-                event.data,
+                event.payload,
                 this.spec.id,
                 this.spec.targetedMessageAuthority,
                 this.spec,
             ) &&
             !(
                 this.spec.requiresQualityReview &&
-                typeof event.data.metadata.terminalId === "string"
+                typeof event.payload.metadata.terminalId === "string"
             )
         ) {
             this.turnLifecycle?.observeMessage()
@@ -196,7 +196,7 @@ export class StoryAgent extends BaseObserver {
         if (
             source === this.currentClaude &&
             AgentResult.is(event) &&
-            event.data.agentId === this.spec.id
+            event.payload.agentId === this.spec.id
         ) {
             this.turnLifecycle?.observeResult(
                 criticInput(event)?.terminalId ?? null,
@@ -207,22 +207,22 @@ export class StoryAgent extends BaseObserver {
             this.spec.requiresQualityReview &&
             source === this.spec.turnReviewAuthority &&
             Critique.is(event) &&
-            event.data.agentId === this.spec.id &&
-            event.data.terminalId
+            event.payload.agentId === this.spec.id &&
+            event.payload.terminalId
         ) {
-            this.turnLifecycle?.deliverReview(event.data)
+            this.turnLifecycle?.deliverReview(event.payload)
         }
 
         if (
             ClaudeRateLimit.is(event) &&
-            event.data.agentId === this.spec.id &&
+            event.payload.agentId === this.spec.id &&
             source === this.currentClaude &&
-            classifyProviderFailure(event.data.raw)
+            classifyProviderFailure(event.payload.raw)
         ) {
-            const eventSession = stringField(event.data.raw, "session_id")
+            const eventSession = stringField(event.payload.raw, "session_id")
             const activeSession = this.currentClaude?.getSessionId()
             if (!eventSession || !activeSession || eventSession === activeSession) {
-                this.currentProviderCapacitySignal = event.data.raw
+                this.currentProviderCapacitySignal = event.payload.raw
             }
         }
     }
@@ -562,7 +562,7 @@ export class StoryAgent extends BaseObserver {
             // `transition` drops a same-phase call, and the attempt is already
             // `running` here, so state detail is emitted on the current phase.
             onSupersede: ({ supersededTerminalId, terminalId }) => {
-                this.envRef?.deliverSemanticEvent(
+                this.envRef?.publish(
                     this,
                     AgentState.create({
                         agentId: this.spec.id,
@@ -589,7 +589,7 @@ export class StoryAgent extends BaseObserver {
     private drainCommandRefusals(): void {
         if (!this.settingsPath) return
         for (const refusal of drainGuardRefusals(dirname(this.settingsPath))) {
-            this.envRef?.deliverSemanticEvent(
+            this.envRef?.publish(
                 this,
                 StoryCommandRefused.create({
                     storyId: this.spec.id,
@@ -608,7 +608,7 @@ export class StoryAgent extends BaseObserver {
         failure?: StoryFailureData,
     ): void {
         if (!this.envRef) return
-        this.envRef.deliverSemanticEvent(
+        this.envRef.publish(
             this.resultAuthority ?? this,
             StoryResult.create({
                 storyId: this.spec.id,
@@ -683,7 +683,7 @@ export class StoryAgent extends BaseObserver {
         if (next === this.currentPhase) return
         this.currentPhase = next
         if (this.envRef) {
-            this.envRef.deliverSemanticEvent(
+            this.envRef.publish(
                 this,
                 AgentState.create({
                     agentId: this.spec.id,

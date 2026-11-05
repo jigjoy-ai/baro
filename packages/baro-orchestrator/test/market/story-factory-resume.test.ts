@@ -1,7 +1,7 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 
-import type { AgenticEnvironment } from "../../src/runtime/mozaik.js"
+import type { CoordinationBus } from "../../src/runtime/coordination.js"
 
 import { StoryFactory } from "../../src/market/story-factory.js"
 import type {
@@ -31,7 +31,7 @@ class CapturingExecutor implements StoryExecutor {
         req: StorySpawnRequestData,
         _route: StoryRoute,
         cwd: string,
-        _env: AgenticEnvironment,
+        _env: CoordinationBus,
         opts: StoryExecOpts,
     ): StoryExecution {
         this.calls.push({ req, cwd })
@@ -180,7 +180,7 @@ describe("StoryFactory suspension resume routing", () => {
             assert.equal(executor.calls.length, 0)
             const failure = env.events.find(StorySpawnFailed.is)
             assert.match(
-                failure?.data.error ?? "",
+                failure?.payload.error ?? "",
                 /isolated worktree unavailable for S1/,
             )
         })
@@ -229,7 +229,7 @@ describe("StoryFactory suspension resume routing", () => {
             await new Promise<void>((resolve) => setImmediate(resolve))
 
             const requested = env.events.find(StorySpawnRequest.is)
-            assert.deepEqual(requested?.data.resume, {
+            assert.deepEqual(requested?.payload.resume, {
                 preservedBranch: PRESERVED,
             })
             assert.deepEqual(resumeCalls, [

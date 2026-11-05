@@ -2,7 +2,7 @@ import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 import { join } from "node:path"
 
-import type { AgenticEnvironment } from "../../src/runtime/mozaik.js"
+import type { CoordinationBus } from "../../src/runtime/coordination.js"
 
 import { StoryFactory } from "../../src/market/story-factory.js"
 import type {
@@ -77,17 +77,17 @@ class CapturingExecutor implements StoryExecutor {
         req: StorySpawnRequestData
         route: StoryRoute
         cwd: string
-        env: AgenticEnvironment
+        env: CoordinationBus
         opts: StoryExecOpts
     }> = []
-    public disposedWith: AgenticEnvironment | null = null
-    public disposeCalls: AgenticEnvironment[] = []
+    public disposedWith: CoordinationBus | null = null
+    public disposeCalls: CoordinationBus[] = []
 
     start(
         req: StorySpawnRequestData,
         route: StoryRoute,
         cwd: string,
-        env: AgenticEnvironment,
+        env: CoordinationBus,
         opts: StoryExecOpts,
     ): StoryExecution {
         this.calls.push({ req, route, cwd, env, opts })
@@ -122,7 +122,7 @@ describe("StoryFactory", () => {
             await factory.onExternalEvent(source("conductor"), spawn)
 
             assert.equal(executor.calls.length, 1)
-            assert.deepEqual(executor.calls[0].req, spawn.data)
+            assert.deepEqual(executor.calls[0].req, spawn.payload)
             assert.deepEqual(executor.calls[0].route, {
                 backend: "claude",
                 model: "sonnet",
@@ -136,11 +136,11 @@ describe("StoryFactory", () => {
 
             const spawned = env.events.find(StorySpawned.is)
             assert.ok(spawned)
-            assert.deepEqual(spawned.data, { storyId: "S1" })
+            assert.deepEqual(spawned.payload, { storyId: "S1" })
 
             const routed = env.events.find(StoryRouted.is)
             assert.ok(routed)
-            assert.deepEqual(routed.data, {
+            assert.deepEqual(routed.payload, {
                 storyId: "S1",
                 backend: "claude",
                 model: "sonnet",
@@ -506,7 +506,7 @@ describe("StoryFactory", () => {
             const executor: StoryExecutor = {
                 start: (req, _route, _cwd, env) => ({
                     abort: () => {
-                        env.deliverSemanticEvent(
+                        env.publish(
                             resultSource,
                             StoryResult.create({
                                 storyId: req.storyId,
@@ -546,7 +546,7 @@ describe("StoryFactory", () => {
             const resultSource = source("uncertified-result")
             const executor: StoryExecutor = {
                 start: (req, _route, _cwd, env) => {
-                    env.deliverSemanticEvent(
+                    env.publish(
                         resultSource,
                         StoryResult.create({
                             storyId: req.storyId,
@@ -653,8 +653,8 @@ describe("StoryFactory", () => {
 
             const advertised = env.events.find(WorkerCapabilityAdvertised.is)
             const bid = env.events.find(WorkBid.is)
-            assert.equal(advertised?.data.capabilities.maxConcurrent, 2)
-            assert.equal(bid?.data.route.routeId, "deepseek-flash")
+            assert.equal(advertised?.payload.capabilities.maxConcurrent, 2)
+            assert.equal(bid?.payload.route.routeId, "deepseek-flash")
             assert.doesNotMatch(JSON.stringify([advertised, bid]), /super-secret-key/)
             assert.ok(bid)
 
@@ -691,8 +691,8 @@ describe("StoryFactory", () => {
                     timeoutSecs: 30,
                     graphVersion: 3,
                 },
-                bidId: bid.data.bidId,
-                route: bid.data.route,
+                bidId: bid.payload.bidId,
+                route: bid.payload.route,
             })
             await factory.onExternalEvent(
                 source("forged-board"),
@@ -726,8 +726,8 @@ describe("StoryFactory", () => {
                 env.events.find(
                     (event) =>
                         StoryRouted.is(event) &&
-                        event.data.storyId === "S1",
-                )?.data,
+                        event.payload.storyId === "S1",
+                )?.payload,
                 {
                     storyId: "S1",
                     backend: "openai",
@@ -832,7 +832,7 @@ describe("StoryFactory", () => {
                     runId,
                     proposalId: "proposal-1",
                     retractionId: "retraction-1",
-                    offerId: work.data.offerId,
+                    offerId: work.payload.offerId,
                     storyId: "S1",
                     generation: 1,
                     graphVersion: 2,
@@ -843,20 +843,20 @@ describe("StoryFactory", () => {
                 broker,
                 WorkLeaseGranted.create({
                     runId,
-                    offerId: work.data.offerId,
+                    offerId: work.payload.offerId,
                     leaseId: "stale-lease",
                     workerId: "worker-a",
                     generation: 1,
-                    request: work.data.request,
-                    bidId: bid.data.bidId,
-                    route: bid.data.route,
+                    request: work.payload.request,
+                    bidId: bid.payload.bidId,
+                    route: bid.payload.route,
                 }),
             )
 
             assert.equal(executor.calls.length, 0)
             const failure = env.events.find(StorySpawnFailed.is)
-            assert.equal(failure?.data.leaseId, "stale-lease")
-            assert.match(failure?.data.error ?? "", /stored bid/)
+            assert.equal(failure?.payload.leaseId, "stale-lease")
+            assert.match(failure?.payload.error ?? "", /stored bid/)
         })
     })
 
@@ -972,7 +972,7 @@ describe("StoryFactory", () => {
                 1,
             )
 
-            assert.deepEqual(first.bid.data.estimate, configuredEstimate)
+            assert.deepEqual(first.bid.payload.estimate, configuredEstimate)
 
             // A forged producer and an authoritative but stale lease must not
             // contribute. A replayed invocation contributes once even when
@@ -985,8 +985,8 @@ describe("StoryFactory", () => {
                         "forged-invocation",
                         "run-learning",
                         "S-success",
-                        first.lease.data.leaseId,
-                        first.lease.data.generation,
+                        first.lease.payload.leaseId,
+                        first.lease.payload.generation,
                         90,
                     ),
                 ),
@@ -1013,8 +1013,8 @@ describe("StoryFactory", () => {
                         "invocation-a",
                         "run-learning",
                         "S-success",
-                        first.lease.data.leaseId,
-                        first.lease.data.generation,
+                        first.lease.payload.leaseId,
+                        first.lease.payload.generation,
                         4,
                     ),
                 ),
@@ -1027,8 +1027,8 @@ describe("StoryFactory", () => {
                         "invocation-a",
                         "run-learning",
                         "S-success",
-                        first.lease.data.leaseId,
-                        first.lease.data.generation,
+                        first.lease.payload.leaseId,
+                        first.lease.payload.generation,
                         4,
                     ),
                 ),
@@ -1041,8 +1041,8 @@ describe("StoryFactory", () => {
                         "invocation-b",
                         "run-learning",
                         "S-success",
-                        first.lease.data.leaseId,
-                        first.lease.data.generation,
+                        first.lease.payload.leaseId,
+                        first.lease.payload.generation,
                         2,
                     ),
                 ),
@@ -1053,8 +1053,8 @@ describe("StoryFactory", () => {
                 broker,
                 WorkLeaseReleased.create({
                     runId: "run-learning",
-                    offerId: first.lease.data.offerId,
-                    leaseId: first.lease.data.leaseId,
+                    offerId: first.lease.payload.offerId,
+                    leaseId: first.lease.payload.leaseId,
                     storyId: "S-success",
                     workerId: "worker-learning",
                     reason: "integrated",
@@ -1063,7 +1063,7 @@ describe("StoryFactory", () => {
 
             const update = env.events.find(RouteEstimateUpdated.is)
             assert.ok(update)
-            assert.deepEqual(update.data, {
+            assert.deepEqual(update.payload, {
                 runId: "run-learning",
                 workerId: "worker-learning",
                 route: {
@@ -1097,23 +1097,23 @@ describe("StoryFactory", () => {
                         "invocation-c",
                         "run-learning",
                         "S-success",
-                        first.lease.data.leaseId,
-                        first.lease.data.generation,
+                        first.lease.payload.leaseId,
+                        first.lease.payload.generation,
                         3,
                     ),
                 ),
             )
             const lateUpdate = env.events.filter(RouteEstimateUpdated.is).at(-1)
             assert.ok(lateUpdate)
-            assert.equal(lateUpdate.data.estimate.expectedCostUsd, 5)
-            assert.equal(lateUpdate.data.observations, 1)
+            assert.equal(lateUpdate.payload.estimate.expectedCostUsd, 5)
+            assert.equal(lateUpdate.payload.observations, 1)
 
             const laterOffer = marketOffer("run-learning", "S-later", 2)
             await factory.onExternalEvent(board, laterOffer)
             const laterBid = env.events.filter(WorkBid.is).at(-1)
             assert.ok(laterBid)
-            assert.equal(laterBid.data.storyId, "S-later")
-            assert.deepEqual(laterBid.data.estimate, lateUpdate.data.estimate)
+            assert.equal(laterBid.payload.storyId, "S-later")
+            assert.deepEqual(laterBid.payload.estimate, lateUpdate.payload.estimate)
         })
     })
 
@@ -1164,8 +1164,8 @@ describe("StoryFactory", () => {
                 broker,
                 WorkLeaseReleased.create({
                     runId: "run-quality-learning",
-                    offerId: semantic.lease.data.offerId,
-                    leaseId: semantic.lease.data.leaseId,
+                    offerId: semantic.lease.payload.offerId,
+                    leaseId: semantic.lease.payload.leaseId,
                     storyId: "S-quality-failure",
                     workerId: "worker-quality-learning",
                     reason: "quality_failed",
@@ -1173,15 +1173,15 @@ describe("StoryFactory", () => {
             )
             const afterSemantic = env.events.filter(RouteEstimateUpdated.is).at(-1)
             assert.ok(afterSemantic)
-            assert.equal(afterSemantic.data.verifiedSuccesses, 0)
-            assert.equal(afterSemantic.data.workFailures, 1)
-            assert.equal(afterSemantic.data.observations, 1)
+            assert.equal(afterSemantic.payload.verifiedSuccesses, 0)
+            assert.equal(afterSemantic.payload.workFailures, 1)
+            assert.equal(afterSemantic.payload.observations, 1)
             assert.equal(
-                afterSemantic.data.estimate.estimatedSuccessProbability,
+                afterSemantic.payload.estimate.estimatedSuccessProbability,
                 (initialSuccessProbability * 4) / 5,
             )
             assert.ok(
-                afterSemantic.data.estimate.estimatedSuccessProbability <
+                afterSemantic.payload.estimate.estimatedSuccessProbability <
                     initialSuccessProbability,
             )
 
@@ -1200,8 +1200,8 @@ describe("StoryFactory", () => {
                 broker,
                 WorkLeaseReleased.create({
                     runId: "run-quality-learning",
-                    offerId: operational.lease.data.offerId,
-                    leaseId: operational.lease.data.leaseId,
+                    offerId: operational.lease.payload.offerId,
+                    leaseId: operational.lease.payload.leaseId,
                     storyId: "S-operational-failure",
                     workerId: "worker-quality-learning",
                     reason: "operational_failed",
@@ -1212,12 +1212,12 @@ describe("StoryFactory", () => {
             assert.equal(updates.length, 2)
             const afterOperational = updates[1]
             assert.ok(afterOperational)
-            assert.equal(afterOperational.data.verifiedSuccesses, 0)
-            assert.equal(afterOperational.data.workFailures, 1)
-            assert.equal(afterOperational.data.observations, 2)
+            assert.equal(afterOperational.payload.verifiedSuccesses, 0)
+            assert.equal(afterOperational.payload.workFailures, 1)
+            assert.equal(afterOperational.payload.observations, 2)
             assert.equal(
-                afterOperational.data.estimate.estimatedSuccessProbability,
-                afterSemantic.data.estimate.estimatedSuccessProbability,
+                afterOperational.payload.estimate.estimatedSuccessProbability,
+                afterSemantic.payload.estimate.estimatedSuccessProbability,
             )
         })
     })
@@ -1505,7 +1505,7 @@ describe("StoryFactory", () => {
                     leaseId: "losing",
                     workerId: "worker-b",
                     generation: 1,
-                    request: offer.data.request,
+                    request: offer.payload.request,
                     bidId: "other-bid",
                     route: { routeId: "route-b", backend: "claude", model: "sonnet" },
                 }),
@@ -1514,7 +1514,7 @@ describe("StoryFactory", () => {
 
             // Re-bid a fresh generation, then corrupt the frozen route.
             const secondOffer = WorkOffered.create({
-                ...offer.data,
+                ...offer.payload,
                 offerId: "offer-S1-2",
                 generation: 2,
             })
@@ -1525,20 +1525,20 @@ describe("StoryFactory", () => {
                 broker,
                 WorkLeaseGranted.create({
                     runId: "run-market",
-                    offerId: secondOffer.data.offerId,
+                    offerId: secondOffer.payload.offerId,
                     leaseId: "mismatch",
                     workerId: "worker-a",
                     generation: 2,
-                    request: secondOffer.data.request,
-                    bidId: secondBid.data.bidId,
-                    route: { ...secondBid.data.route, model: "opus" },
+                    request: secondOffer.payload.request,
+                    bidId: secondBid.payload.bidId,
+                    route: { ...secondBid.payload.route, model: "opus" },
                 }),
             )
 
             assert.equal(executor.calls.length, 0)
             const mismatch = env.events.filter(StorySpawnFailed.is).at(-1)
-            assert.equal(mismatch?.data.leaseId, "mismatch")
-            assert.deepEqual(mismatch?.data.failure, {
+            assert.equal(mismatch?.payload.leaseId, "mismatch")
+            assert.deepEqual(mismatch?.payload.failure, {
                 kind: "infrastructure",
                 code: "decision_unknown",
             })
@@ -1594,13 +1594,13 @@ describe("StoryFactory", () => {
             assert.equal(env.events.filter(StorySpawned.is).length, 0)
             const failed = env.events.filter(StorySpawnFailed.is).at(-1)
             assert.ok(failed)
-            assert.match(failed.data.error, /without registering/)
-            assert.deepEqual(failed.data.failure, {
+            assert.match(failed.payload.error, /without registering/)
+            assert.deepEqual(failed.payload.failure, {
                 kind: "infrastructure",
                 code: "process_spawn_failed",
             })
             assert.equal(
-                outcomeAuthority.matchesSpawnFailure(factory, failed.data),
+                outcomeAuthority.matchesSpawnFailure(factory, failed.payload),
                 true,
             )
         })
@@ -1616,7 +1616,7 @@ describe("StoryFactory", () => {
             const executor: StoryExecutor = {
                 start: (req, _route, _cwd, env, opts) => {
                     opts.registerResultAuthority?.(resultSource)
-                    env.deliverSemanticEvent(
+                    env.publish(
                         resultSource,
                         StoryResult.create({
                             storyId: req.storyId,
@@ -1821,7 +1821,7 @@ describe("StoryFactory", () => {
             await flushBus()
             const suspended = env.events.find(WorkSuspended.is)
             assert.ok(suspended)
-            assert.deepEqual(suspended.data, {
+            assert.deepEqual(suspended.payload, {
                 runId,
                 blockId: "block-S6-S11",
                 storyId: "S6",
@@ -1917,7 +1917,7 @@ describe("StoryFactory", () => {
             await factory.onExternalEvent(
                 supervisor,
                 StoryIntervention.create({
-                    ...intervention.data,
+                    ...intervention.payload,
                     leaseId: "stale-lease",
                 }),
             )
@@ -1958,17 +1958,17 @@ async function bidAndGrantMarketLease(
     await factory.onExternalEvent(board, offer)
     const bid = env.events
         .filter(WorkBid.is)
-        .find((candidate) => candidate.data.offerId === offer.data.offerId)
+        .find((candidate) => candidate.payload.offerId === offer.payload.offerId)
     assert.ok(bid)
     const lease = WorkLeaseGranted.create({
         runId,
-        offerId: offer.data.offerId,
+        offerId: offer.payload.offerId,
         leaseId: `lease-${storyId}`,
         workerId,
         generation,
-        request: offer.data.request,
-        bidId: bid.data.bidId,
-        route: bid.data.route,
+        request: offer.payload.request,
+        bidId: bid.payload.bidId,
+        route: bid.payload.route,
     })
     await factory.onExternalEvent(broker, lease)
     await flushBus()

@@ -298,17 +298,17 @@ if (args[0] === "rev-parse" && args[1] === "HEAD") {
 
                 const failure = env.events.find(StorySpawnFailed.is)
                 assert.ok(failure)
-                assert.equal(failure.data.leaseId, "lease-timeout")
+                assert.equal(failure.payload.leaseId, "lease-timeout")
                 assert.match(
-                    failure.data.error,
+                    failure.payload.error,
                     /repository command "git (?:rev-parse|worktree)" produced no output/u,
                 )
-                assert.deepEqual(failure.data.failure, {
+                assert.deepEqual(failure.payload.failure, {
                     kind: "infrastructure",
                     code: "command_timeout",
                 })
                 assert.equal(
-                    outcomeAuthority.matchesSpawnFailure(factory, failure.data),
+                    outcomeAuthority.matchesSpawnFailure(factory, failure.payload),
                     true,
                 )
 

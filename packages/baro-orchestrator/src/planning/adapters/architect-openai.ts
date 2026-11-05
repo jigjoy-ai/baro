@@ -12,8 +12,7 @@ import {
     SystemMessageItem,
     UserMessageItem,
     type GenerativeModel,
-    type Tool,
-} from "../../runtime/mozaik.js"
+    type Tool, toWire } from "../../runtime/mozaik.js"
 
 import {
     createOpenAIModel,
@@ -240,7 +239,7 @@ async function runArchitectOpenAIWithinBudget(
     const inferRound = opts.testRuntime?.inferRound ?? runInferenceRound
     setModelTools(model, tools)
 
-    let context = ModelContext.create("architect")
+    let context = ModelContext.create()
         .addContextItem(SystemMessageItem.create(
             opts.outcomeMode
                 ? (opts.outcomeContractMode ?? "complete") === "decision"
@@ -401,7 +400,7 @@ async function runArchitectOpenAIWithinBudget(
                 })
                 context = context.addContextItem(item)
             } else if (item.type === "message") {
-                const json = item.toJSON() as { content: Array<{ text: string }> }
+                const json = toWire(item) as { content: Array<{ text: string }> }
                 const text = json.content?.[0]?.text ?? ""
                 newItems.push({ type: "message", text })
                 context = context.addContextItem(item)

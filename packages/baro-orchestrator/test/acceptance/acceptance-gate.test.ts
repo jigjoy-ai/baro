@@ -37,7 +37,7 @@ describe("AcceptanceGate", () => {
         )
         await gate.idle()
 
-        env.deliverSemanticEvent(
+        env.publish(
             source("attacker"),
             RunCompleted.create({
                 runId: "run-completion-authority",
@@ -52,7 +52,7 @@ describe("AcceptanceGate", () => {
         deliverCritique(env, "S1", 1, "pass", "criteria satisfied")
 
         const quality = await qualityResult(env)
-        assert.equal(quality.data.status, "passed")
+        assert.equal(quality.payload.status, "passed")
     })
 
     it("keeps the default gate open for a bounded Critic evaluation", async (t) => {
@@ -78,14 +78,14 @@ describe("AcceptanceGate", () => {
         await gate.idle()
         const quality = env.events.find(StoryQualityCompleted.is)
         assert.ok(quality)
-        assert.equal(quality.data.status, "passed")
+        assert.equal(quality.payload.status, "passed")
     })
 
     it("does not open quality evaluation for a dependency suspension", async () => {
         const gate = targetedGate("run-suspended", 0)
         const env = joinWithCapture(gate)
         grantLease(env, "run-suspended", "S1", "lease-1", 1)
-        env.deliverSemanticEvent(
+        env.publish(
             source("worker"),
             StoryResult.create({
                 storyId: "S1",
@@ -134,12 +134,12 @@ describe("AcceptanceGate", () => {
         )
         const quality = await qualityResult(env)
 
-        assert.equal(quality.data.status, "passed")
-        assert.equal(quality.data.targetTurn, 1)
-        assert.equal(quality.data.leaseId, "lease-1")
-        assert.equal(quality.data.critique?.verdict, "pass")
+        assert.equal(quality.payload.status, "passed")
+        assert.equal(quality.payload.targetTurn, 1)
+        assert.equal(quality.payload.leaseId, "lease-1")
+        assert.equal(quality.payload.critique?.verdict, "pass")
         assert.equal(
-            quality.data.critique?.repositoryFingerprint,
+            quality.payload.critique?.repositoryFingerprint,
             "b".repeat(64),
         )
     })
@@ -153,9 +153,9 @@ describe("AcceptanceGate", () => {
         deliverStoryResult(env, "run-before", "S1", "lease-1", 1)
 
         const quality = await qualityResult(env)
-        assert.equal(quality.data.status, "passed")
-        assert.equal(quality.data.targetTurn, 1)
-        assert.equal(quality.data.critique?.turn, 1)
+        assert.equal(quality.payload.status, "passed")
+        assert.equal(quality.payload.targetTurn, 1)
+        assert.equal(quality.payload.critique?.turn, 1)
     })
 
     it("fails quality when the terminal-turn critique fails", async () => {
@@ -167,9 +167,9 @@ describe("AcceptanceGate", () => {
         deliverStoryResult(env, "run-fail", "S1", "lease-1", 1)
 
         const quality = await qualityResult(env)
-        assert.equal(quality.data.status, "failed")
-        assert.equal(quality.data.reason, "tests are missing")
-        assert.deepEqual(quality.data.critique?.violatedCriteria, ["tests"])
+        assert.equal(quality.payload.status, "failed")
+        assert.equal(quality.payload.reason, "tests are missing")
+        assert.deepEqual(quality.payload.critique?.violatedCriteria, ["tests"])
     })
 
     it("does not turn an evaluator incident into a code-quality failure", async () => {
@@ -182,7 +182,7 @@ describe("AcceptanceGate", () => {
         const env = joinWithCapture(gate)
         grantLease(env, "run-inconclusive", "S1", "lease-1", 1)
         deliverAgentTurn(env, "S1", "openai", "done")
-        env.deliverSemanticEvent(
+        env.publish(
             source("critic"),
             Critique.create({
                 agentId: "S1",
@@ -197,9 +197,9 @@ describe("AcceptanceGate", () => {
         deliverStoryResult(env, "run-inconclusive", "S1", "lease-1", 1)
 
         const quality = await qualityResult(env)
-        assert.equal(quality.data.status, "inconclusive")
-        assert.equal(quality.data.critique?.status, "inconclusive")
-        assert.match(quality.data.reason, /evaluator timed out/)
+        assert.equal(quality.payload.status, "inconclusive")
+        assert.equal(quality.payload.critique?.status, "inconclusive")
+        assert.match(quality.payload.reason, /evaluator timed out/)
     })
 
     it("re-evaluates the same leased candidate without launching new work", async () => {
@@ -222,7 +222,7 @@ describe("AcceptanceGate", () => {
         gate.join(env)
         projector.join(env)
 
-        env.deliverSemanticEvent(
+        env.publish(
             broker,
             WorkLeaseGranted.create({
                 runId,
@@ -251,8 +251,8 @@ describe("AcceptanceGate", () => {
             numTurns: 1,
             durationMs: 1,
         })
-        env.deliverSemanticEvent(story, terminal)
-        env.deliverSemanticEvent(
+        env.publish(story, terminal)
+        env.publish(
             story,
             StoryResult.create({
                 storyId: "S1",
@@ -265,7 +265,7 @@ describe("AcceptanceGate", () => {
                 generation: 1,
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             critic,
             Critique.create({
                 agentId: "S1",
@@ -282,23 +282,23 @@ describe("AcceptanceGate", () => {
 
         const request = env.events.find(StoryQualityReverificationRequested.is)
         assert.ok(request)
-        assert.equal(request.data.leaseId, "lease-1")
-        assert.equal(request.data.generation, 1)
-        assert.equal(request.data.targetTurn, 1)
-        assert.equal(request.data.terminalId, "candidate-terminal-1")
+        assert.equal(request.payload.leaseId, "lease-1")
+        assert.equal(request.payload.generation, 1)
+        assert.equal(request.payload.targetTurn, 1)
+        assert.equal(request.payload.terminalId, "candidate-terminal-1")
         assert.equal(env.events.filter(StoryResult.is).length, 1)
 
         const terminals = env.events.filter(AgentTurnCompleted.is)
         assert.equal(terminals.length, 1)
-        assert.equal(terminals[0]?.data.resultText, terminal.data.resultText)
-        assert.equal(terminals[0]?.data.canContinue, false)
-        assert.match(terminals[0]?.data.terminalId ?? "", /^reverification:/)
+        assert.equal(terminals[0]?.payload.resultText, terminal.payload.resultText)
+        assert.equal(terminals[0]?.payload.canContinue, false)
+        assert.match(terminals[0]?.payload.terminalId ?? "", /^reverification:/)
 
-        env.deliverSemanticEvent(
+        env.publish(
             critic,
             Critique.create({
                 agentId: "S1",
-                terminalId: terminals[0]!.data.terminalId,
+                terminalId: terminals[0]!.payload.terminalId,
                 status: "evaluated",
                 verdict: "pass",
                 reasoning: "same candidate satisfies the criteria",
@@ -308,9 +308,9 @@ describe("AcceptanceGate", () => {
             }),
         )
         const quality = await qualityResult(env)
-        assert.equal(quality.data.status, "passed")
-        assert.equal(quality.data.targetTurn, 2)
-        assert.equal(quality.data.leaseId, "lease-1")
+        assert.equal(quality.payload.status, "passed")
+        assert.equal(quality.payload.targetTurn, 2)
+        assert.equal(quality.payload.leaseId, "lease-1")
         assert.equal(env.events.filter(StoryQualityReverificationRequested.is).length, 1)
     })
 
@@ -335,7 +335,7 @@ describe("AcceptanceGate", () => {
         projector.join(env)
 
         grantLeaseFrom(env, broker, runId, "S1", "lease-1", 1)
-        env.deliverSemanticEvent(
+        env.publish(
             story,
             AgentResult.create({
                 agentId: "S1",
@@ -350,7 +350,7 @@ describe("AcceptanceGate", () => {
                 durationMs: 1,
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             story,
             StoryResult.create({
                 storyId: "S1",
@@ -368,8 +368,8 @@ describe("AcceptanceGate", () => {
         deliverCritiqueFrom(env, critic, "S1", 2, "inconclusive")
 
         const quality = await qualityResult(env)
-        assert.equal(quality.data.status, "inconclusive")
-        assert.equal(quality.data.targetTurn, 2)
+        assert.equal(quality.payload.status, "inconclusive")
+        assert.equal(quality.payload.targetTurn, 2)
         assert.equal(env.events.filter(StoryQualityReverificationRequested.is).length, 1)
         assert.equal(env.events.filter(StoryResult.is).length, 1)
     })
@@ -394,7 +394,7 @@ describe("AcceptanceGate", () => {
         projector.join(env)
 
         grantLeaseFrom(env, broker, runId, "S1", "lease-1", 1)
-        env.deliverSemanticEvent(
+        env.publish(
             story,
             AgentResult.create({
                 agentId: "S1",
@@ -409,7 +409,7 @@ describe("AcceptanceGate", () => {
                 durationMs: 1,
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             story,
             StoryResult.create({
                 storyId: "S1",
@@ -434,8 +434,8 @@ describe("AcceptanceGate", () => {
         await gate.idle()
         const quality = env.events.find(StoryQualityCompleted.is)
         assert.ok(quality)
-        assert.equal(quality.data.status, "inconclusive")
-        assert.equal(quality.data.targetTurn, 2)
+        assert.equal(quality.payload.status, "inconclusive")
+        assert.equal(quality.payload.targetTurn, 2)
         assert.equal(env.events.filter(StoryQualityReverificationRequested.is).length, 1)
     })
 
@@ -450,9 +450,9 @@ describe("AcceptanceGate", () => {
         deliverStoryResult(env, "run-no-target", "S1", "lease-1", 1)
 
         const quality = await qualityResult(env)
-        assert.equal(quality.data.status, "passed")
-        assert.equal(quality.data.targetTurn, null)
-        assert.equal(quality.data.reason, "no acceptance criteria configured")
+        assert.equal(quality.payload.status, "passed")
+        assert.equal(quality.payload.targetTurn, null)
+        assert.equal(quality.payload.reason, "no acceptance criteria configured")
         assert.equal(env.events.filter(StoryQualityTimedOut.is).length, 0)
     })
 
@@ -464,9 +464,9 @@ describe("AcceptanceGate", () => {
 
         const quality = await qualityResult(env)
         assert.equal(env.events.filter(StoryQualityTimedOut.is).length, 1)
-        assert.equal(quality.data.status, "inconclusive")
-        assert.equal(quality.data.targetTurn, null)
-        assert.match(quality.data.reason, /no terminal agent turn/)
+        assert.equal(quality.payload.status, "inconclusive")
+        assert.equal(quality.payload.targetTurn, null)
+        assert.match(quality.payload.reason, /no terminal agent turn/)
     })
 
     it("reports an inconclusive gate when the terminal turn has no critique", async () => {
@@ -483,9 +483,9 @@ describe("AcceptanceGate", () => {
 
         const quality = await qualityResult(env)
         assert.equal(env.events.filter(StoryQualityTimedOut.is).length, 1)
-        assert.equal(quality.data.status, "inconclusive")
-        assert.equal(quality.data.targetTurn, 1)
-        assert.match(quality.data.reason, /no critique for terminal turn 1/)
+        assert.equal(quality.payload.status, "inconclusive")
+        assert.equal(quality.payload.targetTurn, 1)
+        assert.match(quality.payload.reason, /no critique for terminal turn 1/)
     })
 
     it("deduplicates replay and ignores stale run, lease, generation, and timeout", async () => {
@@ -507,14 +507,14 @@ describe("AcceptanceGate", () => {
         deliverStoryResult(env, "run-current", "S1", "lease-current", 2)
         deliverStoryResult(env, "run-current", "S1", "lease-current", 2)
         const quality = await qualityResult(env)
-        assert.equal(quality.data.status, "passed")
-        assert.equal(quality.data.targetTurn, 1)
+        assert.equal(quality.payload.status, "passed")
+        assert.equal(quality.payload.targetTurn, 1)
 
-        env.deliverSemanticEvent(
+        env.publish(
             gate,
             StoryQualityTimedOut.create({
                 runId: "run-current",
-                evaluationId: quality.data.evaluationId,
+                evaluationId: quality.payload.evaluationId,
                 storyId: "S1",
                 leaseId: "lease-current",
                 generation: 2,
@@ -538,9 +538,9 @@ describe("AcceptanceGate", () => {
         deliverStoryResult(env, "run-identityless", "S1", "lease-1", 1)
 
         const quality = await qualityResult(env)
-        assert.equal(quality.data.status, "passed")
-        assert.equal(quality.data.targetTurn, 2)
-        assert.equal(quality.data.critique?.turn, 2)
+        assert.equal(quality.payload.status, "passed")
+        assert.equal(quality.payload.targetTurn, 2)
+        assert.equal(quality.payload.critique?.turn, 2)
     })
 
     it("accepts only exact native/projector terminal authorities in collective mode", async () => {
@@ -569,7 +569,7 @@ describe("AcceptanceGate", () => {
             terminalProjectorAuthority: projector,
         })
         const env = joinWithCapture(gate)
-        env.deliverSemanticEvent(
+        env.publish(
             broker,
             WorkLeaseGranted.create({
                 runId,
@@ -600,7 +600,7 @@ describe("AcceptanceGate", () => {
             durationMs: 1,
         })
         const nativeTerminal = AgentResult.create({
-            ...forgedNative.data,
+            ...forgedNative.payload,
             terminalId: "native-1",
             resultText: "native",
         })
@@ -613,16 +613,16 @@ describe("AcceptanceGate", () => {
             canContinue: false,
         })
 
-        env.deliverSemanticEvent(attacker, forgedNative)
-        env.deliverSemanticEvent(attacker, AgentTurnCompleted.create({
-            ...projectedTerminal.data,
+        env.publish(attacker, forgedNative)
+        env.publish(attacker, AgentTurnCompleted.create({
+            ...projectedTerminal.payload,
             terminalId: "forged-projector",
         }))
-        env.deliverSemanticEvent(native, nativeTerminal)
-        env.deliverSemanticEvent(native, nativeTerminal)
-        env.deliverSemanticEvent(projector, projectedTerminal)
-        env.deliverSemanticEvent(projector, projectedTerminal)
-        env.deliverSemanticEvent(
+        env.publish(native, nativeTerminal)
+        env.publish(native, nativeTerminal)
+        env.publish(projector, projectedTerminal)
+        env.publish(projector, projectedTerminal)
+        env.publish(
             critic,
             Critique.create({
                 agentId: "S1",
@@ -633,7 +633,7 @@ describe("AcceptanceGate", () => {
                 modelUsed: "test-critic",
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             native,
             StoryResult.create({
                 storyId: "S1",
@@ -646,8 +646,8 @@ describe("AcceptanceGate", () => {
         )
 
         const quality = await qualityResult(env)
-        assert.equal(quality.data.status, "passed")
-        assert.equal(quality.data.targetTurn, 2)
+        assert.equal(quality.payload.status, "passed")
+        assert.equal(quality.payload.targetTurn, 2)
     })
 })
 
@@ -666,7 +666,7 @@ function grantLease(
     leaseId: string,
     generation: number,
 ): void {
-    env.deliverSemanticEvent(
+    env.publish(
         source("broker"),
         WorkLeaseGranted.create({
             runId,
@@ -693,7 +693,7 @@ function grantLeaseFrom(
     leaseId: string,
     generation: number,
 ): void {
-    env.deliverSemanticEvent(
+    env.publish(
         broker,
         WorkLeaseGranted.create({
             runId,
@@ -717,7 +717,7 @@ function deliverAgentResult(
     agentId: string,
     resultText: string,
 ): void {
-    env.deliverSemanticEvent(
+    env.publish(
         source("agent"),
         AgentResult.create({
             agentId,
@@ -742,7 +742,7 @@ function deliverAgentTurn(
         .map(encodeURIComponent)
         .join(":"),
 ): void {
-    env.deliverSemanticEvent(
+    env.publish(
         source("projector"),
         AgentTurnCompleted.create({
             agentId,
@@ -763,7 +763,7 @@ function deliverCritique(
     reasoning: string,
     repositoryFingerprint?: string,
 ): void {
-    env.deliverSemanticEvent(
+    env.publish(
         source("critic"),
         Critique.create({
             agentId,
@@ -784,7 +784,7 @@ function deliverCritiqueFrom(
     turn: number,
     status: "inconclusive",
 ): void {
-    env.deliverSemanticEvent(
+    env.publish(
         critic,
         Critique.create({
             agentId,
@@ -805,7 +805,7 @@ function deliverStoryResult(
     leaseId: string,
     generation: number,
 ): void {
-    env.deliverSemanticEvent(
+    env.publish(
         source("story"),
         StoryResult.create({
             storyId,

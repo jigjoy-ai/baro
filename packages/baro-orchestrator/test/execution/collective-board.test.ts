@@ -79,7 +79,7 @@ describe("CollectiveBoard", () => {
             })
             const env = joinWithCapture(board)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "resume" }),
             )
@@ -195,11 +195,11 @@ describe("CollectiveBoard", () => {
                 goalCompletionAuthority: guardian,
             })
             const env = joinWithCapture(board)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "test" }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
                 RunPrepared.create({ runId, baseSha: null }),
             )
@@ -213,7 +213,7 @@ describe("CollectiveBoard", () => {
             }])
             ledger.recordIntegration({ storyId: "S1" })
             const projection = ledger.snapshot(1)
-            env.deliverSemanticEvent(
+            env.publish(
                 guardian,
                 GoalLedgerProjectionUpdated.create({
                     runId,
@@ -222,14 +222,14 @@ describe("CollectiveBoard", () => {
                     projection,
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 guardian,
                 GoalCompletionAttested.create({
                     runId,
-                    checkId: check.data.checkId,
+                    checkId: check.payload.checkId,
                     contractId: contract.contractId,
                     goalRevision: projection.revision,
-                    verificationId: check.data.verificationId,
+                    verificationId: check.payload.verificationId,
                     status: "satisfied",
                     satisfiedInvariantIds: ["G-A1"],
                     openInvariantIds: [],
@@ -248,7 +248,7 @@ describe("CollectiveBoard", () => {
             await waitFor(env.events, RunPushRequested.is)
 
             const advanced = ledger.snapshot(2)
-            env.deliverSemanticEvent(
+            env.publish(
                 guardian,
                 GoalLedgerProjectionUpdated.create({
                     runId,
@@ -257,7 +257,7 @@ describe("CollectiveBoard", () => {
                     projection: advanced,
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
                 RunPushed.create({ runId, pushed: false }),
             )
@@ -289,11 +289,11 @@ describe("CollectiveBoard", () => {
             const request = await integrateSingleStory(env, "run-verify")
 
             assert.equal(env.events.some(RunPushRequested.is), false)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("stale-verifier"),
                 RunVerificationCompleted.create({
                     runId: "run-verify",
-                    verificationId: `${request.data.verificationId}-stale`,
+                    verificationId: `${request.payload.verificationId}-stale`,
                     status: "passed",
                     commands: [],
                     durationMs: 1,
@@ -302,11 +302,11 @@ describe("CollectiveBoard", () => {
             await flush()
             assert.equal(env.events.some(RunPushRequested.is), false)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("verifier"),
                 RunVerificationCompleted.create({
                     runId: "run-verify",
-                    verificationId: request.data.verificationId,
+                    verificationId: request.payload.verificationId,
                     status: "passed",
                     commands: [
                         {
@@ -319,7 +319,7 @@ describe("CollectiveBoard", () => {
                 }),
             )
             await waitFor(env.events, RunPushRequested.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
                 RunPushed.create({ runId: "run-verify", pushed: false }),
             )
@@ -328,7 +328,7 @@ describe("CollectiveBoard", () => {
             assert.equal(summary.success, true)
             assert.equal(summary.verificationStatus, "passed")
             assert.deepEqual(summary.verification, {
-                verificationId: request.data.verificationId,
+                verificationId: request.payload.verificationId,
                 status: "passed",
                 commands: [
                     {
@@ -358,11 +358,11 @@ describe("CollectiveBoard", () => {
                 })
                 const env = joinWithCapture(board)
                 const request = await integrateSingleStory(env, runId)
-                env.deliverSemanticEvent(
+                env.publish(
                     source("verifier"),
                     RunVerificationCompleted.create({
                         runId,
-                        verificationId: request.data.verificationId,
+                        verificationId: request.payload.verificationId,
                         status: "passed",
                         commands: [{
                             command: "npm run test",
@@ -373,12 +373,12 @@ describe("CollectiveBoard", () => {
                     }),
                 )
                 await waitFor(env.events, RunPushRequested.is)
-                env.deliverSemanticEvent(
+                env.publish(
                     source("repo"),
                     RunPushed.create({ runId, pushed: false }),
                 )
                 await board.done
-                return request.data.verificationId
+                return request.payload.verificationId
             }
 
             const priorVerificationId = await requestFromFreshBoard()
@@ -462,11 +462,11 @@ describe("CollectiveBoard", () => {
             })
             const env = joinWithCapture(board)
             const request = await integrateSingleStory(env, "run-verify-fail")
-            env.deliverSemanticEvent(
+            env.publish(
                 source("verifier"),
                 RunVerificationCompleted.create({
                     runId: "run-verify-fail",
-                    verificationId: request.data.verificationId,
+                    verificationId: request.payload.verificationId,
                     status: "failed",
                     commands: [
                         {
@@ -480,7 +480,7 @@ describe("CollectiveBoard", () => {
                 }),
             )
             await waitFor(env.events, RunPushRequested.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
                 RunPushed.create({ runId: "run-verify-fail", pushed: false }),
             )
@@ -524,11 +524,11 @@ describe("CollectiveBoard", () => {
             const env = joinWithCapture(board)
             const request = await integrateSingleStory(env, runId)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 verifier,
                 RunVerificationCompleted.create({
                     runId,
-                    verificationId: request.data.verificationId,
+                    verificationId: request.payload.verificationId,
                     status: "skipped",
                     commands: [],
                     durationMs: 1,
@@ -543,12 +543,12 @@ describe("CollectiveBoard", () => {
             assert.equal(
                 env.events
                     .filter(ConductorState.is)
-                    .some(({ data }) =>
+                    .some(({ payload: data }) =>
                         data.detail?.includes("objective verification passed")
                     ),
                 false,
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
                 RunPushed.create({ runId, pushed: false }),
             )
@@ -561,8 +561,8 @@ describe("CollectiveBoard", () => {
                 /objective verification incomplete: no applicable .* commands ran/,
             )
             const completed = env.events.find(RunCompleted.is)
-            assert.equal(completed?.data.success, false)
-            assert.equal(completed?.data.verificationStatus, "skipped")
+            assert.equal(completed?.payload.success, false)
+            assert.equal(completed?.payload.verificationStatus, "skipped")
         })
     })
 
@@ -601,11 +601,11 @@ describe("CollectiveBoard", () => {
             const env = joinWithCapture(board)
             const request = await integrateSingleStory(env, runId)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 verifier,
                 RunVerificationCompleted.create({
                     runId,
-                    verificationId: request.data.verificationId,
+                    verificationId: request.payload.verificationId,
                     status: "skipped",
                     commands: [
                         {
@@ -629,11 +629,11 @@ describe("CollectiveBoard", () => {
                 GoalCompletionCheckRequested.is,
             )
             assert.equal(env.events.some(RunPushRequested.is), false)
-            assert.equal(check.data.verificationId, request.data.verificationId)
+            assert.equal(check.payload.verificationId, request.payload.verificationId)
             assert.equal(
                 env.events
                     .filter(ConductorState.is)
-                    .some(({ data }) =>
+                    .some(({ payload: data }) =>
                         data.detail?.includes("actionable remediation"),
                     ),
                 true,
@@ -645,7 +645,7 @@ describe("CollectiveBoard", () => {
             }])
             ledger.recordIntegration({ storyId: "S1" })
             const projection = ledger.snapshot(1)
-            env.deliverSemanticEvent(
+            env.publish(
                 guardian,
                 GoalLedgerProjectionUpdated.create({
                     runId,
@@ -654,14 +654,14 @@ describe("CollectiveBoard", () => {
                     projection,
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 guardian,
                 GoalCompletionAttested.create({
                     runId,
-                    checkId: check.data.checkId,
+                    checkId: check.payload.checkId,
                     contractId: contract.contractId,
                     goalRevision: projection.revision,
-                    verificationId: check.data.verificationId,
+                    verificationId: check.payload.verificationId,
                     status: "satisfied",
                     satisfiedInvariantIds: ["G-A1"],
                     openInvariantIds: [],
@@ -681,7 +681,7 @@ describe("CollectiveBoard", () => {
 
             const saved = JSON.parse(readFileSync(prdPath, "utf8")) as PrdFile
             assert.equal(saved.runtimeGraph?.protocol?.completion, undefined)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
                 RunPushed.create({ runId, pushed: false }),
             )
@@ -730,11 +730,11 @@ describe("CollectiveBoard", () => {
             })
             const env = joinWithCapture(board)
             const verification = await integrateSingleStory(env, runId)
-            env.deliverSemanticEvent(
+            env.publish(
                 verifier,
                 RunVerificationCompleted.create({
                     runId,
-                    verificationId: verification.data.verificationId,
+                    verificationId: verification.payload.verificationId,
                     status: "skipped",
                     commands: [
                         {
@@ -786,7 +786,7 @@ describe("CollectiveBoard", () => {
                     goalInvariantIds: ["G-A1", "G-A2"],
                 },
             }
-            env.deliverSemanticEvent(
+            env.publish(
                 guardian,
                 GoalInvariantRemediationProposed.create({
                     ...groupedRemediation,
@@ -802,7 +802,7 @@ describe("CollectiveBoard", () => {
                 false,
                 "Board rejects a grouped story whose target set is incomplete",
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 guardian,
                 GoalInvariantRemediationProposed.create(groupedRemediation),
             )
@@ -811,23 +811,23 @@ describe("CollectiveBoard", () => {
                 env.events,
                 GoalInvariantRemediationAdmitted.is,
             )
-            assert.equal(applied.data.mutation.addedStories[0]?.id, remediationStoryId)
-            assert.equal(admitted.data.storyId, remediationStoryId)
-            assert.deepEqual(admitted.data.invariantIds, ["G-A1", "G-A2"])
+            assert.equal(applied.payload.mutation.addedStories[0]?.id, remediationStoryId)
+            assert.equal(admitted.payload.storyId, remediationStoryId)
+            assert.deepEqual(admitted.payload.invariantIds, ["G-A1", "G-A2"])
             assert.deepEqual(
-                admitted.data.challengeIds,
+                admitted.payload.challengeIds,
                 ["aggregate-g-a1-a13", "aggregate-g-a2-a13"],
             )
             assert.equal(env.events.some(RunPushRequested.is), false)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 guardian,
                 GoalCompletionAttested.create({
                     runId,
-                    checkId: oldCheck.data.checkId,
+                    checkId: oldCheck.payload.checkId,
                     contractId: contract.contractId,
                     goalRevision: 1,
-                    verificationId: oldCheck.data.verificationId,
+                    verificationId: oldCheck.payload.verificationId,
                     status: "satisfied",
                     satisfiedInvariantIds: ["G-A1", "G-A2"],
                     openInvariantIds: [],
@@ -841,7 +841,7 @@ describe("CollectiveBoard", () => {
 
             await provideContext(env, runId, 2)
             const offers = await waitForCount(env.events, WorkOffered.is, 2)
-            assert.equal(offers[1]?.data.request.storyId, remediationStoryId)
+            assert.equal(offers[1]?.payload.request.storyId, remediationStoryId)
             const durable = JSON.parse(readFileSync(prdPath, "utf8")) as PrdFile
             assert.equal(
                 durable.userStories.some(({ id }) => id === remediationStoryId),
@@ -893,18 +893,18 @@ describe("CollectiveBoard", () => {
                     const env = joinWithCapture(board)
                     const request = await integrateSingleStory(env, runId)
 
-                    env.deliverSemanticEvent(
+                    env.publish(
                         verifier,
                         RunVerificationCompleted.create({
                             runId,
-                            verificationId: request.data.verificationId,
+                            verificationId: request.payload.verificationId,
                             status: "passed",
                             commands: scenario.commands,
                             durationMs: 11,
                         }),
                     )
                     await waitFor(env.events, RunPushRequested.is)
-                    env.deliverSemanticEvent(
+                    env.publish(
                         source("repo"),
                         RunPushed.create({ runId, pushed: false }),
                     )
@@ -938,11 +938,11 @@ describe("CollectiveBoard", () => {
             const env = joinWithCapture(board)
             const request = await integrateSingleStory(env, runId)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 verifier,
                 RunVerificationCompleted.create({
                     runId,
-                    verificationId: request.data.verificationId,
+                    verificationId: request.payload.verificationId,
                     status: "skipped",
                     commands: [
                         {
@@ -956,7 +956,7 @@ describe("CollectiveBoard", () => {
                 }),
             )
             await waitFor(env.events, RunPushRequested.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
                 RunPushed.create({ runId, pushed: false }),
             )
@@ -985,18 +985,18 @@ describe("CollectiveBoard", () => {
             await new Promise<void>((resolve) => setTimeout(resolve, 20))
             await waitFor(env.events, RunPushRequested.is)
             const timeout = env.events.find(RunVerificationTimedOut.is)
-            assert.equal(timeout?.data.runId, "run-verify-timeout")
-            env.deliverSemanticEvent(
+            assert.equal(timeout?.payload.runId, "run-verify-timeout")
+            env.publish(
                 source("late-verifier"),
                 RunVerificationCompleted.create({
                     runId: "run-verify-timeout",
-                    verificationId: timeout?.data.verificationId ?? "missing",
+                    verificationId: timeout?.payload.verificationId ?? "missing",
                     status: "passed",
                     commands: [],
                     durationMs: 20,
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
                 RunPushed.create({ runId: "run-verify-timeout", pushed: false }),
             )
@@ -1040,11 +1040,11 @@ describe("CollectiveBoard", () => {
                 goalCompletionTimeoutMs: 10,
             })
             const env = joinWithCapture(board)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "test" }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
                 RunPrepared.create({ runId, baseSha: null }),
             )
@@ -1055,14 +1055,14 @@ describe("CollectiveBoard", () => {
 
             // A response from the right authority with the wrong correlation
             // tuple must not disarm the pending check's fail-closed timer.
-            env.deliverSemanticEvent(
+            env.publish(
                 guardian,
                 GoalCompletionAttested.create({
                     runId,
-                    checkId: `${check.data.checkId}-stale`,
-                    contractId: check.data.contractId,
+                    checkId: `${check.payload.checkId}-stale`,
+                    contractId: check.payload.contractId,
                     goalRevision: 1,
-                    verificationId: check.data.verificationId,
+                    verificationId: check.payload.verificationId,
                     status: "incomplete",
                     satisfiedInvariantIds: [],
                     openInvariantIds: ["G-A1"],
@@ -1074,7 +1074,7 @@ describe("CollectiveBoard", () => {
 
             await new Promise<void>((resolve) => setTimeout(resolve, 25))
             await waitFor(env.events, RunPushRequested.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
                 RunPushed.create({ runId, pushed: false }),
             )
@@ -1100,7 +1100,7 @@ describe("CollectiveBoard", () => {
                 softDeadlineSecs: 0.01,
             })
             const env = joinWithCapture(board)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "test" }),
             )
@@ -1130,7 +1130,7 @@ describe("CollectiveBoard", () => {
                 awakeClock: clock,
             })
             const env = joinWithCapture(board)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "test" }),
             )
@@ -1170,7 +1170,7 @@ describe("CollectiveBoard", () => {
                 awakeClock: clock,
             })
             const env = joinWithCapture(board)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "test" }),
             )
@@ -1198,29 +1198,29 @@ describe("CollectiveBoard", () => {
             })
             const env = joinWithCapture(board)
 
-            env.deliverSemanticEvent(source("operator"), RunStartRequest.create({ reason: "test" }))
-            env.deliverSemanticEvent(source("repo"), RunPrepared.create({ runId: "run-test", baseSha: null }))
+            env.publish(source("operator"), RunStartRequest.create({ reason: "test" }))
+            env.publish(source("repo"), RunPrepared.create({ runId: "run-test", baseSha: null }))
             await provideContext(env, "run-test", 1)
             const offer = await waitFor(env.events, WorkOffered.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("broker"),
                 WorkLeaseGranted.create({
                     runId: "run-test",
-                    offerId: offer.data.offerId,
+                    offerId: offer.payload.offerId,
                     leaseId: "lease-1",
                     workerId: "worker",
                     generation: 1,
-                    request: offer.data.request,
+                    request: offer.payload.request,
                 }),
             )
-            env.deliverSemanticEvent(source("S1"), pass("run-test", "S1", "lease-1", 1))
+            env.publish(source("S1"), pass("run-test", "S1", "lease-1", 1))
 
             await waitFor(env.events, StoryIntegrationRequested.is)
             let saved = JSON.parse(readFileSync(prdPath, "utf8")) as PrdFile
             assert.equal(saved.userStories[0]?.passes, false)
             assert.equal(env.events.some(RunCompleted.is), false)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
                 StoryMerged.create({
                     storyId: "S1",
@@ -1230,7 +1230,7 @@ describe("CollectiveBoard", () => {
                 }),
             )
             await waitFor(env.events, RunPushRequested.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
                 RunPushed.create({ runId: "run-test", pushed: false }),
             )
@@ -1257,27 +1257,27 @@ describe("CollectiveBoard", () => {
                 qualityAuthority: qualityGate,
             })
             const env = joinWithCapture(board)
-            env.deliverSemanticEvent(source("operator"), RunStartRequest.create({ reason: "test" }))
-            env.deliverSemanticEvent(
+            env.publish(source("operator"), RunStartRequest.create({ reason: "test" }))
+            env.publish(
                 source("repo"),
                 RunPrepared.create({ runId: "run-quality-pass", baseSha: null }),
             )
             await provideContext(env, "run-quality-pass", 1)
             const offer = await waitFor(env.events, WorkOffered.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("broker"),
                 WorkLeaseGranted.create({
                     runId: "run-quality-pass",
-                    offerId: offer.data.offerId,
+                    offerId: offer.payload.offerId,
                     leaseId: "lease-quality",
                     workerId: "worker",
-                    generation: offer.data.generation,
-                    request: offer.data.request,
+                    generation: offer.payload.generation,
+                    request: offer.payload.request,
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("S1"),
-                pass("run-quality-pass", "S1", "lease-quality", offer.data.generation),
+                pass("run-quality-pass", "S1", "lease-quality", offer.payload.generation),
             )
             await flush()
             assert.equal(env.events.filter(StoryIntegrationRequested.is).length, 0)
@@ -1287,7 +1287,7 @@ describe("CollectiveBoard", () => {
                 evaluationId: "quality-1",
                 storyId: "S1",
                 leaseId: "lease-quality",
-                generation: offer.data.generation,
+                generation: offer.payload.generation,
                 status: "passed",
                 targetTurn: 1,
                 reason: "all acceptance criteria passed",
@@ -1300,16 +1300,16 @@ describe("CollectiveBoard", () => {
                     repositoryFingerprint: "a".repeat(64),
                 },
             })
-            env.deliverSemanticEvent(source("forged-quality-gate"), verdict)
+            env.publish(source("forged-quality-gate"), verdict)
             await flush()
             assert.equal(env.events.filter(StoryIntegrationRequested.is).length, 0)
 
-            env.deliverSemanticEvent(qualityGate, verdict)
+            env.publish(qualityGate, verdict)
             const integration = await waitFor(env.events, StoryIntegrationRequested.is)
-            assert.equal(integration.data.leaseId, "lease-quality")
-            assert.equal(integration.data.candidateFingerprintRequired, true)
+            assert.equal(integration.payload.leaseId, "lease-quality")
+            assert.equal(integration.payload.candidateFingerprintRequired, true)
             assert.equal(
-                integration.data.candidateFingerprint,
+                integration.payload.candidateFingerprint,
                 "a".repeat(64),
             )
         })
@@ -1329,102 +1329,102 @@ describe("CollectiveBoard", () => {
                 qualityAuthority: qualityGate,
             })
             const env = joinWithCapture(board)
-            env.deliverSemanticEvent(source("operator"), RunStartRequest.create({ reason: "test" }))
-            env.deliverSemanticEvent(
+            env.publish(source("operator"), RunStartRequest.create({ reason: "test" }))
+            env.publish(
                 source("repo"),
                 RunPrepared.create({ runId: "run-quality-fail", baseSha: null }),
             )
             await provideContext(env, "run-quality-fail", 1)
             const offer = await waitFor(env.events, WorkOffered.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("broker"),
                 WorkLeaseGranted.create({
                     runId: "run-quality-fail",
-                    offerId: offer.data.offerId,
+                    offerId: offer.payload.offerId,
                     leaseId: "lease-quality",
                     workerId: "worker",
-                    generation: offer.data.generation,
-                    request: offer.data.request,
+                    generation: offer.payload.generation,
+                    request: offer.payload.request,
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("S1"),
-                pass("run-quality-fail", "S1", "lease-quality", offer.data.generation),
+                pass("run-quality-fail", "S1", "lease-quality", offer.payload.generation),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 qualityGate,
                 StoryQualityCompleted.create({
                     runId: "run-quality-fail",
                     evaluationId: "quality-fail-1",
                     storyId: "S1",
                     leaseId: "lease-quality",
-                    generation: offer.data.generation,
+                    generation: offer.payload.generation,
                     status: "failed",
                     targetTurn: 1,
                     reason: "required behavior is missing",
                 }),
             )
             const cleanup = await waitFor(env.events, WorkspaceCleanupRequested.is)
-            assert.equal(cleanup.data.preserveForRecovery, true)
-            env.deliverSemanticEvent(
+            assert.equal(cleanup.payload.preserveForRecovery, true)
+            env.publish(
                 source("repo"),
                 WorkspaceCleanupCompleted.create({
-                    ...cleanup.data,
-                    generation: (cleanup.data.generation ?? 0) + 1,
+                    ...cleanup.payload,
+                    generation: (cleanup.payload.generation ?? 0) + 1,
                     preservedBranch: "baro-recovery/forged/stale/1",
                 }),
             )
             await flush()
             assert.equal(env.events.filter(RecoveryStarted.is).length, 0)
             const preservedBranch = "baro-recovery/run-quality-fail/S1/1"
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
                 WorkspaceCleanupCompleted.create({
-                    ...cleanup.data,
+                    ...cleanup.payload,
                     preservedBranch,
                 }),
             )
             const recovery = await waitFor(env.events, RecoveryStarted.is)
-            assert.deepEqual(recovery.data.storyIds, ["S1"])
+            assert.deepEqual(recovery.payload.storyIds, ["S1"])
             await provideContext(env, "run-quality-fail", 2)
             const offers = await waitForCount(env.events, WorkOffered.is, 2)
-            assert.equal(offers[1]?.data.request.recovery?.kind, "execution")
-            assert.equal(offers[1]?.data.request.recovery?.branch, preservedBranch)
+            assert.equal(offers[1]?.payload.request.recovery?.kind, "execution")
+            assert.equal(offers[1]?.payload.request.recovery?.branch, preservedBranch)
             assert.equal(
-                offers[1]?.data.request.resume,
+                offers[1]?.payload.request.resume,
                 undefined,
                 "a judged-and-rejected attempt is never re-verified",
             )
             assert.match(
-                offers[1]?.data.request.prompt ?? "",
+                offers[1]?.payload.request.prompt ?? "",
                 /acceptance gate failed: required behavior is missing/,
             )
-            assert.match(offers[1]?.data.request.prompt ?? "", /git show baro-recovery/)
+            assert.match(offers[1]?.payload.request.prompt ?? "", /git show baro-recovery/)
             assert.doesNotMatch(
-                offers[1]?.data.request.prompt ?? "",
+                offers[1]?.payload.request.prompt ?? "",
                 /baro-recovery\/forged\/stale/,
             )
 
             // The next attempt dies before writing anything: the branch it inherits is still
             // the rejected one, which must not be re-submitted as if nobody had judged it.
-            env.deliverSemanticEvent(
+            env.publish(
                 source("broker"),
                 WorkLeaseGranted.create({
                     runId: "run-quality-fail",
-                    offerId: offers[1]!.data.offerId,
+                    offerId: offers[1]!.payload.offerId,
                     leaseId: "lease-quality-2",
                     workerId: "worker",
-                    generation: offers[1]!.data.generation,
-                    request: offers[1]!.data.request,
+                    generation: offers[1]!.payload.generation,
+                    request: offers[1]!.payload.request,
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("S1"),
                 StoryResult.create({
                     runId: "run-quality-fail",
                     storyId: "S1",
                     leaseId: "lease-quality-2",
-                    generation: offers[1]!.data.generation,
+                    generation: offers[1]!.payload.generation,
                     success: false,
                     attempts: 1,
                     durationSecs: 5,
@@ -1433,14 +1433,14 @@ describe("CollectiveBoard", () => {
                 }),
             )
             const cleanups = await waitForCount(env.events, WorkspaceCleanupRequested.is, 2)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
-                WorkspaceCleanupCompleted.create({ ...cleanups[1]!.data }),
+                WorkspaceCleanupCompleted.create({ ...cleanups[1]!.payload }),
             )
             await provideContext(env, "run-quality-fail", 3)
             const third = (await waitForCount(env.events, WorkOffered.is, 3))[2]!
-            assert.equal(third.data.request.recovery?.kind, "transport")
-            assert.equal(third.data.request.resume, undefined)
+            assert.equal(third.payload.request.recovery?.kind, "transport")
+            assert.equal(third.payload.request.resume, undefined)
         })
     })
 
@@ -1462,19 +1462,19 @@ describe("CollectiveBoard", () => {
                 marketRouteIds: ["route-a", "route-b"],
             })
             const env = joinWithCapture(board)
-            env.deliverSemanticEvent(source("operator"), RunStartRequest.create({ reason: "test" }))
-            env.deliverSemanticEvent(source("repo"), RunPrepared.create({ runId, baseSha: null }))
+            env.publish(source("operator"), RunStartRequest.create({ reason: "test" }))
+            env.publish(source("repo"), RunPrepared.create({ runId, baseSha: null }))
             await provideContext(env, runId, 1)
             const offer = await waitFor(env.events, WorkOffered.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("broker"),
                 WorkLeaseGranted.create({
                     runId,
-                    offerId: offer.data.offerId,
+                    offerId: offer.payload.offerId,
                     leaseId: "lease-quality",
                     workerId: "worker",
-                    generation: offer.data.generation,
-                    request: offer.data.request,
+                    generation: offer.payload.generation,
+                    request: offer.payload.request,
                     route: {
                         routeId: "route-a",
                         backend: "openai",
@@ -1482,29 +1482,29 @@ describe("CollectiveBoard", () => {
                     },
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("S1"),
-                pass(runId, "S1", "lease-quality", offer.data.generation),
+                pass(runId, "S1", "lease-quality", offer.payload.generation),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 qualityGate,
                 StoryQualityCompleted.create({
                     runId,
                     evaluationId: "quality-inconclusive-1",
                     storyId: "S1",
                     leaseId: "lease-quality",
-                    generation: offer.data.generation,
+                    generation: offer.payload.generation,
                     status: "inconclusive",
                     targetTurn: 1,
                     reason: "critic transport timeout",
                 }),
             )
             const cleanup = await waitFor(env.events, WorkspaceCleanupRequested.is)
-            assert.equal(cleanup.data.preserveForRecovery, true)
-            env.deliverSemanticEvent(
+            assert.equal(cleanup.payload.preserveForRecovery, true)
+            env.publish(
                 source("repo"),
                 WorkspaceCleanupCompleted.create({
-                    ...cleanup.data,
+                    ...cleanup.payload,
                     preservedBranch: `${runId}/recovery/S1/evaluator`,
                 }),
             )
@@ -1515,7 +1515,7 @@ describe("CollectiveBoard", () => {
             assert.equal(
                 env.events
                     .filter(ConductorState.is)
-                    .some((event) => /healing action/.test(event.data.detail ?? "")),
+                    .some((event) => /healing action/.test(event.payload.detail ?? "")),
                 false,
             )
         })
@@ -1533,35 +1533,35 @@ describe("CollectiveBoard", () => {
             })
             const env = joinWithCapture(board)
 
-            env.deliverSemanticEvent(source("operator"), RunStartRequest.create({ reason: "test" }))
-            env.deliverSemanticEvent(
+            env.publish(source("operator"), RunStartRequest.create({ reason: "test" }))
+            env.publish(
                 source("repo"),
                 RunPrepared.create({ runId: "run-merge-recovery", baseSha: null }),
             )
             await provideContext(env, "run-merge-recovery", 1)
             const firstOffer = await waitFor(env.events, WorkOffered.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("broker"),
                 WorkLeaseGranted.create({
                     runId: "run-merge-recovery",
-                    offerId: firstOffer.data.offerId,
+                    offerId: firstOffer.payload.offerId,
                     leaseId: "lease-old",
                     workerId: "worker",
-                    generation: firstOffer.data.generation,
-                    request: firstOffer.data.request,
+                    generation: firstOffer.payload.generation,
+                    request: firstOffer.payload.request,
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("S1"),
                 pass(
                     "run-merge-recovery",
                     "S1",
                     "lease-old",
-                    firstOffer.data.generation,
+                    firstOffer.payload.generation,
                 ),
             )
             await waitFor(env.events, StoryIntegrationRequested.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
                 StoryMergeFailed.create({
                     storyId: "S1",
@@ -1574,37 +1574,37 @@ describe("CollectiveBoard", () => {
             )
 
             const recovery = await waitFor(env.events, RecoveryStarted.is)
-            assert.deepEqual(recovery.data.storyIds, ["S1"])
+            assert.deepEqual(recovery.payload.storyIds, ["S1"])
             assert.equal(env.events.some(WorkspaceCleanupRequested.is), false)
 
             await provideContext(env, "run-merge-recovery", 2)
             const offers = await waitForCount(env.events, WorkOffered.is, 2)
             const retryOffer = offers[1]!
-            assert.equal(retryOffer.data.request.recovery?.kind, "integration")
+            assert.equal(retryOffer.payload.request.recovery?.kind, "integration")
             assert.equal(
-                retryOffer.data.request.recovery?.branch,
+                retryOffer.payload.request.recovery?.branch,
                 "baro-recovery/run-merge-recovery/S1/1",
             )
-            assert.match(retryOffer.data.request.prompt, /Do not merge or cherry-pick/)
+            assert.match(retryOffer.payload.request.prompt, /Do not merge or cherry-pick/)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("broker"),
                 WorkLeaseGranted.create({
                     runId: "run-merge-recovery",
-                    offerId: retryOffer.data.offerId,
+                    offerId: retryOffer.payload.offerId,
                     leaseId: "lease-new",
                     workerId: "worker",
-                    generation: retryOffer.data.generation,
-                    request: retryOffer.data.request,
+                    generation: retryOffer.payload.generation,
+                    request: retryOffer.payload.request,
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("S1-recovery"),
                 pass(
                     "run-merge-recovery",
                     "S1",
                     "lease-new",
-                    retryOffer.data.generation,
+                    retryOffer.payload.generation,
                 ),
             )
             const integrations = await waitForCount(
@@ -1612,8 +1612,8 @@ describe("CollectiveBoard", () => {
                 StoryIntegrationRequested.is,
                 2,
             )
-            assert.equal(integrations[1]?.data.leaseId, "lease-new")
-            env.deliverSemanticEvent(
+            assert.equal(integrations[1]?.payload.leaseId, "lease-new")
+            env.publish(
                 source("repo"),
                 StoryMerged.create({
                     storyId: "S1",
@@ -1623,7 +1623,7 @@ describe("CollectiveBoard", () => {
                 }),
             )
             await waitFor(env.events, RunPushRequested.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
                 RunPushed.create({ runId: "run-merge-recovery", pushed: false }),
             )
@@ -1649,22 +1649,22 @@ describe("CollectiveBoard", () => {
             })
             const env = joinWithCapture(board)
 
-            env.deliverSemanticEvent(source("operator"), RunStartRequest.create({ reason: "test" }))
-            env.deliverSemanticEvent(source("repo"), RunPrepared.create({ runId, baseSha: null }))
+            env.publish(source("operator"), RunStartRequest.create({ reason: "test" }))
+            env.publish(source("repo"), RunPrepared.create({ runId, baseSha: null }))
             await provideContext(env, runId, 1)
             const offer = await waitFor(env.events, WorkOffered.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("broker"),
                 WorkLeaseGranted.create({
                     runId,
-                    offerId: offer.data.offerId,
+                    offerId: offer.payload.offerId,
                     leaseId: "lease-retained",
                     workerId: "worker",
-                    generation: offer.data.generation,
-                    request: offer.data.request,
+                    generation: offer.payload.generation,
+                    request: offer.payload.request,
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("surgeon"),
                 RecoveryEvaluationStarted.create({
                     runId,
@@ -1672,7 +1672,7 @@ describe("CollectiveBoard", () => {
                     source: "surgeon:test",
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("surgeon"),
                 Replan.create({
                     source: "surgeon:test",
@@ -1681,7 +1681,7 @@ describe("CollectiveBoard", () => {
                         runId,
                         storyId: "S1",
                         leaseId: "lease-retained",
-                        generation: offer.data.generation,
+                        generation: offer.payload.generation,
                     },
                     removedStoryIds: [],
                     modifiedDeps: {},
@@ -1700,20 +1700,20 @@ describe("CollectiveBoard", () => {
                     ],
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("worker"),
-                fail(runId, "S1", "lease-retained", offer.data.generation),
+                fail(runId, "S1", "lease-retained", offer.payload.generation),
             )
             const cleanup = await waitFor(env.events, WorkspaceCleanupRequested.is)
-            assert.equal(cleanup.data.preserveForRecovery, true)
-            env.deliverSemanticEvent(
+            assert.equal(cleanup.payload.preserveForRecovery, true)
+            env.publish(
                 source("repo"),
                 WorkspaceCleanupFailed.create({
                     runId,
-                    cleanupId: cleanup.data.cleanupId,
+                    cleanupId: cleanup.payload.cleanupId,
                     storyId: "S1",
                     leaseId: "lease-retained",
-                    generation: offer.data.generation,
+                    generation: offer.payload.generation,
                     retainedBranch: `baro-wt/${runId}/S1`,
                     error: "preservation commit failed; worktree retained",
                 }),
@@ -1722,7 +1722,7 @@ describe("CollectiveBoard", () => {
             await waitFor(env.events, RunPushRequested.is)
             assert.equal(env.events.filter(RecoveryStarted.is).length, 0)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("surgeon"),
                 Replan.create({
                     source: "surgeon:test",
@@ -1731,7 +1731,7 @@ describe("CollectiveBoard", () => {
                         runId,
                         storyId: "S1",
                         leaseId: "lease-retained",
-                        generation: offer.data.generation,
+                        generation: offer.payload.generation,
                     },
                     removedStoryIds: [],
                     modifiedDeps: {},
@@ -1750,7 +1750,7 @@ describe("CollectiveBoard", () => {
                     ],
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("surgeon"),
                 RecoveryDecision.create({
                     runId,
@@ -1784,22 +1784,22 @@ describe("CollectiveBoard", () => {
             })
             const env = joinWithCapture(board)
 
-            env.deliverSemanticEvent(source("operator"), RunStartRequest.create({ reason: "test" }))
-            env.deliverSemanticEvent(source("repo"), RunPrepared.create({ runId: "run-replan", baseSha: null }))
+            env.publish(source("operator"), RunStartRequest.create({ reason: "test" }))
+            env.publish(source("repo"), RunPrepared.create({ runId: "run-replan", baseSha: null }))
             await provideContext(env, "run-replan", 1)
             const offer = await waitFor(env.events, WorkOffered.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("broker"),
                 WorkLeaseGranted.create({
                     runId: "run-replan",
-                    offerId: offer.data.offerId,
+                    offerId: offer.payload.offerId,
                     leaseId: "lease-1",
                     workerId: "worker",
                     generation: 1,
-                    request: offer.data.request,
+                    request: offer.payload.request,
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("surgeon"),
                 RecoveryEvaluationStarted.create({
                     runId: "run-replan",
@@ -1807,28 +1807,28 @@ describe("CollectiveBoard", () => {
                     source: "surgeon:test",
                 }),
             )
-            env.deliverSemanticEvent(source("S1"), fail("run-replan", "S1", "lease-1", 1))
+            env.publish(source("S1"), fail("run-replan", "S1", "lease-1", 1))
             const cleanup = await waitFor(env.events, WorkspaceCleanupRequested.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("stale-repo"),
                 WorkspaceCleanupCompleted.create({
-                    ...cleanup.data,
+                    ...cleanup.payload,
                     cleanupId: "stale-cleanup",
                 }),
             )
             await flush()
             assert.equal(env.events.filter(WorkContextRequested.is).length, 1)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
                 WorkspaceCleanupCompleted.create({
-                    ...cleanup.data,
+                    ...cleanup.payload,
                 }),
             )
             await flush()
             assert.equal(env.events.filter(WorkOffered.is).length, 1)
             assert.equal(env.events.some(RunPushRequested.is), false)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("surgeon"),
                 Replan.create({
                     source: "surgeon:test",
@@ -1855,7 +1855,7 @@ describe("CollectiveBoard", () => {
                     ],
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("surgeon"),
                 RecoveryDecision.create({
                     runId: "run-replan",
@@ -1868,7 +1868,7 @@ describe("CollectiveBoard", () => {
 
             await provideContext(env, "run-replan", 2)
             const offers = await waitForCount(env.events, WorkOffered.is, 2)
-            assert.equal(offers[1]?.data.request.storyId, "S2")
+            assert.equal(offers[1]?.payload.request.storyId, "S2")
         })
     })
 
@@ -1883,48 +1883,48 @@ describe("CollectiveBoard", () => {
                 timeoutSecs: 60,
             })
             const env = joinWithCapture(board)
-            env.deliverSemanticEvent(source("operator"), RunStartRequest.create({ reason: "test" }))
-            env.deliverSemanticEvent(source("repo"), RunPrepared.create({ runId: "run-late", baseSha: null }))
+            env.publish(source("operator"), RunStartRequest.create({ reason: "test" }))
+            env.publish(source("repo"), RunPrepared.create({ runId: "run-late", baseSha: null }))
             await provideContext(env, "run-late", 1)
             const firstOffer = await waitFor(env.events, WorkOffered.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("broker"),
                 WorkLeaseGranted.create({
                     runId: "run-late",
-                    offerId: firstOffer.data.offerId,
+                    offerId: firstOffer.payload.offerId,
                     leaseId: "lease-old",
                     workerId: "worker",
                     generation: 1,
-                    request: firstOffer.data.request,
+                    request: firstOffer.payload.request,
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("S1"),
                 fail("run-late", "S1", "lease-old", 1),
             )
             const cleanup = await waitFor(env.events, WorkspaceCleanupRequested.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
                 WorkspaceCleanupCompleted.create({
-                    ...cleanup.data,
+                    ...cleanup.payload,
                 }),
             )
 
             await provideContext(env, "run-late", 2)
             const offers = await waitForCount(env.events, WorkOffered.is, 2)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("broker"),
                 WorkLeaseGranted.create({
                     runId: "run-late",
-                    offerId: offers[1]!.data.offerId,
+                    offerId: offers[1]!.payload.offerId,
                     leaseId: "lease-new",
                     workerId: "worker",
                     generation: 2,
-                    request: offers[1]!.data.request,
+                    request: offers[1]!.payload.request,
                 }),
             )
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("late-S1"),
                 pass("run-late", "S1", "lease-old", 1),
             )
@@ -1932,10 +1932,10 @@ describe("CollectiveBoard", () => {
             assert.equal(env.events.filter(StoryIntegrationRequested.is).length, 0)
 
             const current = pass("run-late", "S1", "lease-new", 2)
-            env.deliverSemanticEvent(source("S1"), current)
-            env.deliverSemanticEvent(source("duplicate-S1"), current)
+            env.publish(source("S1"), current)
+            env.publish(source("duplicate-S1"), current)
             const integration = await waitFor(env.events, StoryIntegrationRequested.is)
-            assert.equal(integration.data.leaseId, "lease-new")
+            assert.equal(integration.payload.leaseId, "lease-new")
             assert.equal(env.events.filter(StoryIntegrationRequested.is).length, 1)
         })
     })
@@ -1955,19 +1955,19 @@ describe("CollectiveBoard", () => {
             })
             const env = joinWithCapture(board)
 
-            env.deliverSemanticEvent(source("operator"), RunStartRequest.create({ reason: "test" }))
-            env.deliverSemanticEvent(source("repo"), RunPrepared.create({ runId, baseSha: null }))
+            env.publish(source("operator"), RunStartRequest.create({ reason: "test" }))
+            env.publish(source("repo"), RunPrepared.create({ runId, baseSha: null }))
             await provideContext(env, runId, 1)
             const firstOffer = await waitFor(env.events, WorkOffered.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("broker"),
                 WorkLeaseGranted.create({
                     runId,
-                    offerId: firstOffer.data.offerId,
+                    offerId: firstOffer.payload.offerId,
                     leaseId: "lease-route-a",
                     workerId: "worker-a",
-                    generation: firstOffer.data.generation,
-                    request: firstOffer.data.request,
+                    generation: firstOffer.payload.generation,
+                    request: firstOffer.payload.request,
                     route: {
                         routeId: "route-a",
                         backend: "openai",
@@ -1975,27 +1975,27 @@ describe("CollectiveBoard", () => {
                     },
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("worker-a-agent"),
                 capacityFail(
                     runId,
                     "S1",
                     "lease-route-a",
-                    firstOffer.data.generation,
+                    firstOffer.payload.generation,
                 ),
             )
 
             const cleanup = await waitFor(env.events, WorkspaceCleanupRequested.is)
-            assert.equal(cleanup.data.preserveForRecovery, true)
+            assert.equal(cleanup.payload.preserveForRecovery, true)
             await flush()
             assert.equal(env.events.filter(RecoveryStarted.is).length, 0)
             assert.equal(env.events.filter(WorkOffered.is).length, 1)
 
             const checkpoint = `${runId}/recovery/S1/1`
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
                 WorkspaceCleanupCompleted.create({
-                    ...cleanup.data,
+                    ...cleanup.payload,
                     preservedBranch: checkpoint,
                 }),
             )
@@ -2003,20 +2003,20 @@ describe("CollectiveBoard", () => {
             await provideContext(env, runId, 2)
             const offers = await waitForCount(env.events, WorkOffered.is, 2)
             const retry = offers[1]!
-            assert.deepEqual(retry.data.excludedRouteIds, ["route-a"])
-            assert.equal(retry.data.request.recovery?.branch, checkpoint)
-            assert.match(retry.data.request.prompt, /provider capacity unavailable/)
+            assert.deepEqual(retry.payload.excludedRouteIds, ["route-a"])
+            assert.equal(retry.payload.request.recovery?.branch, checkpoint)
+            assert.match(retry.payload.request.prompt, /provider capacity unavailable/)
             assert.equal(env.events.filter(RecoveryEvaluationStarted.is).length, 0)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("broker"),
                 WorkLeaseGranted.create({
                     runId,
-                    offerId: retry.data.offerId,
+                    offerId: retry.payload.offerId,
                     leaseId: "lease-route-b",
                     workerId: "worker-b",
-                    generation: retry.data.generation,
-                    request: retry.data.request,
+                    generation: retry.payload.generation,
+                    request: retry.payload.request,
                     route: {
                         routeId: "route-b",
                         backend: "openai",
@@ -2024,13 +2024,13 @@ describe("CollectiveBoard", () => {
                     },
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("worker-b-agent"),
                 capacityFail(
                     runId,
                     "S1",
                     "lease-route-b",
-                    retry.data.generation,
+                    retry.payload.generation,
                 ),
             )
             const cleanups = await waitForCount(
@@ -2038,16 +2038,16 @@ describe("CollectiveBoard", () => {
                 WorkspaceCleanupRequested.is,
                 2,
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
                 WorkspaceCleanupCompleted.create({
-                    ...cleanups[1]!.data,
+                    ...cleanups[1]!.payload,
                     preservedBranch: `${runId}/recovery/S1/2`,
                 }),
             )
             await provideContext(env, runId, 3)
             const thirdOffer = (await waitForCount(env.events, WorkOffered.is, 3))[2]!
-            assert.deepEqual(thirdOffer.data.excludedRouteIds, ["route-a", "route-b"])
+            assert.deepEqual(thirdOffer.payload.excludedRouteIds, ["route-a", "route-b"])
         })
     })
 
@@ -2067,19 +2067,19 @@ describe("CollectiveBoard", () => {
             })
             const env = joinWithCapture(board)
 
-            env.deliverSemanticEvent(source("operator"), RunStartRequest.create({ reason: "test" }))
-            env.deliverSemanticEvent(source("repo"), RunPrepared.create({ runId, baseSha: null }))
+            env.publish(source("operator"), RunStartRequest.create({ reason: "test" }))
+            env.publish(source("repo"), RunPrepared.create({ runId, baseSha: null }))
             await provideContext(env, runId, 1)
             const offered = await waitFor(env.events, WorkOffered.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("broker"),
                 WorkLeaseGranted.create({
                     runId,
-                    offerId: offered.data.offerId,
+                    offerId: offered.payload.offerId,
                     leaseId: "lease-route-a",
                     workerId: "worker-a",
-                    generation: offered.data.generation,
-                    request: offered.data.request,
+                    generation: offered.payload.generation,
+                    request: offered.payload.request,
                     route: {
                         routeId: "route-a",
                         backend: "openai",
@@ -2087,31 +2087,31 @@ describe("CollectiveBoard", () => {
                     },
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("worker-a"),
                 transportFail(
                     runId,
                     "S1",
                     "lease-route-a",
-                    offered.data.generation,
+                    offered.payload.generation,
                 ),
             )
 
             const cleanup = await waitFor(env.events, WorkspaceCleanupRequested.is)
-            assert.equal(cleanup.data.preserveForRecovery, true)
-            env.deliverSemanticEvent(
+            assert.equal(cleanup.payload.preserveForRecovery, true)
+            env.publish(
                 source("repo"),
                 WorkspaceCleanupCompleted.create({
-                    ...cleanup.data,
+                    ...cleanup.payload,
                     preservedBranch: `${runId}/recovery/S1/transport`,
                 }),
             )
             await waitFor(env.events, RecoveryStarted.is)
             await provideContext(env, runId, 2)
             const retry = (await waitForCount(env.events, WorkOffered.is, 2))[1]!
-            assert.deepEqual(retry.data.excludedRouteIds, ["route-a"])
-            assert.equal(retry.data.request.recovery?.kind, "transport")
-            assert.deepEqual(retry.data.request.resume, {
+            assert.deepEqual(retry.payload.excludedRouteIds, ["route-a"])
+            assert.equal(retry.payload.request.recovery?.kind, "transport")
+            assert.deepEqual(retry.payload.request.resume, {
                 preservedBranch: `${runId}/recovery/S1/transport`,
                 reverify: true,
             })
@@ -2119,7 +2119,7 @@ describe("CollectiveBoard", () => {
             assert.equal(
                 env.events
                     .filter(ConductorState.is)
-                    .some((event) => /healing action/.test(event.data.detail ?? "")),
+                    .some((event) => /healing action/.test(event.payload.detail ?? "")),
                 false,
             )
         })
@@ -2140,26 +2140,26 @@ describe("CollectiveBoard", () => {
             })
             const env = joinWithCapture(board)
 
-            env.deliverSemanticEvent(source("operator"), RunStartRequest.create({ reason: "test" }))
-            env.deliverSemanticEvent(source("repo"), RunPrepared.create({ runId, baseSha: null }))
+            env.publish(source("operator"), RunStartRequest.create({ reason: "test" }))
+            env.publish(source("repo"), RunPrepared.create({ runId, baseSha: null }))
             await provideContext(env, runId, 1)
             const offer = await waitFor(env.events, WorkOffered.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("broker"),
                 WorkLeaseGranted.create({
                     runId,
-                    offerId: offer.data.offerId,
+                    offerId: offer.payload.offerId,
                     leaseId: "lease-spawn",
                     workerId: "worker",
-                    generation: offer.data.generation,
-                    request: offer.data.request,
+                    generation: offer.payload.generation,
+                    request: offer.payload.request,
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("factory"),
                 StorySpawnFailed.create({
                     runId,
-                    offerId: offer.data.offerId,
+                    offerId: offer.payload.offerId,
                     leaseId: "lease-spawn",
                     storyId: "S1",
                     error: "isolated worktree unavailable",
@@ -2170,16 +2170,16 @@ describe("CollectiveBoard", () => {
                 }),
             )
             const cleanup = await waitFor(env.events, WorkspaceCleanupRequested.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
-                WorkspaceCleanupCompleted.create({ ...cleanup.data }),
+                WorkspaceCleanupCompleted.create({ ...cleanup.payload }),
             )
             await waitFor(env.events, RecoveryStarted.is)
             await provideContext(env, runId, 2)
             const retry = (await waitForCount(env.events, WorkOffered.is, 2))[1]!
-            assert.equal(retry.data.request.recovery?.kind, "infrastructure")
+            assert.equal(retry.payload.request.recovery?.kind, "infrastructure")
             assert.equal(
-                retry.data.request.resume,
+                retry.payload.request.resume,
                 undefined,
                 "nothing was preserved, so there is no commit to re-verify",
             )
@@ -2201,29 +2201,29 @@ describe("CollectiveBoard", () => {
             })
             const env = joinWithCapture(board)
 
-            env.deliverSemanticEvent(source("operator"), RunStartRequest.create({ reason: "test" }))
-            env.deliverSemanticEvent(source("repo"), RunPrepared.create({ runId, baseSha: null }))
+            env.publish(source("operator"), RunStartRequest.create({ reason: "test" }))
+            env.publish(source("repo"), RunPrepared.create({ runId, baseSha: null }))
             await provideContext(env, runId, 1)
             const offer = await waitFor(env.events, WorkOffered.is)
-            assert.equal(offer.data.request.resume, undefined)
-            env.deliverSemanticEvent(
+            assert.equal(offer.payload.request.resume, undefined)
+            env.publish(
                 source("broker"),
                 WorkLeaseGranted.create({
                     runId,
-                    offerId: offer.data.offerId,
+                    offerId: offer.payload.offerId,
                     leaseId: "lease-silent",
                     workerId: "worker",
-                    generation: offer.data.generation,
-                    request: offer.data.request,
+                    generation: offer.payload.generation,
+                    request: offer.payload.request,
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("S1"),
                 StoryResult.create({
                     runId,
                     storyId: "S1",
                     leaseId: "lease-silent",
-                    generation: offer.data.generation,
+                    generation: offer.payload.generation,
                     success: false,
                     attempts: 1,
                     durationSecs: 600,
@@ -2232,17 +2232,17 @@ describe("CollectiveBoard", () => {
                 }),
             )
             const cleanup = await waitFor(env.events, WorkspaceCleanupRequested.is)
-            assert.equal(cleanup.data.preserveForRecovery, true)
+            assert.equal(cleanup.payload.preserveForRecovery, true)
             const preservedBranch = `baro-recovery/${runId}/S1/1`
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
-                WorkspaceCleanupCompleted.create({ ...cleanup.data, preservedBranch }),
+                WorkspaceCleanupCompleted.create({ ...cleanup.payload, preservedBranch }),
             )
             await waitFor(env.events, RecoveryStarted.is)
             await provideContext(env, runId, 2)
             const retry = (await waitForCount(env.events, WorkOffered.is, 2))[1]!
-            assert.equal(retry.data.request.recovery?.kind, "infrastructure")
-            assert.deepEqual(retry.data.request.resume, {
+            assert.equal(retry.payload.request.recovery?.kind, "infrastructure")
+            assert.deepEqual(retry.payload.request.resume, {
                 preservedBranch,
                 reverify: true,
             })
@@ -2264,34 +2264,34 @@ describe("CollectiveBoard", () => {
             })
             const env = joinWithCapture(board)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "test" }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
                 RunPrepared.create({ runId, baseSha: null }),
             )
             await provideContext(env, runId, 1)
             const offer = await waitFor(env.events, WorkOffered.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("broker"),
                 WorkLeaseGranted.create({
                     runId,
-                    offerId: offer.data.offerId,
+                    offerId: offer.payload.offerId,
                     leaseId: "lease-uncertified",
                     workerId: "worker",
-                    generation: offer.data.generation,
-                    request: offer.data.request,
+                    generation: offer.payload.generation,
+                    request: offer.payload.request,
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("worker"),
                 StoryResult.create({
                     runId,
                     storyId: "S1",
                     leaseId: "lease-uncertified",
-                    generation: offer.data.generation,
+                    generation: offer.payload.generation,
                     success: false,
                     attempts: 1,
                     durationSecs: 2,
@@ -2327,19 +2327,19 @@ describe("CollectiveBoard", () => {
             })
             const env = joinWithCapture(board)
 
-            env.deliverSemanticEvent(source("operator"), RunStartRequest.create({ reason: "test" }))
-            env.deliverSemanticEvent(source("repo"), RunPrepared.create({ runId, baseSha: null }))
+            env.publish(source("operator"), RunStartRequest.create({ reason: "test" }))
+            env.publish(source("repo"), RunPrepared.create({ runId, baseSha: null }))
             await provideContext(env, runId, 1)
             const offer = await waitFor(env.events, WorkOffered.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("broker"),
                 WorkLeaseGranted.create({
                     runId,
-                    offerId: offer.data.offerId,
+                    offerId: offer.payload.offerId,
                     leaseId: "lease-rate-limited",
                     workerId: "worker-a",
-                    generation: offer.data.generation,
-                    request: offer.data.request,
+                    generation: offer.payload.generation,
+                    request: offer.payload.request,
                     route: {
                         routeId: "route-a",
                         backend: "openai",
@@ -2347,13 +2347,13 @@ describe("CollectiveBoard", () => {
                     },
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("worker-a"),
                 StoryResult.create({
                     runId,
                     storyId: "S1",
                     leaseId: "lease-rate-limited",
-                    generation: offer.data.generation,
+                    generation: offer.payload.generation,
                     success: false,
                     attempts: 1,
                     durationSecs: 1,
@@ -2366,10 +2366,10 @@ describe("CollectiveBoard", () => {
                 }),
             )
             const cleanup = await waitFor(env.events, WorkspaceCleanupRequested.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
                 WorkspaceCleanupCompleted.create({
-                    ...cleanup.data,
+                    ...cleanup.payload,
                     preservedBranch: `${runId}/recovery/S1/rate-limit`,
                 }),
             )
@@ -2381,7 +2381,7 @@ describe("CollectiveBoard", () => {
             await waitFor(env.events, RecoveryStarted.is)
             await provideContext(env, runId, 2)
             const retry = (await waitForCount(env.events, WorkOffered.is, 2))[1]!
-            assert.deepEqual(retry.data.excludedRouteIds, ["route-a"])
+            assert.deepEqual(retry.payload.excludedRouteIds, ["route-a"])
         })
     })
 
@@ -2399,35 +2399,35 @@ describe("CollectiveBoard", () => {
             })
             const env = joinWithCapture(board)
 
-            env.deliverSemanticEvent(source("operator"), RunStartRequest.create({ reason: "test" }))
-            env.deliverSemanticEvent(source("repo"), RunPrepared.create({ runId, baseSha: null }))
+            env.publish(source("operator"), RunStartRequest.create({ reason: "test" }))
+            env.publish(source("repo"), RunPrepared.create({ runId, baseSha: null }))
             await provideContext(env, runId, 1)
             const offered = await waitFor(env.events, WorkOffered.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("broker"),
                 WorkLeaseGranted.create({
                     runId,
-                    offerId: offered.data.offerId,
+                    offerId: offered.payload.offerId,
                     leaseId: "lease-single",
                     workerId: "single-worker",
-                    generation: offered.data.generation,
-                    request: offered.data.request,
+                    generation: offered.payload.generation,
+                    request: offered.payload.request,
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("single-agent"),
                 capacityFail(
                     runId,
                     "S1",
                     "lease-single",
-                    offered.data.generation,
+                    offered.payload.generation,
                 ),
             )
             const cleanup = await waitFor(env.events, WorkspaceCleanupRequested.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
                 WorkspaceCleanupCompleted.create({
-                    ...cleanup.data,
+                    ...cleanup.payload,
                     preservedBranch: `${runId}/recovery/S1/1`,
                 }),
             )
@@ -2461,8 +2461,8 @@ describe("CollectiveBoard", () => {
             })
             const env = joinWithCapture(board)
 
-            env.deliverSemanticEvent(source("operator"), RunStartRequest.create({ reason: "test" }))
-            env.deliverSemanticEvent(source("repo"), RunPrepared.create({ runId, baseSha: null }))
+            env.publish(source("operator"), RunStartRequest.create({ reason: "test" }))
+            env.publish(source("repo"), RunPrepared.create({ runId, baseSha: null }))
             await provideContext(env, runId, 1)
             await provideContext(env, runId, 2)
             const offers = await waitForCount(env.events, WorkOffered.is, 2)
@@ -2470,15 +2470,15 @@ describe("CollectiveBoard", () => {
             for (const [index, offered] of offers.entries()) {
                 const routeName = index === 0 ? "a" : "b"
                 const leaseId = `lease-route-${routeName}`
-                env.deliverSemanticEvent(
+                env.publish(
                     source("broker"),
                     WorkLeaseGranted.create({
                         runId,
-                        offerId: offered.data.offerId,
+                        offerId: offered.payload.offerId,
                         leaseId,
                         workerId: `worker-${routeName}`,
-                        generation: offered.data.generation,
-                        request: offered.data.request,
+                        generation: offered.payload.generation,
+                        request: offered.payload.request,
                         route: {
                             routeId: `route-${routeName}`,
                             backend: "openai",
@@ -2486,13 +2486,13 @@ describe("CollectiveBoard", () => {
                         },
                     }),
                 )
-                env.deliverSemanticEvent(
+                env.publish(
                     source(`worker-${routeName}-agent`),
                     capacityFail(
                         runId,
-                        offered.data.request.storyId,
+                        offered.payload.request.storyId,
                         leaseId,
-                        offered.data.generation,
+                        offered.payload.generation,
                     ),
                 )
             }
@@ -2503,11 +2503,11 @@ describe("CollectiveBoard", () => {
                 2,
             )
             for (const cleanup of cleanups) {
-                env.deliverSemanticEvent(
+                env.publish(
                     source("repo"),
                     WorkspaceCleanupCompleted.create({
-                        ...cleanup.data,
-                        preservedBranch: `${runId}/recovery/${cleanup.data.storyId}/1`,
+                        ...cleanup.payload,
+                        preservedBranch: `${runId}/recovery/${cleanup.payload.storyId}/1`,
                     }),
                 )
             }
@@ -2529,22 +2529,22 @@ describe("CollectiveBoard", () => {
                 timeoutSecs: 60,
             })
             const env = joinWithCapture(board)
-            env.deliverSemanticEvent(source("operator"), RunStartRequest.create({ reason: "test" }))
-            env.deliverSemanticEvent(source("repo"), RunPrepared.create({ runId: "run-discovery", baseSha: null }))
+            env.publish(source("operator"), RunStartRequest.create({ reason: "test" }))
+            env.publish(source("repo"), RunPrepared.create({ runId: "run-discovery", baseSha: null }))
             await provideContext(env, "run-discovery", 1)
             const offer = await waitFor(env.events, WorkOffered.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("broker"),
                 WorkLeaseGranted.create({
                     runId: "run-discovery",
-                    offerId: offer.data.offerId,
+                    offerId: offer.payload.offerId,
                     leaseId: "lease-1",
                     workerId: "worker",
                     generation: 1,
-                    request: offer.data.request,
+                    request: offer.payload.request,
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("S1"),
                 WorkDiscovered.create({
                     runId: "run-discovery",
@@ -2562,7 +2562,7 @@ describe("CollectiveBoard", () => {
                     },
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("S1"),
                 WorkDiscovered.create({
                     runId: "run-discovery",
@@ -2580,9 +2580,9 @@ describe("CollectiveBoard", () => {
                     },
                 }),
             )
-            env.deliverSemanticEvent(source("S1"), pass("run-discovery", "S1", "lease-1", 1))
+            env.publish(source("S1"), pass("run-discovery", "S1", "lease-1", 1))
             await waitFor(env.events, StoryIntegrationRequested.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
                 StoryMerged.create({
                     storyId: "S1",
@@ -2594,11 +2594,11 @@ describe("CollectiveBoard", () => {
 
             await provideContext(env, "run-discovery", 2)
             const offers = await waitForCount(env.events, WorkOffered.is, 2)
-            assert.equal(offers[1]?.data.request.storyId, "S2")
+            assert.equal(offers[1]?.payload.request.storyId, "S2")
             assert.equal(
                 env.events
                     .filter(WorkOffered.is)
-                    .some((candidate) => candidate.data.request.storyId === "S-stale"),
+                    .some((candidate) => candidate.payload.request.storyId === "S-stale"),
                 false,
             )
             const saved = JSON.parse(readFileSync(prdPath, "utf8")) as PrdFile
@@ -2630,11 +2630,11 @@ describe("CollectiveBoard", () => {
             })
             const env = joinWithCapture(board)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "test" }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
                 RunPrepared.create({ runId, baseSha: null }),
             )
@@ -2644,46 +2644,46 @@ describe("CollectiveBoard", () => {
                 2,
             )
             for (const request of initialContexts) {
-                env.deliverSemanticEvent(
+                env.publish(
                     source("context"),
                     WorkContextProvided.create({
                         runId,
-                        requestId: request.data.requestId,
-                        storyId: request.data.storyId,
+                        requestId: request.payload.requestId,
+                        storyId: request.payload.storyId,
                         context: null,
                     }),
                 )
             }
             const offers = await waitForCount(env.events, WorkOffered.is, 2)
             const prerequisite = offers.find(
-                (event) => event.data.request.storyId === "S1",
+                (event) => event.payload.request.storyId === "S1",
             )!
             const sibling = offers.find(
-                (event) => event.data.request.storyId === "S2",
+                (event) => event.payload.request.storyId === "S2",
             )!
             for (const [offer, leaseId] of [
                 [prerequisite, "lease-S1"],
                 [sibling, "lease-S2"],
             ] as const) {
-                env.deliverSemanticEvent(
+                env.publish(
                     source("broker"),
                     WorkLeaseGranted.create({
                         runId,
-                        offerId: offer.data.offerId,
+                        offerId: offer.payload.offerId,
                         leaseId,
                         workerId: `worker-${leaseId}`,
-                        generation: offer.data.generation,
-                        request: offer.data.request,
+                        generation: offer.payload.generation,
+                        request: offer.payload.request,
                     }),
                 )
             }
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("worker-S1"),
-                pass(runId, "S1", "lease-S1", prerequisite.data.generation),
+                pass(runId, "S1", "lease-S1", prerequisite.payload.generation),
             )
             await waitFor(env.events, StoryIntegrationRequested.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repo"),
                 StoryMerged.create({
                     runId,
@@ -2698,11 +2698,11 @@ describe("CollectiveBoard", () => {
                 WorkContextRequested.is,
                 3,
             )
-            assert.equal(contexts[2]?.data.storyId, "S3")
+            assert.equal(contexts[2]?.payload.storyId, "S3")
             assert.equal(
                 env.events
                     .filter(StoryResult.is)
-                    .some((event) => event.data.storyId === "S2"),
+                    .some((event) => event.payload.storyId === "S2"),
                 false,
                 "the sibling was still executing when S3 became dispatchable",
             )
@@ -2860,12 +2860,12 @@ async function provideContext(
 ): Promise<void> {
     const requests = await waitForCount(env.events, WorkContextRequested.is, count)
     const request = requests[count - 1]!
-    env.deliverSemanticEvent(
+    env.publish(
         source("context"),
         WorkContextProvided.create({
             runId,
-            requestId: request.data.requestId,
-            storyId: request.data.storyId,
+            requestId: request.payload.requestId,
+            storyId: request.payload.storyId,
             context: null,
         }),
     )
@@ -2875,31 +2875,31 @@ async function integrateSingleStory(
     env: ReturnType<typeof joinWithCapture>,
     runId: string,
 ) {
-    env.deliverSemanticEvent(source("operator"), RunStartRequest.create({ reason: "test" }))
-    env.deliverSemanticEvent(
+    env.publish(source("operator"), RunStartRequest.create({ reason: "test" }))
+    env.publish(
         source("repo"),
         RunPrepared.create({ runId, baseSha: null }),
     )
     await provideContext(env, runId, 1)
     const offer = await waitFor(env.events, WorkOffered.is)
     const leaseId = `${runId}:lease`
-    env.deliverSemanticEvent(
+    env.publish(
         source("broker"),
         WorkLeaseGranted.create({
             runId,
-            offerId: offer.data.offerId,
+            offerId: offer.payload.offerId,
             leaseId,
             workerId: "worker",
-            generation: offer.data.generation,
-            request: offer.data.request,
+            generation: offer.payload.generation,
+            request: offer.payload.request,
         }),
     )
-    env.deliverSemanticEvent(
+    env.publish(
         source("worker"),
-        pass(runId, "S1", leaseId, offer.data.generation),
+        pass(runId, "S1", leaseId, offer.payload.generation),
     )
     await waitFor(env.events, StoryIntegrationRequested.is)
-    env.deliverSemanticEvent(
+    env.publish(
         source("repo"),
         StoryMerged.create({
             storyId: "S1",

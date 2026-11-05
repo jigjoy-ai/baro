@@ -12,11 +12,11 @@ import { join } from "path"
 import { tmpdir } from "os"
 
 import {
-    AgenticEnvironment,
     FunctionCallItem,
     FunctionCallOutputItem,
     ModelMessageItem,
 } from "../src/runtime/mozaik.js"
+import { CoordinationBus } from "../src/runtime/coordination.js"
 
 import { mapOpenCodeEvent } from "../src/harness/opencode/stream-mapper.js"
 import { OpenCodeCliParticipant } from "../src/harness/opencode/cli-participant.js"
@@ -183,7 +183,7 @@ async function testOneShot(): Promise<void> {
 async function testCliParticipant(): Promise<void> {
     process.stderr.write("\n[test] 3. CLI participant (live opencode invocation)\n")
 
-    const env = new AgenticEnvironment()
+    const env = new CoordinationBus()
     const participant = new OpenCodeCliParticipant("test-agent", {
         cwd: testDir,
         prompt: 'Say exactly: CLI_PARTICIPANT_OK',
@@ -214,7 +214,7 @@ async function testStoryAgent(): Promise<void> {
     // File-mutation prompt (not a prose echo) so the success predicate
     // (requires >=1 tool call) is exercised on a genuine task.
     const targetFile = "STORY_AGENT_OK.txt"
-    const env = new AgenticEnvironment()
+    const env = new CoordinationBus()
     const agent = new OpenCodeStoryAgent({
         id: "test-story-1",
         prompt: `Create a file named ${targetFile} in the current directory containing exactly the text DONE. Use your file-writing tools.`,
@@ -245,7 +245,7 @@ async function testStoryAgent(): Promise<void> {
 async function testNoOpRejected(): Promise<void> {
     process.stderr.write("\n[test] 5. No-op story is rejected (regression guard)\n")
 
-    const env = new AgenticEnvironment()
+    const env = new CoordinationBus()
     const agent = new OpenCodeStoryAgent({
         id: "test-story-noop",
         prompt: "Reply with the single word ACKNOWLEDGED and do nothing else. Do not use any tools.",

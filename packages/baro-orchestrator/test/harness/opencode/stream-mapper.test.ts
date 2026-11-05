@@ -82,14 +82,14 @@ describe("mapOpenCodeEvent", () => {
             (item): item is ModelMessageItem => item instanceof ModelMessageItem,
         )
         const step = stepEvents(result.items).find(
-            (item) => item.data.stepType === "text",
+            (item) => item.payload.stepType === "text",
         )
 
         assert.ok(message)
         assert.equal(contentText(message), "OpenCode says hi")
         assert.ok(step)
-        assert.equal(step.data.agentId, agentId)
-        assert.deepEqual(step.data.raw, event)
+        assert.equal(step.payload.agentId, agentId)
+        assert.deepEqual(step.payload.raw, event)
     })
 
     it("maps real tool_use to paired call and output items plus step events", () => {
@@ -134,7 +134,7 @@ describe("mapOpenCodeEvent", () => {
         assert.equal(outputJson.call_id, callJson.call_id)
         assert.equal(outputText(output), "wrote README.md")
         assert.deepEqual(
-            stepEvents(result.items).map((item) => item.data.stepType),
+            stepEvents(result.items).map((item) => item.payload.stepType),
             ["tool_call", "tool_result"],
         )
     })
@@ -167,7 +167,7 @@ describe("mapOpenCodeEvent", () => {
             false,
         )
         assert.deepEqual(
-            stepEvents(result.items).map((item) => item.data.stepType),
+            stepEvents(result.items).map((item) => item.payload.stepType),
             ["tool_call"],
         )
     })
@@ -198,7 +198,7 @@ describe("mapOpenCodeEvent", () => {
         assert.equal(callJson.name, "Read")
         assert.equal(callJson.arguments, JSON.stringify({ path: "README.md" }))
         assert.deepEqual(
-            stepEvents(result.items).map((item) => item.data.stepType),
+            stepEvents(result.items).map((item) => item.payload.stepType),
             ["tool_call"],
         )
     })
@@ -225,7 +225,7 @@ describe("mapOpenCodeEvent", () => {
         assert.equal(serialized(output).call_id, "legacy-call-1")
         assert.equal(outputText(output), "legacy result")
         assert.deepEqual(
-            stepEvents(result.items).map((item) => item.data.stepType),
+            stepEvents(result.items).map((item) => item.payload.stepType),
             ["tool_result"],
         )
     })
@@ -272,8 +272,8 @@ describe("mapOpenCodeEvent", () => {
                 unknown as ReturnType<typeof OpenCodeUnknownEvent.create>,
             ),
         )
-        assert.equal(unknown.data.agentId, agentId)
-        assert.equal(unknown.data.openCodeType, "mystery")
-        assert.deepEqual(unknown.data.raw, event)
+        assert.equal(unknown.payload.agentId, agentId)
+        assert.equal(unknown.payload.openCodeType, "mystery")
+        assert.deepEqual(unknown.payload.raw, event)
     })
 })

@@ -14,9 +14,9 @@ import { describe, it } from "node:test"
 import {
     FunctionCallItem,
     FunctionCallOutputItem,
-    type Participant,
     type SemanticEvent,
 } from "../../src/runtime/mozaik.js"
+import type { BusMember } from "../../src/runtime/coordination.js"
 
 import {
     CRITIC_MAX_PROMPT_CHARS,
@@ -50,7 +50,7 @@ import {
 import { joinWithCapture, source, withTempDir } from "../execution/helpers.js"
 
 interface TestCritic {
-    onExternalEvent(source: Participant, event: SemanticEvent<unknown>): Promise<void>
+    onExternalEvent(source: BusMember, event: SemanticEvent<string, unknown>): Promise<void>
     idle(): Promise<void>
     join: unknown
 }
@@ -318,7 +318,7 @@ describe("Critic repository evidence", () => {
         const collector = new PublishedNoteCollector(2)
         const env = joinWithCapture(collector)
         for (const text of ["first", "second", "third"]) {
-            env.deliverSemanticEvent(
+            env.publish(
                 source("bridge"),
                 CollaborationNote.create({
                     runId: "run-1",
@@ -327,7 +327,7 @@ describe("Critic repository evidence", () => {
                 }),
             )
         }
-        env.deliverSemanticEvent(
+        env.publish(
             source("bridge"),
             CollaborationNote.create({
                 runId: "run-1",

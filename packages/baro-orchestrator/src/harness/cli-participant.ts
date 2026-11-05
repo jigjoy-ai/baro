@@ -14,13 +14,12 @@ import { ChildProcess } from "child_process"
 import spawn from "cross-spawn"
 
 import {
-    AgenticEnvironment,
-    BaseObserver,
     FunctionCallItem,
     FunctionCallOutputItem,
     ModelMessageItem,
     SemanticEvent,
 } from "../runtime/mozaik.js"
+import { BusMember, CoordinationBus } from "../runtime/coordination.js"
 
 import { harnessChildEnvironment } from "./environment.js"
 import {
@@ -56,7 +55,7 @@ export interface CliParticipantSpec {
 
 export abstract class CliParticipant<
     TSummary extends CliRunSummaryCore,
-> extends BaseObserver {
+> extends BusMember {
     /**
      * Process-wide registry for the orchestrator's SIGINT/SIGTERM handlers,
      * so a killed baro doesn't leave orphaned agents burning quota.
@@ -77,7 +76,7 @@ export abstract class CliParticipant<
     private processTree: ManagedProcessTree | null = null
     private buffer = ""
     private stderrTailValue = ""
-    protected envRef: AgenticEnvironment | null = null
+    protected envRef: CoordinationBus | null = null
     private currentPhase: AgentPhase = "idle"
     protected exitCode: number | null = null
     protected exitSignal: NodeJS.Signals | null = null
@@ -239,7 +238,7 @@ export abstract class CliParticipant<
     }
 
     /** Idempotent: subsequent calls are a no-op. */
-    start(environment: AgenticEnvironment): void {
+    start(environment: CoordinationBus): void {
         if (this.proc) return
         this.envRef = environment
 
@@ -420,28 +419,28 @@ export abstract class CliParticipant<
             | ModelMessageItem
             | FunctionCallItem
             | FunctionCallOutputItem
-            | SemanticEvent<unknown>,
+            | SemanticEvent<string, unknown>,
     ): void {
         if (!this.envRef) return
         if (item instanceof ModelMessageItem) {
-            this.envRef.deliverModelMessage(this, item)
+            this.envRef.publishModelMessage(this, item)
             return
         }
         if (item instanceof FunctionCallItem) {
-            this.envRef.deliverFunctionCall(this, item)
+            this.envRef.publishFunctionCall(this, item)
             return
         }
         if (item instanceof FunctionCallOutputItem) {
-            this.envRef.deliverFunctionCallOutput(this, item)
+            this.envRef.publishFunctionCallOutput(this, item)
             return
         }
-        this.envRef.deliverSemanticEvent(this, item)
+        this.envRef.publish(this, item)
     }
 
     protected transition(next: AgentPhase, detail?: string): void {
         if (next === this.currentPhase) return
         this.currentPhase = next
-        this.envRef?.deliverSemanticEvent(
+        this.envRef?.publish(
             this,
             AgentState.create({
                 agentId: this.agentId,

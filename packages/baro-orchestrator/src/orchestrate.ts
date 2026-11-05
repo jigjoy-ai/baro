@@ -13,7 +13,7 @@ import { dirname, join } from "path"
 import { fileURLToPath } from "url"
 import { randomUUID } from "node:crypto"
 
-import { AgenticEnvironment } from "./runtime/mozaik.js"
+import { CoordinationBus } from "./runtime/coordination.js"
 
 import {
     GatewayBillingCoordinator,
@@ -435,7 +435,7 @@ export interface OrchestrateConfig {
     /** Called only after the Board has opened/persisted the planning latch. */
     onPlanningFeedReady?: (feed: PlanningFeed) => void
     /** Extra participants to attach to the bus before the run starts. */
-    extraParticipants?: import("./runtime/mozaik.js").Participant[]
+    extraParticipants?: import("./runtime/coordination.js").BusMember[]
 }
 
 export function resolveOrchestrationRunId(
@@ -552,7 +552,7 @@ export async function orchestrate(
     })) {
         if (process.env[k] === undefined) process.env[k] = v
     }
-    const env = new AgenticEnvironment()
+    const env = new CoordinationBus()
     const emitTui = config.emitTuiEvents ?? true
     const coordinationMode = config.coordinationMode ?? "legacy"
     if (
@@ -771,7 +771,7 @@ export async function orchestrate(
                           measurement,
                       )
                   }
-                  env.deliverSemanticEvent(
+                  env.publish(
                       modelTelemetryCollector,
                       ModelInvocationMeasured.create(measurement),
                   )
@@ -1841,7 +1841,7 @@ export async function orchestrate(
         collectiveBoard.setConversationAuthority(dialogueAgent)
         dialogueAgent.join(env)
         cleanupDialogue = () => {
-            if (dialogueAgent?.getEnvironments().includes(env)) {
+            if (dialogueAgent?.getBuses().includes(env)) {
                 dialogueAgent.leave(env)
             }
         }
@@ -1936,7 +1936,7 @@ export async function orchestrate(
     // Joining starts the loopback listener eagerly, but this explicit barrier
     // makes a usable capability broker a precondition of collective RunStart.
     await collaborationBridge?.ready()
-    env.deliverSemanticEvent(
+    env.publish(
         operator,
         RunStartRequest.create({ reason: "orchestrate" }),
     )
@@ -2046,7 +2046,7 @@ export async function orchestrate(
     }
     // A conversation request must never become a liveness dependency. Leaving
     // aborts an in-flight responder without delaying verification/finalization.
-    if (dialogueAgent?.getEnvironments().includes(env)) {
+    if (dialogueAgent?.getBuses().includes(env)) {
         dialogueAgent.leave(env)
     }
     // A verifier timeout cancels its child process through a semantic event.

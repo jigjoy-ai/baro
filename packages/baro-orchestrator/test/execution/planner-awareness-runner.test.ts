@@ -1,18 +1,18 @@
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
-import { AgenticEnvironment, BaseObserver } from "../../src/runtime/mozaik.js"
+import { CoordinationBus, BusMember } from "../../src/runtime/coordination.js"
 import { StoryMerged, StoryMergeFailed } from "../../src/events/integration.js"
 import { WorkBlocked } from "../../src/events/execution.js"
 import { RunVerificationCompleted } from "../../src/events/verification.js"
 import { StoryResult } from "../../src/semantic-events.js"
 import { PlannerAwarenessRunner } from "../../src/execution/planner-awareness-runner.js"
 
-class FakeIntegrator extends BaseObserver {}
-class FakeWorker extends BaseObserver {}
+class FakeIntegrator extends BusMember {}
+class FakeWorker extends BusMember {}
 
 function harness() {
-    const env = new AgenticEnvironment("planner-awareness")
+    const env = new CoordinationBus("planner-awareness")
     const integrator = new FakeIntegrator()
     integrator.join(env)
     const worker = new FakeWorker()
@@ -25,8 +25,8 @@ function harness() {
     runner.join(env)
 
     const delivered: Array<{ recipientId: string; text: string }> = []
-    const real = env.deliverSemanticEvent.bind(env)
-    env.deliverSemanticEvent = (source, event) => {
+    const real = env.publish.bind(env)
+    env.publish = (source, event) => {
         const data = (event as { data?: unknown }).data as {
             recipientId?: string
             text?: string
@@ -41,7 +41,7 @@ describe("PlannerAwarenessRunner", () => {
     it("narrates failures, merges, blocks and verification to the planner", () => {
         const { env, integrator, worker, delivered } = harness()
 
-        env.deliverSemanticEvent(
+        env.publish(
             worker,
             StoryResult.create({
                 storyId: "S2",
@@ -52,11 +52,11 @@ describe("PlannerAwarenessRunner", () => {
                 runId: "run-1",
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             integrator,
             StoryMerged.create({ storyId: "S1", mode: "worktree", runId: "run-1" }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             worker,
             StoryMergeFailed.create({
                 storyId: "S3",
@@ -64,7 +64,7 @@ describe("PlannerAwarenessRunner", () => {
                 runId: "run-1",
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             worker,
             WorkBlocked.create({
                 runId: "run-1",
@@ -76,7 +76,7 @@ describe("PlannerAwarenessRunner", () => {
                 reason: "needs the validation foundation",
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             worker,
             RunVerificationCompleted.create({
                 runId: "run-1",
@@ -107,7 +107,7 @@ describe("PlannerAwarenessRunner", () => {
     it("stays silent on successes, suspensions, foreign runs and unfenced merges", () => {
         const { env, integrator, worker, delivered } = harness()
 
-        env.deliverSemanticEvent(
+        env.publish(
             worker,
             StoryResult.create({
                 storyId: "S1",
@@ -118,7 +118,7 @@ describe("PlannerAwarenessRunner", () => {
                 runId: "run-1",
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             worker,
             StoryResult.create({
                 storyId: "S9",
@@ -130,7 +130,7 @@ describe("PlannerAwarenessRunner", () => {
             }),
         )
         // An unfenced merge claim must not be believed.
-        env.deliverSemanticEvent(
+        env.publish(
             worker,
             StoryMerged.create({ storyId: "S1", mode: "worktree", runId: "run-1" }),
         )

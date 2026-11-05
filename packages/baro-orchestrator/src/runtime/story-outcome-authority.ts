@@ -1,4 +1,4 @@
-import type { Participant } from "./mozaik.js"
+import type { BusMember } from "./coordination.js"
 
 import type {
     StoryResultData,
@@ -26,11 +26,11 @@ export interface StoryResultAuthorityCorrelation
  * event payload and therefore forgeable.
  */
 export class StoryOutcomeAuthority {
-    private readonly spawnAuthorities = new Map<string, Participant>()
-    private readonly resultAuthorities = new Map<string, Participant>()
+    private readonly spawnAuthorities = new Map<string, BusMember>()
+    private readonly resultAuthorities = new Map<string, BusMember>()
     private readonly terminalAuthorities = new Map<
         string,
-        { result: Participant; nested: Participant | null }
+        { result: BusMember; nested: BusMember | null }
     >()
     private readonly activeTerminalKeys = new Map<
         string,
@@ -45,7 +45,7 @@ export class StoryOutcomeAuthority {
 
     registerSpawnAuthority(
         correlation: StorySpawnAuthorityCorrelation,
-        source: Participant,
+        source: BusMember,
     ): void {
         this.assertSpawnCorrelation(correlation)
         registerIdentity(
@@ -58,7 +58,7 @@ export class StoryOutcomeAuthority {
 
     registerResultAuthority(
         correlation: StoryResultAuthorityCorrelation,
-        source: Participant,
+        source: BusMember,
     ): void {
         this.assertResultCorrelation(correlation)
         const key = resultKey(correlation)
@@ -108,7 +108,7 @@ export class StoryOutcomeAuthority {
      */
     registerTerminalAuthority(
         correlation: StoryResultAuthorityCorrelation,
-        source: Participant,
+        source: BusMember,
     ): void {
         this.assertResultCorrelation(correlation)
         const key = resultKey(correlation)
@@ -122,7 +122,7 @@ export class StoryOutcomeAuthority {
 
     /** Authenticate a native terminal event without trusting its agentId. */
     matchesTerminalTurnSource(
-        source: Participant,
+        source: BusMember,
         storyId: string,
     ): boolean {
         return this.terminalCorrelationForSource(source, storyId) !== null
@@ -135,7 +135,7 @@ export class StoryOutcomeAuthority {
      * never be finalized for its silent successor.
      */
     matchesNestedTerminalTurnSource(
-        source: Participant,
+        source: BusMember,
         correlation: StoryResultAuthorityCorrelation,
     ): boolean {
         if (
@@ -153,7 +153,7 @@ export class StoryOutcomeAuthority {
 
     /** Resolve the exact active lease generation for an authenticated terminal source. */
     terminalCorrelationForSource(
-        source: Participant,
+        source: BusMember,
         storyId: string,
     ): StoryResultAuthorityCorrelation | null {
         if (!storyId) return null
@@ -174,7 +174,7 @@ export class StoryOutcomeAuthority {
 
     /** Authenticate a StoryFactory against the exact lease it accepted. */
     matchesSpawnAuthority(
-        source: Participant,
+        source: BusMember,
         correlation: StorySpawnAuthorityCorrelation,
     ): boolean {
         if (
@@ -186,7 +186,7 @@ export class StoryOutcomeAuthority {
     }
 
     matchesSpawnFailure(
-        source: Participant,
+        source: BusMember,
         failure: StorySpawnFailedData,
     ): boolean {
         if (
@@ -201,7 +201,7 @@ export class StoryOutcomeAuthority {
         })) === source
     }
 
-    matchesResult(source: Participant, result: StoryResultData): boolean {
+    matchesResult(source: BusMember, result: StoryResultData): boolean {
         if (
             result.runId !== this.runId ||
             !result.storyId ||
@@ -222,7 +222,7 @@ export class StoryOutcomeAuthority {
      * this instead of trusting the forgeable `agentId` carried by a source.
      */
     matchesResultAuthority(
-        source: Participant,
+        source: BusMember,
         correlation: StoryResultAuthorityCorrelation,
     ): boolean {
         if (
@@ -263,9 +263,9 @@ export class StoryOutcomeAuthority {
 }
 
 function registerIdentity(
-    registry: Map<string, Participant>,
+    registry: Map<string, BusMember>,
     key: string,
-    source: Participant,
+    source: BusMember,
     description: string,
 ): void {
     const current = registry.get(key)

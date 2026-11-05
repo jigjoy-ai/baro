@@ -5,11 +5,10 @@
  */
 
 import {
-    AgenticEnvironment,
-    BaseObserver,
     FunctionCallItem,
     FunctionCallOutputItem,
 } from "../runtime/mozaik.js"
+import { BusMember, CoordinationBus } from "../runtime/coordination.js"
 import { AgentResult, AgentState, StoryResult } from "../semantic-events.js"
 import type { StorySpawnRequestData } from "../semantic-events.js"
 import { gateCommandWasKilled } from "../verification/continuous-gate-runner.js"
@@ -83,7 +82,7 @@ export interface ReverifiedCommitSpec {
  * the attempt's command evidence and a terminal turn describes the commit, so
  * a Critic can still reject it and send the story to ordinary recovery.
  */
-export class ReverifiedCommit extends BaseObserver {
+export class ReverifiedCommit extends BusMember {
     constructor(private readonly spec: ReverifiedCommitSpec) {
         super()
     }
@@ -92,12 +91,12 @@ export class ReverifiedCommit extends BaseObserver {
         return this.spec.storyId
     }
 
-    run(env: AgenticEnvironment): void {
+    run(env: CoordinationBus): void {
         const startedAt = Date.now()
         const { storyId, head, gate } = this.spec
         const short = head.slice(0, 12)
         // "attempt " starts a fresh evidence window in the Critic's collector.
-        env.deliverSemanticEvent(
+        env.publish(
             this,
             AgentState.create({
                 agentId: storyId,
@@ -108,7 +107,7 @@ export class ReverifiedCommit extends BaseObserver {
         // One call: the evidence collector marks a command unverifiable when
         // another shell call lands while its fingerprint is being captured.
         const callId = `reverify:${this.spec.leaseId ?? storyId}:${head}`
-        env.deliverFunctionCall(
+        env.publishFunctionCall(
             this,
             FunctionCallItem.rehydrate({
                 callId,
@@ -118,7 +117,7 @@ export class ReverifiedCommit extends BaseObserver {
                 }),
             }),
         )
-        env.deliverFunctionCallOutput(
+        env.publishFunctionCallOutput(
             this,
             FunctionCallOutputItem.create(
                 callId,
@@ -126,7 +125,7 @@ export class ReverifiedCommit extends BaseObserver {
             ),
         )
         const durationMs = Date.now() - startedAt
-        env.deliverSemanticEvent(
+        env.publish(
             this,
             AgentResult.create({
                 agentId: storyId,
@@ -146,7 +145,7 @@ export class ReverifiedCommit extends BaseObserver {
                 durationMs,
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             this,
             AgentState.create({
                 agentId: storyId,
@@ -154,7 +153,7 @@ export class ReverifiedCommit extends BaseObserver {
                 detail: `re-verified committed ${short}`,
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             this,
             StoryResult.create({
                 storyId,
@@ -184,7 +183,7 @@ export class ReverifiedCommitExecutor implements StoryExecutor {
         req: StorySpawnRequestData,
         _route: unknown,
         _cwd: string,
-        env: AgenticEnvironment,
+        env: CoordinationBus,
         opts: StoryExecOpts,
     ): StoryExecution {
         const participant = new ReverifiedCommit({

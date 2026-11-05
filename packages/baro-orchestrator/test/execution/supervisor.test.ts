@@ -23,7 +23,7 @@ function feed(sup: Supervisor, id: string, name: string, args = "{}") {
 }
 
 function interventions(env: CapturedEnvironment): StoryInterventionData[] {
-    return env.events.filter(StoryIntervention.is).map((e) => e.data)
+    return env.events.filter(StoryIntervention.is).map((e) => e.payload)
 }
 
 function supervised(opts: SupervisorOptions = {}): { sup: Supervisor; env: CapturedEnvironment } {

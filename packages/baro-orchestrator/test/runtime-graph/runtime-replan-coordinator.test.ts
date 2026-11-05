@@ -41,7 +41,7 @@ describe("RuntimeReplanCoordinator", () => {
         assert.ok(RuntimeReplanApplied.is(replay.event))
         assert.equal(replay.applied, undefined)
         assert.notEqual(replay.event, first.event)
-        assert.deepEqual(replay.event.data, first.event.data)
+        assert.deepEqual(replay.event.payload, first.event.payload)
         assert.equal(coordinator.graphVersion, 2)
         assert.equal(writes.length, 1)
 
@@ -60,8 +60,8 @@ describe("RuntimeReplanCoordinator", () => {
         )
         assert.ok(RuntimeReplanApplied.is(oldReplay.event))
         if (RuntimeReplanApplied.is(oldReplay.event)) {
-            assert.equal(oldReplay.event.data.graphVersion, 2)
-            assert.equal(oldReplay.event.data.currentGraphVersion, 3)
+            assert.equal(oldReplay.event.payload.graphVersion, 2)
+            assert.equal(oldReplay.event.payload.currentGraphVersion, 3)
         }
         assert.equal(writes.length, 2)
 
@@ -71,8 +71,8 @@ describe("RuntimeReplanCoordinator", () => {
         )
         assert.ok(RuntimeReplanRejected.is(conflict.event))
         if (RuntimeReplanRejected.is(conflict.event)) {
-            assert.equal(conflict.event.data.code, "proposal_id_conflict")
-            assert.equal(conflict.event.data.currentGraphVersion, 3)
+            assert.equal(conflict.event.payload.code, "proposal_id_conflict")
+            assert.equal(conflict.event.payload.currentGraphVersion, 3)
         }
         assert.equal(writes.length, 2)
         assert.deepEqual(writes[1]?.runtimeGraph, {
@@ -84,13 +84,13 @@ describe("RuntimeReplanCoordinator", () => {
                 {
                     fingerprint:
                         writes[1]!.runtimeGraph!.appliedDecisions[0]!.fingerprint,
-                    applied: first.event.data,
+                    applied: first.event.payload,
                     origin: "worker",
                 },
                 {
                     fingerprint:
                         writes[1]!.runtimeGraph!.appliedDecisions[1]!.fingerprint,
-                    applied: second.event.data,
+                    applied: second.event.payload,
                     origin: "worker",
                 },
             ],
@@ -125,8 +125,8 @@ describe("RuntimeReplanCoordinator", () => {
         const replay = restarted.decide(proposal, decisionState(durable))
         assert.ok(RuntimeReplanApplied.is(replay.event))
         assert.equal(replay.applied, undefined)
-        assert.equal(replay.event.data.graphVersion, 2)
-        assert.equal(replay.event.data.currentGraphVersion, 2)
+        assert.equal(replay.event.payload.graphVersion, 2)
+        assert.equal(replay.event.payload.currentGraphVersion, 2)
         assert.equal(writes, 1)
 
         const nextRun = createCoordinator("run-2", 1)
@@ -243,7 +243,7 @@ describe("RuntimeReplanCoordinator", () => {
         })
         assert.ok(RuntimeReplanRejected.is(worker.event))
         if (RuntimeReplanRejected.is(worker.event)) {
-            assert.equal(worker.event.data.code, "adaptation_budget_exhausted")
+            assert.equal(worker.event.payload.code, "adaptation_budget_exhausted")
         }
 
         const policy = coordinator.decide(
@@ -313,7 +313,7 @@ describe("RuntimeReplanCoordinator", () => {
             )
             assert.ok(RuntimeReplanRejected.is(outcome.event))
             if (RuntimeReplanRejected.is(outcome.event)) {
-                assert.equal(outcome.event.data.code, "stale_graph_version")
+                assert.equal(outcome.event.payload.code, "stale_graph_version")
             }
         }
     })
@@ -334,9 +334,9 @@ describe("RuntimeReplanCoordinator", () => {
         const outcome = coordinator.decide(addProposal(), decisionState())
         assert.ok(RuntimeReplanRejected.is(outcome.event))
         if (RuntimeReplanRejected.is(outcome.event)) {
-            assert.equal(outcome.event.data.code, "persistence_failed")
-            assert.match(outcome.event.data.reason, /disk full/)
-            assert.equal(outcome.event.data.currentGraphVersion, 1)
+            assert.equal(outcome.event.payload.code, "persistence_failed")
+            assert.match(outcome.event.payload.reason, /disk full/)
+            assert.equal(outcome.event.payload.currentGraphVersion, 1)
         }
         assert.equal(outcome.applied, undefined)
         assert.equal(coordinator.graphVersion, 1)
@@ -364,7 +364,7 @@ describe("RuntimeReplanCoordinator", () => {
         )
         assert.ok(RuntimeReplanRejected.is(outcome.event))
         if (RuntimeReplanRejected.is(outcome.event)) {
-            assert.equal(outcome.event.data.code, "stale_graph_version")
+            assert.equal(outcome.event.payload.code, "stale_graph_version")
         }
 
         outcome = coordinator.decide(
@@ -373,7 +373,7 @@ describe("RuntimeReplanCoordinator", () => {
         )
         assert.ok(RuntimeReplanRejected.is(outcome.event))
         if (RuntimeReplanRejected.is(outcome.event)) {
-            assert.equal(outcome.event.data.code, "inactive_source")
+            assert.equal(outcome.event.payload.code, "inactive_source")
         }
 
         outcome = coordinator.decide(
@@ -386,7 +386,7 @@ describe("RuntimeReplanCoordinator", () => {
         )
         assert.ok(RuntimeReplanRejected.is(outcome.event))
         if (RuntimeReplanRejected.is(outcome.event)) {
-            assert.equal(outcome.event.data.code, "invalid_proposal")
+            assert.equal(outcome.event.payload.code, "invalid_proposal")
         }
         assert.equal(coordinator.graphVersion, 1)
     })
@@ -566,8 +566,8 @@ describe("RuntimeReplanCoordinator", () => {
         const rejected = coordinator.decide(oversized, decisionState())
         assert.ok(RuntimeReplanRejected.is(rejected.event))
         if (RuntimeReplanRejected.is(rejected.event)) {
-            assert.equal(rejected.event.data.code, "prompt_projection_overflow")
-            assert.equal(rejected.event.data.currentGraphVersion, 1)
+            assert.equal(rejected.event.payload.code, "prompt_projection_overflow")
+            assert.equal(rejected.event.payload.currentGraphVersion, 1)
         }
         assert.equal(coordinator.graphVersion, 1)
         assert.equal(writes.length, 0)
