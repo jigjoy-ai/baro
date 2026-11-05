@@ -1,6 +1,6 @@
 /**
  * SurgeonOpenAI — sibling of `Surgeon` that runs the replan-reasoning
- * call through Mozaik 3.9's native OpenAI inference runner instead of
+ * call through Baro's Mozaik-native OpenAI inference runtime instead of
  * shelling out to `claude --print`.
  *
  * Same bus contract:
@@ -18,16 +18,13 @@
  */
 
 import {
-    Gpt54,
-    Gpt54Mini,
-    Gpt54Nano,
-    Gpt55,
     ModelContext,
     SemanticEvent,
     SystemMessageItem,
     UserMessageItem,
-    type GenerativeModel,
     type TokenUsage, toWire } from "../../runtime/mozaik.js"
+import { pickInferenceModel as pickModel } from "../mozaik/pick-model.js"
+import type { InferenceModel } from "./runtime.js"
 import { BusMember } from "../../runtime/coordination.js"
 
 import type { GatewayBillingCoordinator } from "../../telemetry/billing/index.js"
@@ -105,28 +102,11 @@ interface SurgeonOpenAITelemetry {
     cost: ModelCostMetrics
 }
 
-function pickModel(name: string): GenerativeModel {
-    switch (name) {
-        case "gpt-5.5":
-            return new Gpt55()
-        case "gpt-5.4":
-            return new Gpt54()
-        case "gpt-5.4-mini":
-            return new Gpt54Mini()
-        case "gpt-5.4-nano":
-            return new Gpt54Nano()
-        default:
-            process.stderr.write(
-                `[pickModel] Using model "${name}" as-is with the OpenAI API.\n`,
-            )
-            return new GenericOpenAIModel(name)
-    }
-}
 
 export class SurgeonOpenAI extends BusMember {
     private readonly opts: Required<Pick<SurgeonOpenAIOptions, "maxReplans" | "model">> &
         SurgeonOpenAIOptions
-    private readonly model: GenerativeModel
+    private readonly model: InferenceModel
     private readonly billingCoordinator: GatewayBillingCoordinator | null
 
     private replansEmitted = 0

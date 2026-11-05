@@ -91,8 +91,8 @@ describe("AttemptRecallRunner on the bus", () => {
         const delivered: Array<{ recipientId: string; text: string }> = []
         const real = env.publish.bind(env)
         env.publish = (source, event) => {
-            const data = (event as { data?: { recipientId?: string; text?: string } })
-                .data
+            const data = (event as { payload?: { recipientId?: string; text?: string } })
+                .payload
             if (data?.recipientId && data.text) {
                 delivered.push({ recipientId: data.recipientId, text: data.text })
             }

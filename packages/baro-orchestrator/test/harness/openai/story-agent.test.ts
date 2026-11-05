@@ -345,7 +345,7 @@ describe("OpenAIStoryAgent", () => {
             assert.notEqual(second.payload.terminalId, first.payload.terminalId)
             assert.equal(contexts.length, 2)
             assert.equal(contexts[1], contexts[0])
-            const continuedContext = JSON.stringify(contexts[1]!.toJSON())
+            const continuedContext = JSON.stringify(toWire(contexts[1]!))
             assert.match(continuedContext, /candidate one/)
             assert.match(continuedContext, /authoritative review rejected/i)
             assert.match(continuedContext, /the regression test still fails/)
@@ -903,7 +903,7 @@ describe("OpenAIStoryAgent", () => {
             assert.equal(existsSync(join(dir, "last-explore.txt")), true)
             assert.equal(existsSync(join(dir, "must-not-exist.txt")), false)
             assert.match(
-                JSON.stringify(contexts[2]!.toJSON()),
+                JSON.stringify(toWire(contexts[2]!)),
                 /tool-execution budget.*closed/i,
             )
             assert.deepEqual(
@@ -920,7 +920,7 @@ describe("OpenAIStoryAgent", () => {
                 },
             )
             assert.match(
-                JSON.stringify(contexts[3]!.toJSON()),
+                JSON.stringify(toWire(contexts[3]!)),
                 /previous tool call was refused/i,
             )
         })
@@ -1012,7 +1012,7 @@ describe("OpenAIStoryAgent", () => {
             const outcome = await agent.run(env)
 
             assert.equal(outcome.success, true)
-            const round2 = JSON.stringify(contexts[1]!.toJSON())
+            const round2 = JSON.stringify(toWire(contexts[1]!))
             assert.match(round2, /RULE UPDATE \[gate:write-surface\]/)
             assert.match(round2, /graphVersion 2/)
             assert.match(round2, /src\/shared\.ts → S9/)
@@ -1022,7 +1022,7 @@ describe("OpenAIStoryAgent", () => {
             )
             assert.equal(existsSync(join(dir, "src/shared.ts")), false)
             assert.equal(existsSync(join(dir, "src/one.ts")), true)
-            const round3 = JSON.stringify(contexts[2]!.toJSON())
+            const round3 = JSON.stringify(toWire(contexts[2]!))
             assert.doesNotMatch(round3, /graphVersion 3/)
             const ruleEchoes = env.events
                 .filter(AgentUserMessage.is)
@@ -1091,7 +1091,7 @@ describe("OpenAIStoryAgent", () => {
 
             assert.equal(outcome.success, true)
             assert.match(
-                JSON.stringify(contexts[1]!.toJSON()),
+                JSON.stringify(toWire(contexts[1]!)),
                 /moduleNameMapper now resolves/,
             )
             assert.equal(

@@ -7,15 +7,12 @@
 
 import {
     FunctionCallOutputItem,
-    Gpt54,
-    Gpt54Mini,
-    Gpt54Nano,
-    Gpt55,
     ModelContext,
     SystemMessageItem,
     UserMessageItem,
-    type GenerativeModel,
     type Tool, toWire } from "../../runtime/mozaik.js"
+import { pickInferenceModel as pickModel } from "../../harness/mozaik/pick-model.js"
+import type { InferenceModel } from "../../harness/openai/runtime.js"
 
 import {
     createOpenAIModel,
@@ -91,28 +88,11 @@ export interface RunPlannerOpenAIOptions {
 }
 
 export interface PlannerOpenAITestRuntime {
-    model: GenerativeModel
+    model: InferenceModel
     tools: Tool[]
     inferRound: typeof runInferenceRound
 }
 
-function pickModel(name: string): GenerativeModel {
-    switch (name) {
-        case "gpt-5.5":
-            return new Gpt55()
-        case "gpt-5.4":
-            return new Gpt54()
-        case "gpt-5.4-mini":
-            return new Gpt54Mini()
-        case "gpt-5.4-nano":
-            return new Gpt54Nano()
-        default:
-            process.stderr.write(
-                `[pickModel] Using model "${name}" as-is with the OpenAI API.\n`,
-            )
-            return new GenericOpenAIModel(name)
-    }
-}
 
 /**
  * Complexity-route the planner. Focused runs use the cheap floor model even on
@@ -374,7 +354,7 @@ export async function runOpenAIIntake(
 
 export async function decideExecutionMode(
     opts: Pick<RunPlannerOpenAIOptions, "goal" | "quick" | "projectContext" | "decisionDocument" | "billingCoordinator">,
-    plannerModel: GenerativeModel,
+    plannerModel: InferenceModel,
     runtime: DecideExecutionModeRuntime = {},
 ): Promise<ModeContract> {
     if (opts.quick) {
@@ -438,12 +418,12 @@ export async function decideExecutionMode(
 export type OpenAIIntakeInvocationEvent =
     | Readonly<{
           status: "succeeded"
-          model: GenerativeModel
+          model: InferenceModel
           result: InferenceRound
       }>
     | Readonly<{
           status: "failed"
-          model: GenerativeModel
+          model: InferenceModel
           error: unknown
       }>
 
@@ -574,7 +554,7 @@ async function runToolSafely(tool: Tool, argsJson: string): Promise<string> {
     }
 }
 
-function setModelTools(model: GenerativeModel, tools: Tool[]): void {
+function setModelTools(model: InferenceModel, tools: Tool[]): void {
     const m = model as unknown as { setTools?: (t: Tool[]) => void }
     if (typeof m.setTools !== "function") {
         throw new Error(

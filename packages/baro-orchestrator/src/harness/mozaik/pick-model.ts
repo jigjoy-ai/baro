@@ -8,18 +8,16 @@
  */
 
 import {
-    Gpt54,
-    Gpt54Mini,
-    Gpt54Nano,
-    Gpt55,
-    type GenerativeModel,
-} from "../../runtime/mozaik.js"
-import { GenericOpenAIModel, type OpenAIConnection } from "../openai/runtime.js"
+    GenericOpenAIModel,
+    nativeOpenAIModel,
+    type InferenceModel,
+    type OpenAIConnection,
+} from "../openai/runtime.js"
 
 export function pickInferenceModel(
     name: string,
     connection?: OpenAIConnection,
-): GenerativeModel {
+): InferenceModel {
     if (!name) {
         // Reaching here nameless means a phase landed on the native lane by
         // fallback — a backend with no interactive lane adapter (#121). Fail
@@ -29,19 +27,10 @@ export function pickInferenceModel(
         )
     }
     if (connection?.baseURL) return new GenericOpenAIModel(name, connection)
-    switch (name) {
-        case "gpt-5.5":
-            return new Gpt55()
-        case "gpt-5.4":
-            return new Gpt54()
-        case "gpt-5.4-mini":
-            return new Gpt54Mini()
-        case "gpt-5.4-nano":
-            return new Gpt54Nano()
-        default:
-            process.stderr.write(
-                `[pick-model] Using model "${name}" as-is with the OpenAI API.\n`,
-            )
-            return new GenericOpenAIModel(name)
-    }
+    const native = nativeOpenAIModel(name)
+    if (native) return native
+    process.stderr.write(
+        `[pick-model] Using model "${name}" as-is with the OpenAI API.\n`,
+    )
+    return new GenericOpenAIModel(name)
 }

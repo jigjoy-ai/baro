@@ -1,6 +1,6 @@
 # Core participants cheat sheet
 
-All orchestration paths share one Mozaik `AgenticEnvironment`. Participants
+All orchestration paths share one `CoordinationBus` (Baro's, on Mozaik 4). Participants
 observe typed semantic events and publish new events back to the same bus. The
 canonical wire shapes live in [semantic-events.ts](../semantic-events.ts).
 Detailed authority, retry, runtime-DAG, and cost-learning contracts are in

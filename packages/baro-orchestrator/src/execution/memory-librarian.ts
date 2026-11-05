@@ -8,7 +8,9 @@
 import {
     FunctionCallItem,
     FunctionCallOutputItem,
-    SemanticEvent, toWire } from "../runtime/mozaik.js"
+    SemanticEvent,
+    toWire,
+} from "../runtime/mozaik.js"
 import { BusMember } from "../runtime/coordination.js"
 
 import type { MemoryStore } from "@baro/memory"

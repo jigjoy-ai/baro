@@ -27,7 +27,7 @@ function harness() {
     const delivered: Array<{ recipientId: string; text: string }> = []
     const real = env.publish.bind(env)
     env.publish = (source, event) => {
-        const data = (event as { data?: unknown }).data as {
+        const data = (event as { payload?: unknown }).payload as {
             recipientId?: string
             text?: string
         }

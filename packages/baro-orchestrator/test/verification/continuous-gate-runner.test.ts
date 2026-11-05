@@ -15,8 +15,8 @@ const RED: GateCommandOutcome[] = [
 function harness(gates: () => Promise<readonly GateCommandOutcome[]>) {
     const delivered: Array<{ recipientId: string; text: string }> = []
     const environment = {
-        publish(_source: unknown, event: { data: unknown }) {
-            delivered.push(event.data as { recipientId: string; text: string })
+        publish(_source: unknown, event: { payload: unknown }) {
+            delivered.push(event.payload as { recipientId: string; text: string })
         },
     }
     let runs = 0
@@ -47,8 +47,8 @@ function harness(gates: () => Promise<readonly GateCommandOutcome[]>) {
 function harnessWithPlan(plan: VerifyPlan) {
     const delivered: Array<{ recipientId: string; text: string }> = []
     const environment = {
-        publish(_source: unknown, event: { data: unknown }) {
-            delivered.push(event.data as { recipientId: string; text: string })
+        publish(_source: unknown, event: { payload: unknown }) {
+            delivered.push(event.payload as { recipientId: string; text: string })
         },
     }
     const runner = new ContinuousGateRunner({

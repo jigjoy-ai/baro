@@ -5,6 +5,7 @@ import {
     FunctionCallItem,
     FunctionCallOutputItem,
     ModelMessageItem,
+    toWire,
 } from "../../../src/runtime/mozaik.js"
 
 import { mapOpenCodeEvent } from "../../../src/harness/opencode/stream-mapper.js"
@@ -23,7 +24,7 @@ function map(event: Record<string, unknown>) {
 }
 
 function serialized(item: unknown): Record<string, unknown> {
-    return JSON.parse(JSON.stringify(item)) as Record<string, unknown>
+    return JSON.parse(JSON.stringify(toWire(item as Parameters<typeof toWire>[0]))) as Record<string, unknown>
 }
 
 function contentText(item: unknown): string {
@@ -64,9 +65,9 @@ describe("mapOpenCodeEvent", () => {
         const system = firstSystem(result.items)
 
         assert.equal(result.sessionId, "opencode-session")
-        assert.equal(system.data.agentId, agentId)
-        assert.equal(system.data.subtype, "step_start")
-        assert.deepEqual(system.data.raw, event)
+        assert.equal(system.payload.agentId, agentId)
+        assert.equal(system.payload.subtype, "step_start")
+        assert.deepEqual(system.payload.raw, event)
     })
 
     it("maps text to ModelMessageItem and OpenCodeStepEvent", () => {
@@ -244,9 +245,9 @@ describe("mapOpenCodeEvent", () => {
 
         const result = map(event)
         const system = firstSystem(result.items)
-        const raw = system.data.raw as typeof event
+        const raw = system.payload.raw as typeof event
 
-        assert.equal(system.data.subtype, "step_finish")
+        assert.equal(system.payload.subtype, "step_finish")
         assert.equal(raw.part.tokens.total, 100)
         assert.equal(raw.part.cost, 0.001)
     })

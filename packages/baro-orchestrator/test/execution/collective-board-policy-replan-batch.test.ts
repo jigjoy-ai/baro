@@ -1251,7 +1251,7 @@ describe("CollectiveBoard policy replan batching", () => {
                 env.events.filter(
                     (event) =>
                         event.type === "level_completed" &&
-                        (event as { data?: { ordinal?: number } }).data?.ordinal === 2,
+                        (event as { payload?: { ordinal?: number } }).payload?.ordinal === 2,
                 ).length,
                 0,
             )

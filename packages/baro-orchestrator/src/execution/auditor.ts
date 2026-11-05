@@ -13,14 +13,13 @@ import {
     ModelMessageItem,
     ReasoningItem,
     SemanticEvent,
+    toWire,
 } from "../runtime/mozaik.js"
 import { BusMember } from "../runtime/coordination.js"
 
 import { ClaudeStreamChunk } from "../semantic-events.js"
 
-// Auditor never calls `.toJSON()` itself — `JSON.stringify` invokes it
-// per-item where it exists and falls back to enumerable properties for
-// `SemanticEvent`.
+// Entries keep Mozaik 3's wire shape (`toWire`): replay tooling reads `{ type, data }` events.
 type AuditableItem =
     | SemanticEvent<string, unknown>
     | ModelMessageItem
@@ -106,7 +105,7 @@ export class Auditor extends BusMember {
         const entry = {
             ts: new Date().toISOString(),
             source: this.sourceLabel(source),
-            item,
+            item: toWire(item),
         }
         try {
             appendFileSync(this.path, this.serialize(entry) + "\n", {

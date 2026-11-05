@@ -5,10 +5,10 @@ import {
     FunctionCallItem,
     ModelMessageItem,
     type ContextItem,
-    type GenerativeModel,
     type ModelContext,
     type SemanticEvent,
 } from "../../src/runtime/mozaik.js"
+import type { InferenceModel } from "../../src/harness/openai/runtime.js"
 import { BusMember, CoordinationBus } from "../../src/runtime/coordination.js"
 import {
     PlanFragmentAdmitted,
@@ -89,7 +89,7 @@ class ScriptedPlanner extends MozaikModelParticipant {
             model: {
                 specification: { name: "scripted" },
                 setTools: () => {},
-            } as unknown as GenerativeModel,
+            } as unknown as InferenceModel,
             systemPrompt: "scripted",
         })
     }

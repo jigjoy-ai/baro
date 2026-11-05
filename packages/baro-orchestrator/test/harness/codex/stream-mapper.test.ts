@@ -5,6 +5,7 @@ import {
     FunctionCallItem,
     FunctionCallOutputItem,
     ModelMessageItem,
+    toWire,
 } from "../../../src/runtime/mozaik.js"
 
 import { mapCodexEvent } from "../../../src/harness/codex/stream-mapper.js"
@@ -24,7 +25,7 @@ function map(event: Record<string, unknown>) {
 }
 
 function json(item: unknown): any {
-    return JSON.parse(JSON.stringify(item))
+    return JSON.parse(JSON.stringify(toWire(item as Parameters<typeof toWire>[0])))
 }
 
 function itemEvents(items: unknown[]) {

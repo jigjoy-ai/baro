@@ -4,6 +4,7 @@ import {
     FunctionCallItem,
     FunctionCallOutputItem,
     ModelMessageItem,
+    toWire,
 } from "../../../src/runtime/mozaik.js"
 
 import { mapClaudeEvent } from "../../../src/harness/claude/stream-mapper.js"
@@ -25,7 +26,7 @@ function map(event: Record<string, unknown>) {
 }
 
 function json(item: unknown): any {
-    return JSON.parse(JSON.stringify(item))
+    return JSON.parse(JSON.stringify(toWire(item as Parameters<typeof toWire>[0])))
 }
 
 function assertModelMessage(item: unknown): ModelMessageItem {

@@ -18,20 +18,17 @@ import { appendFileSync, mkdirSync, writeFileSync } from "fs"
 import { join } from "path"
 
 import {
-    AgenticEnvironment,
-    BaseObserver,
     FunctionCallItem,
     FunctionCallOutputItem,
     ModelMessageItem,
-    Participant,
     ReasoningItem,
     SemanticEvent,
 } from "@mozaik-ai/core"
 
-import { CodexCliParticipant } from "@baro/orchestrator"
+import { BusMember, CodexCliParticipant, CoordinationBus, toWire } from "@baro/orchestrator"
 
 type Loggable =
-    | SemanticEvent<unknown>
+    | SemanticEvent<string, unknown>
     | ModelMessageItem
     | FunctionCallItem
     | FunctionCallOutputItem
@@ -89,14 +86,14 @@ function parseArgs(): ProbeArgs {
 function summarize(item: Loggable): string {
     if (item instanceof SemanticEvent) {
         const type = item.type
-        const data = item.data as Record<string, unknown>
+        const data = item.payload as Record<string, unknown>
         const hints: string[] = []
         if (typeof data.subtype === "string") hints.push(`subtype=${data.subtype}`)
         if (typeof data.phase === "string") hints.push(`phase=${data.phase}`)
         if (typeof data.itemType === "string") hints.push(`item=${data.itemType}`)
         return `[${type}] ${hints.join(" ")}`
     }
-    const json = (item as { toJSON: () => Record<string, unknown> }).toJSON()
+    const json = toWire(item) as Record<string, unknown>
     const type = typeof json.type === "string" ? json.type : "item"
     const text =
         typeof json.text === "string"
@@ -109,44 +106,44 @@ function summarize(item: Loggable): string {
     return `[${type}] ${text}`
 }
 
-class LoggingObserver extends BaseObserver {
+class LoggingObserver extends BusMember {
     constructor(private readonly logPath: string) {
         super()
     }
 
-    private write(source: Participant, item: Loggable): void {
+    private write(source: BusMember, item: Loggable): void {
         const entry = {
             ts: new Date().toISOString(),
             source: source.constructor.name,
-            item: (item as { toJSON: () => Record<string, unknown> }).toJSON(),
+            item: item instanceof SemanticEvent ? item : toWire(item),
         }
         appendFileSync(this.logPath, JSON.stringify(entry) + "\n")
         process.stdout.write(`${entry.ts.slice(11, 23)}  ${summarize(item)}\n`)
     }
 
     override async onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): Promise<void> {
         this.write(source, event)
     }
 
     override async onExternalModelMessage(
-        source: Participant,
+        source: BusMember,
         item: ModelMessageItem,
     ): Promise<void> {
         this.write(source, item)
     }
 
     override async onExternalFunctionCall(
-        source: Participant,
+        source: BusMember,
         item: FunctionCallItem,
     ): Promise<void> {
         this.write(source, item)
     }
 
     override async onExternalFunctionCallOutput(
-        source: Participant,
+        source: BusMember,
         item: FunctionCallOutputItem,
     ): Promise<void> {
         this.write(source, item)
@@ -164,7 +161,7 @@ async function main(): Promise<void> {
     process.stdout.write(`probe-codex: cwd ${cwd}\n`)
     process.stdout.write(`probe-codex: prompt ${prompt}\n\n`)
 
-    const env = new AgenticEnvironment()
+    const env = new CoordinationBus()
     const observer = new LoggingObserver(logPath)
     observer.join(env)
 

@@ -60,7 +60,7 @@ export class Operator extends BusMember {
     }
 
     // Operator is push-only: it emits in response to external commands,
-    // never reacts to bus events. Default BaseObserver no-op handlers
+    // never reacts to bus events. Default BusMember no-op handlers
     // cover everything.
 
     /** Translate an external command into bus action / hook callback. */

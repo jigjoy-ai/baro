@@ -23,6 +23,7 @@ export {
     RuntimeState,
     SemanticEvent,
     SituationSpecification,
+    supportedModels,
     SystemMessageItem,
     TokenUsage,
     UserMessageItem,
@@ -35,6 +36,8 @@ export const UNSTAMPED_PRODUCER = ""
 
 import {
     ContextItem as MozaikContextItem,
+    SemanticEvent as MozaikSemanticEvent,
+    ModelContext as MozaikModelContext,
     DeveloperMessageItem,
     FunctionCallItem as MozaikFunctionCallItem,
     FunctionCallOutputItem as MozaikFunctionCallOutputItem,
@@ -46,8 +49,13 @@ import {
 
 const text = (content: { type: string; text: string }) => [{ type: content.type, text: content.text }]
 
-/** The Responses-API wire shape of a context item, as Mozaik 3's `toJSON` produced it (logs and transcripts keep it). */
-export function toWire(item: MozaikContextItem): unknown {
+/**
+ * The wire shape Mozaik 3's `toJSON` produced: Responses-API items (a context is its items), events as `{ type, data }`.
+ * Audit logs and their readers (replay tooling, kaleidoskop) keep this shape.
+ */
+export function toWire(item: MozaikContextItem | MozaikSemanticEvent<string, unknown> | MozaikModelContext): unknown {
+    if (item instanceof MozaikSemanticEvent) return { type: item.type, data: item.payload }
+    if (item instanceof MozaikModelContext) return item.getItems().map(toWire)
     if (
         item instanceof MozaikUserMessageItem ||
         item instanceof MozaikSystemMessageItem ||

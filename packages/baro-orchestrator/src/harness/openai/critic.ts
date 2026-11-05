@@ -1,6 +1,6 @@
 /**
  * CriticOpenAI — sibling of `Critic` that runs the verdict evaluation
- * through Mozaik 3.9's native OpenAI inference runner instead of
+ * through Baro's Mozaik-native OpenAI inference runtime instead of
  * shelling out to `claude --print`.
  *
  * Same bus contract:
@@ -19,16 +19,13 @@
  */
 
 import {
-    Gpt54,
-    Gpt54Mini,
-    Gpt54Nano,
-    Gpt55,
     ModelContext,
     SemanticEvent,
     SystemMessageItem,
     UserMessageItem,
-    type GenerativeModel,
     type TokenUsage, toWire } from "../../runtime/mozaik.js"
+import { pickInferenceModel as pickModel } from "../mozaik/pick-model.js"
+import type { InferenceModel } from "./runtime.js"
 import { BusMember } from "../../runtime/coordination.js"
 
 import type { GatewayBillingCoordinator } from "../../telemetry/billing/index.js"
@@ -79,8 +76,8 @@ export interface CriticOpenAIOptions extends TerminalTurnAuthorityOptions {
     /** Max corrective AgentTargetedMessageItem-s per agent. Default: 2. */
     maxEmissionsPerAgent?: number
     /**
-     * OpenAI model name. One of the names Mozaik 3.9 ships:
-     * `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.4-nano`.
+     * OpenAI model name: one in Mozaik's catalogue (`gpt-5.5`, `gpt-5.4`,
+     * `gpt-5.4-mini`, ...) or any name the endpoint serves.
      * Default: `gpt-5.4-mini` (cheap; Critic runs per turn per agent).
      */
     model?: string
@@ -111,24 +108,6 @@ interface CriticOpenAITelemetry {
     cost: ModelCostMetrics
 }
 
-/** Instantiate the Mozaik model wrapper for a given OpenAI model name. */
-function pickModel(name: string): GenerativeModel {
-    switch (name) {
-        case "gpt-5.5":
-            return new Gpt55()
-        case "gpt-5.4":
-            return new Gpt54()
-        case "gpt-5.4-mini":
-            return new Gpt54Mini()
-        case "gpt-5.4-nano":
-            return new Gpt54Nano()
-        default:
-            process.stderr.write(
-                `[pickModel] Using model "${name}" as-is with the OpenAI API.\n`,
-            )
-            return new GenericOpenAIModel(name)
-    }
-}
 
 export class CriticOpenAI extends BusMember {
     private readonly opts: Required<
@@ -145,7 +124,7 @@ export class CriticOpenAI extends BusMember {
         evidence?: CriticEvidenceSource
     }
     private readonly terminalAuthorities: TerminalTurnAuthorityOptions
-    private readonly model: GenerativeModel
+    private readonly model: InferenceModel
     private readonly billingCoordinator: GatewayBillingCoordinator | null
 
     private readonly emissions = new Map<string, number>()

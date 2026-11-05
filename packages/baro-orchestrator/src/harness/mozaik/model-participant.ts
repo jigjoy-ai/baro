@@ -20,10 +20,10 @@ import {
     SystemMessageItem,
     UserMessageItem,
     type ContextItem,
-    type GenerativeModel,
     type SemanticEvent,
     type Tool,
     type TokenUsage, toWire } from "../../runtime/mozaik.js"
+import type { InferenceModel } from "../openai/runtime.js"
 import { BusMember, type CoordinationBus } from "../../runtime/coordination.js"
 import {
     AgentResult,
@@ -64,7 +64,7 @@ export interface MozaikSessionSummary {
 
 export interface MozaikModelParticipantOptions {
     readonly agentId: string
-    readonly model: GenerativeModel
+    readonly model: InferenceModel
     readonly systemPrompt: string
     readonly tools?: readonly Tool[]
     /**
@@ -135,7 +135,7 @@ const TURN_BUDGET_SPENT =
  * stopwatch. A CLI lane earns that treatment by streaming tokens — every one
  * is proof of life, so the idle watchdog can tell working from hung.
  *
- * This lane cannot, yet. Mozaik 3.12 does expose `stream()`, but its
+ * This lane cannot, yet. Mozaik does expose `stream()`, but its
  * OpenAI-compatible adapter yields raw `chat.completion.chunk` events without
  * assembling them into items, and requests no `stream_options.include_usage`
  * — so a streamed round arrives with no token usage at all. Cache-accurate
@@ -575,7 +575,7 @@ function messageOf(error: unknown): string {
     return (error as Error)?.message ?? String(error)
 }
 
-function setModelTools(model: GenerativeModel, tools: Tool[]): void {
+function setModelTools(model: InferenceModel, tools: Tool[]): void {
     if (tools.length === 0) return
     const withTools = model as unknown as { setTools?: (t: Tool[]) => void }
     if (typeof withTools.setTools !== "function") {

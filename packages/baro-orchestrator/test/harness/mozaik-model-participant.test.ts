@@ -6,9 +6,9 @@ import {
     ModelContext,
     ModelMessageItem,
     type ContextItem,
-    type GenerativeModel,
     type Tool,
 } from "../../src/runtime/mozaik.js"
+import type { InferenceModel } from "../../src/harness/openai/runtime.js"
 import { BusMember } from "../../src/runtime/coordination.js"
 import { MozaikModelParticipant } from "../../src/harness/mozaik/model-participant.js"
 import {
@@ -19,11 +19,12 @@ import {
 import { joinWithCapture } from "./../execution/helpers.js"
 
 /** A model that never speaks — every round is stubbed by the test. */
-function silentModel(): GenerativeModel {
+function silentModel(): InferenceModel {
     return {
-        specification: { name: "test-model" },
+        specification: { name: "test-model", supportReasoningEffort: false },
         setTools: () => {},
-    } as unknown as GenerativeModel
+        getTools: () => [],
+    } as unknown as InferenceModel
 }
 
 function message(text: string): ModelMessageItem {

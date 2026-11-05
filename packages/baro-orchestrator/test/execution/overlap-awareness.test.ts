@@ -62,7 +62,7 @@ describe("OverlapAwarenessRunner closes Sentry's circuit", () => {
         const delivered: Array<{ recipientId: string; text: string }> = []
         const real = env.publish.bind(env)
         env.publish = (source, event) => {
-            const data = (event as { data?: { recipientId?: string } }).data
+            const data = (event as { payload?: { recipientId?: string } }).payload
             if (data?.recipientId && (event as { type?: string }).type === "agent_targeted_message") {
                 delivered.push(data as never)
             }

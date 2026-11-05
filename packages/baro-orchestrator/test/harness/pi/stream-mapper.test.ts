@@ -6,6 +6,7 @@ import {
     FunctionCallOutputItem,
     ModelMessageItem,
     SemanticEvent,
+    toWire,
 } from "../../../src/runtime/mozaik.js"
 
 import { mapPiEvent } from "../../../src/harness/pi/stream-mapper.js"
@@ -27,7 +28,7 @@ function map(event: Record<string, unknown>): ReturnType<typeof mapPiEvent> {
 }
 
 function json(item: unknown): Record<string, any> {
-    return JSON.parse(JSON.stringify(item)) as Record<string, any>
+    return JSON.parse(JSON.stringify(toWire(item as Parameters<typeof toWire>[0]))) as Record<string, any>
 }
 
 function semantic<T>(

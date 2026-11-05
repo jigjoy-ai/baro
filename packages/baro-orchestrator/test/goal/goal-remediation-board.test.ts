@@ -203,7 +203,7 @@ describe("goal remediation graph admission", () => {
                 source("context"),
                 WorkContextProvided.create({
                     runId,
-                    requestId: context.data.requestId,
+                    requestId: context.payload.requestId,
                     storyId: admission.payload.storyId,
                     context: null,
                 }),
@@ -219,11 +219,11 @@ describe("goal remediation graph admission", () => {
                 source("broker"),
                 WorkLeaseGranted.create({
                     runId,
-                    offerId: offer.data.offerId,
+                    offerId: offer.payload.offerId,
                     leaseId,
                     workerId: "remediation-worker",
-                    generation: offer.data.generation,
-                    request: offer.data.request,
+                    generation: offer.payload.generation,
+                    request: offer.payload.request,
                 }),
             )
             env.publish(
@@ -232,7 +232,7 @@ describe("goal remediation graph admission", () => {
                     runId,
                     storyId: admission.payload.storyId,
                     leaseId,
-                    generation: offer.data.generation,
+                    generation: offer.payload.generation,
                     success: true,
                     attempts: 1,
                     durationSecs: 1,
@@ -246,7 +246,7 @@ describe("goal remediation graph admission", () => {
                     evaluationId: `${admission.payload.storyId}:quality`,
                     storyId: admission.payload.storyId,
                     leaseId,
-                    generation: offer.data.generation,
+                    generation: offer.payload.generation,
                     status: "passed",
                     targetTurn: 1,
                     reason: "independent Critic passed the remediation",
@@ -311,7 +311,7 @@ describe("goal remediation graph admission", () => {
                 verifier,
                 RunVerificationCompleted.create({
                     runId,
-                    verificationId: secondVerification.data.verificationId,
+                    verificationId: secondVerification.payload.verificationId,
                     status: "passed",
                     commands: [{
                         command: "npm run test",
@@ -326,17 +326,17 @@ describe("goal remediation graph admission", () => {
                 (event) =>
                     GoalAggregateReviewRequested.is(event) &&
                     event.payload.basis.verificationId ===
-                        secondVerification.data.verificationId,
+                        secondVerification.payload.verificationId,
             )
             assert.deepEqual(
-                secondReview.data.basis.invariants.find(
+                secondReview.payload.basis.invariants.find(
                     ({ invariantId }) => invariantId === "G-A1",
                 )?.mappedStoryIds,
                 [admission.payload.storyId, "S2"].sort(),
             )
             env.publish(
                 reviewer,
-                aggregateReviewCompletion(secondReview.data, "passed"),
+                aggregateReviewCompletion(secondReview.payload, "passed"),
             )
             await waitFor(env.events, RunPushRequested.is)
             env.publish(
@@ -348,7 +348,7 @@ describe("goal remediation graph admission", () => {
             assert.equal(summary.verificationStatus, "passed")
             assert.notEqual(
                 firstVerification.payload.verificationId,
-                secondVerification.data.verificationId,
+                secondVerification.payload.verificationId,
             )
         })
     })
@@ -522,7 +522,7 @@ describe("goal remediation graph admission", () => {
                 source("context"),
                 WorkContextProvided.create({
                     runId,
-                    requestId: context.data.requestId,
+                    requestId: context.payload.requestId,
                     storyId: "S1",
                     context: null,
                 }),
@@ -538,11 +538,11 @@ describe("goal remediation graph admission", () => {
                 source("broker"),
                 WorkLeaseGranted.create({
                     runId,
-                    offerId: offer.data.offerId,
+                    offerId: offer.payload.offerId,
                     leaseId,
                     workerId: "worker-S1",
-                    generation: offer.data.generation,
-                    request: offer.data.request,
+                    generation: offer.payload.generation,
+                    request: offer.payload.request,
                 }),
             )
             env.publish(
@@ -551,7 +551,7 @@ describe("goal remediation graph admission", () => {
                     runId,
                     storyId: "S1",
                     leaseId,
-                    generation: offer.data.generation,
+                    generation: offer.payload.generation,
                     success: true,
                     attempts: 1,
                     durationSecs: 1,
@@ -923,7 +923,7 @@ describe("goal remediation graph admission", () => {
                 source("context"),
                 WorkContextProvided.create({
                     runId,
-                    requestId: contextRequest.data.requestId,
+                    requestId: contextRequest.payload.requestId,
                     storyId: "S1",
                     context: null,
                 }),
@@ -939,11 +939,11 @@ describe("goal remediation graph admission", () => {
                 source("broker"),
                 WorkLeaseGranted.create({
                     runId,
-                    offerId: offer.data.offerId,
+                    offerId: offer.payload.offerId,
                     leaseId,
                     workerId: "worker-S1",
-                    generation: offer.data.generation,
-                    request: offer.data.request,
+                    generation: offer.payload.generation,
+                    request: offer.payload.request,
                 }),
             )
             env.publish(
@@ -952,7 +952,7 @@ describe("goal remediation graph admission", () => {
                     runId,
                     storyId: "S1",
                     leaseId,
-                    generation: offer.data.generation,
+                    generation: offer.payload.generation,
                     success: true,
                     attempts: 1,
                     durationSecs: 1,

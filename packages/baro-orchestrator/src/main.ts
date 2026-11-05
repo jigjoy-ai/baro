@@ -1,5 +1,8 @@
 /** @baro/orchestrator — public entry point of the package. */
 
+export { BusMember, CoordinationBus } from "./runtime/coordination.js"
+export { toWire } from "./runtime/mozaik.js"
+
 export {
     AgentTargetedMessage,
     ConversationRequested,

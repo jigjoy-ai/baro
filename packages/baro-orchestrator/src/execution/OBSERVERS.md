@@ -5,8 +5,8 @@ in the orchestrator: passive bus listeners that watch bus traffic and
 (optionally) emit their own events back onto the bus. Cartographer is
 **not** covered here — it lives Rust-side under `crates/baro-tui/`.
 
-Every observer extends Mozaik's `BaseObserver`. They subscribe via
-`onExternalEvent(source, event: SemanticEvent<unknown>)` and gate per
+Every observer extends Baro's `BusMember` (`runtime/coordination.ts`). They subscribe via
+`onExternalEvent(source, event: SemanticEvent<string, unknown>)` and gate per
 event type with the `.is()` user-defined type guard from
 [../semantic-events.ts](../semantic-events.ts). Mozaik LLM-shape items
 (`FunctionCallItem`, `FunctionCallOutputItem`, `ModelMessageItem`,

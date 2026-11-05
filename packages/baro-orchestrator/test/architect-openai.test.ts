@@ -18,8 +18,7 @@ import {
     TokenUsage,
     type ContextItem,
     type ModelContext,
-    type Tool,
-} from "../src/runtime/mozaik.js"
+    type Tool, toWire } from "../src/runtime/mozaik.js"
 
 import {
     runArchitectOpenAI,
@@ -244,7 +243,7 @@ describe("ArchitectOpenAI bounded finalization", () => {
 
         assert.deepEqual(JSON.parse(result), outcome)
         assert.equal(resolvedModel, "glm-5.2")
-        const context = JSON.stringify(sequence.contexts[0]!.toJSON())
+        const context = JSON.stringify(toWire(sequence.contexts[0]!))
         assert.match(context, /DECISION PHASE — ADRs ONLY/u)
         assert.doesNotMatch(
             context,
@@ -431,7 +430,7 @@ describe("ArchitectOpenAI bounded finalization", () => {
 
         assert.deepEqual(JSON.parse(result), decisionOnly)
         assert.match(
-            JSON.stringify(sequence.contexts[1]!.toJSON()),
+            JSON.stringify(toWire(sequence.contexts[1]!)),
             /decision-only.*obligation marker/u,
         )
     })
@@ -465,7 +464,7 @@ describe("ArchitectOpenAI bounded finalization", () => {
 
         assert.deepEqual(JSON.parse(result), outcome)
         assert.doesNotMatch(
-            JSON.stringify(sequence.contexts[0]!.toJSON()),
+            JSON.stringify(toWire(sequence.contexts[0]!)),
             /output ONLY the markdown decision document/i,
         )
         assert.deepEqual(
@@ -521,7 +520,7 @@ describe("ArchitectOpenAI bounded finalization", () => {
 
         assert.equal(round, 2)
         assert.match(result, /ADR-001/)
-        const retried = JSON.stringify(contexts[1]!.toJSON())
+        const retried = JSON.stringify(toWire(contexts[1]!))
         assert.match(retried, /cut off at the output ceiling/)
         assert.match(retried, /SHORTER/)
         assert.doesNotMatch(
@@ -565,7 +564,7 @@ describe("ArchitectOpenAI bounded finalization", () => {
 
         assert.deepEqual(JSON.parse(result), withObligations)
         assert.match(
-            JSON.stringify(sequence.contexts[1]!.toJSON()),
+            JSON.stringify(toWire(sequence.contexts[1]!)),
             /requires a baro-obligations-v1 appendix/u,
         )
     })
@@ -611,7 +610,7 @@ describe("ArchitectOpenAI bounded finalization", () => {
 
         assert.deepEqual(JSON.parse(result), corrected)
         assert.match(
-            JSON.stringify(sequence.contexts[1]!.toJSON()),
+            JSON.stringify(toWire(sequence.contexts[1]!)),
             /unknown GoalContract invariant.*G-A2/u,
         )
     })
@@ -883,11 +882,11 @@ describe("ArchitectOpenAI bounded finalization", () => {
         assert.equal(invokes, 2)
         assert.deepEqual(sequence.toolCounts, [1, 1, 1, 1])
         assert.match(
-            JSON.stringify(sequence.contexts[3]!.toJSON()),
+            JSON.stringify(toWire(sequence.contexts[3]!)),
             /this call was not executed/i,
         )
         assert.match(
-            JSON.stringify(sequence.contexts[0]!.toJSON()),
+            JSON.stringify(toWire(sequence.contexts[0]!)),
             /mode: parallel/,
         )
     })
@@ -941,7 +940,7 @@ describe("ArchitectOpenAI bounded finalization", () => {
 
         assert.equal(result, DECISION_DOCUMENT)
         assert.match(
-            JSON.stringify(sequence.contexts[2]!.toJSON()),
+            JSON.stringify(toWire(sequence.contexts[2]!)),
             /not an ADR decision document/i,
         )
     })

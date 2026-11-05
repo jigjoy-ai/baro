@@ -31,7 +31,7 @@ function harness(withAuthority = true) {
     const delivered: Array<{ recipientId: string; text: string; metadata: Record<string, unknown> }> = []
     const real = env.publish.bind(env)
     env.publish = (source, event) => {
-        const data = (event as { data?: unknown }).data as { recipientId?: string }
+        const data = (event as { payload?: unknown }).payload as { recipientId?: string }
         if (data?.recipientId) delivered.push(data as never)
         real(source, event)
     }
@@ -169,7 +169,7 @@ describe("one file, one name across worktrees", () => {
         const delivered: Array<{ recipientId: string; text: string; metadata: Record<string, unknown> }> = []
         const real = env.publish.bind(env)
         env.publish = (source, event) => {
-            const data = (event as { data?: { recipientId?: string } }).data
+            const data = (event as { payload?: { recipientId?: string } }).payload
             if (data?.recipientId) delivered.push(data as never)
             real(source, event)
         }
@@ -222,7 +222,7 @@ describe("one file, one name across worktrees", () => {
         const delivered: Array<{ recipientId: string; text: string; metadata: Record<string, unknown> }> = []
         const real = env.publish.bind(env)
         env.publish = (source, event) => {
-            const data = (event as { data?: { recipientId?: string } }).data
+            const data = (event as { payload?: { recipientId?: string } }).payload
             if (data?.recipientId) delivered.push(data as never)
             real(source, event)
         }

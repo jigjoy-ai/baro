@@ -155,7 +155,7 @@ export class AttemptRecallRunner extends BusMember {
         }
     }
 
-    /** mozaik 3.12 delivers with `void this.react(...)`; a throw here kills the run. */
+    /** The bus does not await hooks; a throw here kills the run. */
     private guard(work: () => void): void {
         try {
             work()

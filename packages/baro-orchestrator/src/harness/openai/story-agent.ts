@@ -11,17 +11,13 @@
 import {
     FunctionCallItem,
     FunctionCallOutputItem,
-    Gpt54,
-    Gpt54Mini,
-    Gpt54Nano,
-    Gpt55,
     ModelContext,
     ModelMessageItem,
     SemanticEvent,
     SystemMessageItem,
     UserMessageItem,
-    type GenerativeModel,
     type Tool, toWire } from "../../runtime/mozaik.js"
+import type { InferenceModel } from "./runtime.js"
 
 import { CoordinationBus, BusMember } from "../../runtime/coordination.js"
 import type { GatewayBillingCoordinator } from "../../telemetry/billing/index.js"
@@ -200,7 +196,7 @@ export class OpenAIStoryAgent extends BusMember {
     > &
         StorySpec
     private readonly opts: ResolvedOpenAIStoryAgentOptions
-    private readonly model: GenerativeModel
+    private readonly model: InferenceModel
     private readonly tools: Tool[]
     private readonly billingCoordinator: GatewayBillingCoordinator | null
     private runtimeGraphVersion: number | null
@@ -1441,7 +1437,7 @@ export class OpenAIStoryAgent extends BusMember {
 }
 
 
-function setModelTools(model: GenerativeModel, tools: Tool[]): void {
+function setModelTools(model: InferenceModel, tools: Tool[]): void {
     const m = model as unknown as { setTools?: (t: Tool[]) => void }
     if (typeof m.setTools !== "function") {
         throw new Error(

@@ -22,7 +22,7 @@ import {
 } from "../../semantic-events.js"
 
 // Mozaik built-in types dispatch via their native bus channels;
-// SemanticEvents via deliverSemanticEvent.
+// SemanticEvents via the bus's publish.
 export type MappedItem =
     | ModelMessageItem
     | FunctionCallItem

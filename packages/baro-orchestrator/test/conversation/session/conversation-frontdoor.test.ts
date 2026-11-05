@@ -429,7 +429,6 @@ function leaveAll(
     scout.leave(environment)
     conversation.leave(environment)
     host.leave(environment)
-    environment.stop()
 }
 
 function deferred<T>(): {

@@ -2,7 +2,9 @@ import {
     FunctionCallItem,
     FunctionCallOutputItem,
     ModelMessageItem,
-    SemanticEvent, toWire } from "../../runtime/mozaik.js"
+    SemanticEvent,
+    toWire,
+} from "../../runtime/mozaik.js"
 import { BusMember } from "../../runtime/coordination.js"
 
 import {

@@ -10,7 +10,9 @@ import {
 import {
     ModelContext,
     ModelMessageItem,
-    UserMessageItem, toWire } from "../../../src/runtime/mozaik.js"
+    UserMessageItem,
+    toWire,
+} from "../../../src/runtime/mozaik.js"
 
 // A stand-in for the baro gateway: it serves both OpenAI surfaces and records
 // which one a model was sent to.
@@ -119,7 +121,7 @@ describe("OpenAI-native models use the Responses API on a custom endpoint", () =
         assert.equal(hits[0]?.body.store, false)
         // The reasoning item with nothing to replay is dropped; order is kept.
         assert.deepEqual(round.items.map((item) => item.getType()), ["reasoning", "function_call"])
-        await runInferenceRound(context.applyModelOutput(round.items), model)
+        await runInferenceRound(context.addContextItems(round.items), model)
         const replayed = (hits[1]?.body.input as Record<string, unknown>[]).slice(1)
         assert.deepEqual(replayed, [
             { type: "reasoning", id: "rs_1", summary: [], encrypted_content: "sealed" },

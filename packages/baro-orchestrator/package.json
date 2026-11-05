@@ -20,6 +20,7 @@
     "@baro/memory": "*",
     "@mozaik-ai/core": "4.2.0",
     "cross-spawn": "^7.0.6",
+    "openai": "^6.38.0",
     "ws": "^8.21.0"
   },
   "devDependencies": {

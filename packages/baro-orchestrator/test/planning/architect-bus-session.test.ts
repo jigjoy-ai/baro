@@ -7,9 +7,9 @@ import {
     FunctionCallItem,
     ModelMessageItem,
     type ContextItem,
-    type GenerativeModel,
     type ModelContext,
 } from "../../src/runtime/mozaik.js"
+import type { InferenceModel } from "../../src/harness/openai/runtime.js"
 import { BusMember, CoordinationBus } from "../../src/runtime/coordination.js"
 import {
     ScoutFindingPublished,
@@ -105,7 +105,7 @@ class ScriptedNativeParticipant extends MozaikModelParticipant {
             model: {
                 specification: { name: "scripted" },
                 setTools: () => {},
-            } as unknown as GenerativeModel,
+            } as unknown as InferenceModel,
             systemPrompt: "scripted",
         })
     }
@@ -166,7 +166,7 @@ class EndlessReaderParticipant extends MozaikModelParticipant {
             model: {
                 specification: { name: "scripted" },
                 setTools: () => {},
-            } as unknown as GenerativeModel,
+            } as unknown as InferenceModel,
             systemPrompt: "scripted",
             tools: [
                 {
@@ -248,7 +248,7 @@ class SlowScoutParticipant extends MozaikModelParticipant {
             model: {
                 specification: { name: "scripted" },
                 setTools: () => {},
-            } as unknown as GenerativeModel,
+            } as unknown as InferenceModel,
             systemPrompt: "scripted",
         })
     }
