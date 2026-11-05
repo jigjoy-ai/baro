@@ -17,11 +17,11 @@ import {
 } from "../../src/verification/verify.js"
 import { withTempDir } from "../execution/helpers.js"
 
-/** The real layout: <tmp>/baro-worktrees/<runId>/{__run,<agentId>}. */
+/** The real layout: <tmp>/baro-worktrees/<runId>/{__run,<agentId>}/<repo>. */
 function worktreeLayout(dir: string): { runCwd: string; storyRoot: string } {
     const base = join(dir, "baro-worktrees", "run-1")
-    const runCwd = join(base, "__run")
-    const storyRoot = join(base, "S1")
+    const runCwd = join(base, "__run", "repo")
+    const storyRoot = join(base, "S1", "repo")
     mkdirSync(runCwd, { recursive: true })
     return { runCwd, storyRoot }
 }
@@ -96,7 +96,7 @@ describe("resolveCommandCwd", () => {
 
     it("remaps a workspace under a vanished integration root onto the fallback root", async () => {
         await withTempDir("baro-cwd-goneintegration-", async (dir) => {
-            const removedRun = join(dir, "baro-worktrees", "run-1", "__run")
+            const removedRun = join(dir, "baro-worktrees", "run-1", "__run", "repo")
             const hostRepo = join(dir, "host")
             const twin = join(hostRepo, "packages", "baro-dsh")
             mkdirSync(twin, { recursive: true })
@@ -111,7 +111,7 @@ describe("resolveCommandCwd", () => {
     it("never returns a path belonging to another run's worktree", async () => {
         await withTempDir("baro-cwd-otherrun-", async (dir) => {
             const { runCwd } = worktreeLayout(dir)
-            const otherRun = join(dir, "baro-worktrees", "run-2", "S1", "packages")
+            const otherRun = join(dir, "baro-worktrees", "run-2", "S1", "repo", "packages")
             mkdirSync(otherRun, { recursive: true })
 
             assert.equal(resolveCommandCwd(runCwd, otherRun), runCwd)
@@ -239,7 +239,7 @@ describe("verifyBuild working-directory resolution", () => {
 
     it("runs a workspace spec in its host twin once the integration root is gone", async () => {
         await withTempDir("baro-verify-cwd-goneintegration-", async (dir) => {
-            const integrationRoot = join(dir, "baro-worktrees", "run-1", "__run")
+            const integrationRoot = join(dir, "baro-worktrees", "run-1", "__run", "repo")
             const hostRepo = join(dir, "host")
             const twin = join(hostRepo, "packages", "baro-dsh")
             mkdirSync(twin, { recursive: true })

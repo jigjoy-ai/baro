@@ -12,7 +12,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 
 import {
     canonicalPath,
-    INTEGRATION_WORKTREE_DIRNAME,
+    isIntegrationWorktreeRoot,
 } from "../integration/integration-worktree.js"
 import { pathAliases } from "../runtime/worktree-path.js"
 
@@ -36,16 +36,19 @@ function sameDirectory(a: string, b: string): boolean {
 }
 
 /**
- * `<tmpdir>/baro-worktrees/<runId>/<agentId>`, when it is runCwd's sibling or
+ * `<tmpdir>/baro-worktrees/<runId>/<agentId>/<repo>`, when it is runCwd's sibling or
  * has vanished — e.g. a workspace under a removed `__run` after the run cwd
  * fell back to the host checkout.
  */
 function remappableWorktreeRoot(runCwd: string, candidate: string): string | null {
     const parts = candidate.split(sep)
     const at = parts.lastIndexOf("baro-worktrees")
-    if (at < 0 || parts.length < at + 3) return null
-    const root = parts.slice(0, at + 3).join(sep)
-    return sameDirectory(dirname(root), dirname(runCwd)) || !existsSync(root) ? root : null
+    if (at < 0 || parts.length < at + 4) return null
+    // `<run>/<agent>/<repo>`: a worktree's own directory sits one level down.
+    const root = parts.slice(0, at + 4).join(sep)
+    return sameDirectory(dirname(dirname(root)), dirname(dirname(runCwd))) || !existsSync(root)
+        ? root
+        : null
 }
 
 /** Re-read at spawn time, so a root removed since planning is never reused. */
@@ -75,7 +78,7 @@ export function spawnRunCwd(
     resolveRunCwd?: VerifyCwdResolver,
 ): string {
     if (resolveRunCwd) return resolveRunCwd()
-    return basename(resolve(cwd)) === INTEGRATION_WORKTREE_DIRNAME
+    return isIntegrationWorktreeRoot(cwd)
         ? integrationCwdResolver(cwd, hostRepoRoot)()
         : cwd
 }

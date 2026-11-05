@@ -265,8 +265,8 @@ describe("verifyBuild declared-requirement crediting", () => {
             const [credited, orphan] = translateDeclaredTests(
                 dir,
                 [
-                    { storyId: "S1", command: "pytest test/a.test.ts" },
-                    { storyId: "S2", command: "pytest test/missing.test.ts" },
+                    { storyId: "S1", command: "jest test/a.test.ts" },
+                    { storyId: "S2", command: "jest test/missing.test.ts" },
                 ],
                 ["npm"],
             )

@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, it } from "node:test"
 import assert from "node:assert/strict"
 import { execFileSync } from "node:child_process"
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs"
+import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync, mkdirSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { basename, dirname, join } from "node:path"
 
 import { GitGate } from "../../src/integration/git.js"
 import {
@@ -525,6 +525,21 @@ describe("WorktreeManager — uncommitted safety net", () => {
             logs.some((l) => l.includes("uncommitted")),
             "a safety-net warning was surfaced",
         )
+    })
+})
+
+describe("WorktreeManager — directory names", () => {
+    it("names every story worktree like the user's checkout, and cleans up its parent", async () => {
+        // In the hermes-baro rerun the agents' tests passed in S3/ and failed in
+        // hermes-baro/: a Python package rooted at a hyphenated directory
+        // imports differently. Same name, same behaviour.
+        const path = (await mgr.create("S1"))!
+        assert.equal(basename(path), basename(realpathSync(repo)))
+        assert.equal(basename(dirname(path)), "S1")
+
+        await mgr.cleanup("S1")
+
+        assert.equal(existsSync(dirname(path)), false, "the per-story directory goes too")
     })
 })
 
@@ -1087,7 +1102,7 @@ describe("WorktreeManager — isolated integration tree", () => {
 
     it("refuses a story id that collides with the integration worktree directory", async () => {
         const integrationRoot = await isolatedManager()
-        assert.equal(integrationRoot, integrationWorktreePath(runId))
+        assert.equal(integrationRoot, integrationWorktreePath(runId, repo))
 
         await assert.rejects(
             () => mgr.create(INTEGRATION_WORKTREE_DIRNAME),

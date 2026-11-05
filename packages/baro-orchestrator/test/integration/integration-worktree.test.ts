@@ -116,7 +116,7 @@ describe("IntegrationWorktree — prepare + WorktreeManager merge", () => {
         const hostHeadBefore = git(repo, "rev-parse", "HEAD")
 
         const prepared = await iw.prepare()
-        assert.equal(prepared.integrationRoot, integrationWorktreePath(runId))
+        assert.equal(prepared.integrationRoot, integrationWorktreePath(runId, repo))
         assert.equal(prepared.reused, false)
         assert.equal(prepared.hostBranchAtStart, hostBranchBefore)
         assert.equal(prepared.hostHeadAtStart, hostHeadBefore)
@@ -552,7 +552,7 @@ describe("IntegrationWorktree — prepare reuse", () => {
 
         assert.equal(prepared2.reused, true)
         assert.equal(prepared2.integrationRoot, prepared1.integrationRoot)
-        assert.equal(prepared2.integrationRoot, integrationWorktreePath(runId))
+        assert.equal(prepared2.integrationRoot, integrationWorktreePath(runId, repo))
         assert.equal(
             git(repo, "rev-parse", `refs/heads/${goalBranch}`),
             goalShaBefore,

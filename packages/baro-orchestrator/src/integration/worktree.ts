@@ -19,11 +19,11 @@ import {
     symlinkSync,
 } from "fs"
 import { tmpdir } from "os"
-import { join, resolve } from "path"
+import { dirname, join, resolve } from "path"
 
 import { SHELL_SCRATCH_DIRNAME } from "../execution/gate-registry.js"
 import { GitGate } from "./git.js"
-import { INTEGRATION_WORKTREE_DIRNAME } from "./integration-worktree.js"
+import { INTEGRATION_WORKTREE_DIRNAME, worktreeLeafName } from "./integration-worktree.js"
 import {
     RepositoryCommandError,
     isRepositoryCommandTimeout,
@@ -291,7 +291,7 @@ export class WorktreeManager {
         if (name === INTEGRATION_WORKTREE_DIRNAME) {
             throw new Error("story id collides with the integration worktree directory")
         }
-        return join(this.baseDir, name)
+        return join(this.baseDir, name, worktreeLeafName(this.repoRoot))
     }
 
     /** Seal the manager before factories drain. An already-running create
@@ -1200,7 +1200,10 @@ export class WorktreeManager {
             // work in it. Having created nothing is reason enough to remove
             // nothing. baseDir/__run belongs to the run, not to this manager.
             if (!keptDirtyRecovery && this.createdWorktree) {
-                for (const path of this.createdPaths) rmSyncQuiet(path)
+                for (const path of this.createdPaths) {
+                    rmSyncQuiet(path)
+                    rmdirIfEmpty(dirname(path))
+                }
                 this.createdPaths.clear()
                 rmdirIfEmpty(this.baseDir)
             }
@@ -1671,6 +1674,8 @@ export class WorktreeManager {
         } else {
             this.log(`removed worktree ${path} (${reason})`)
         }
+        // The per-story directory that holds `<repo>/`.
+        if (dirname(dirname(path)) === this.baseDir) rmdirIfEmpty(dirname(path))
         // Also prune when the directory disappeared outside this process;
         // otherwise Git still considers its logical branch checked out.
         await execQuiet("git", ["worktree", "prune"], this.repoRoot)

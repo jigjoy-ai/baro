@@ -11,8 +11,38 @@ import {
 
 export const INTEGRATION_WORKTREE_DIRNAME = "__run"
 
-export function integrationWorktreePath(runId: string): string {
-    return join(tmpdir(), "baro-worktrees", runId, INTEGRATION_WORKTREE_DIRNAME)
+export function integrationWorktreePath(runId: string, repoRoot: string): string {
+    return join(
+        tmpdir(),
+        "baro-worktrees",
+        runId,
+        INTEGRATION_WORKTREE_DIRNAME,
+        worktreeLeafName(repoRoot),
+    )
+}
+
+/**
+ * Every worktree's own directory is named like the user's checkout, under a
+ * per-story (or `__run`) directory. Code and tests often depend on that name:
+ * a Python package rooted at a directory with a hyphen in it imports
+ * differently, and agents that tested in `S3/` passed tests that failed in
+ * `hermes-baro/`. Same name, same behaviour.
+ */
+export function worktreeLeafName(repoRoot: string): string {
+    let name = basename(resolve(repoRoot))
+    try {
+        name = basename(realpathSync(repoRoot))
+    } catch {}
+    return name && name !== "." && name !== ".." ? name : "repo"
+}
+
+/** `__run/<repo>` (the integration worktree) or, for older runs, `__run`. */
+export function isIntegrationWorktreeRoot(path: string): boolean {
+    const resolved = resolve(path)
+    return (
+        basename(resolved) === INTEGRATION_WORKTREE_DIRNAME ||
+        basename(dirname(resolved)) === INTEGRATION_WORKTREE_DIRNAME
+    )
 }
 
 export interface IntegrationWorktreeOptions {
@@ -61,7 +91,7 @@ export class IntegrationWorktree {
 
     constructor(private readonly opts: IntegrationWorktreeOptions) {
         this.repoRoot = opts.repoRoot
-        this.integrationRoot = integrationWorktreePath(opts.runId)
+        this.integrationRoot = integrationWorktreePath(opts.runId, opts.repoRoot)
         this.log = opts.onLog ?? ((line) => process.stderr.write(`${line}\n`))
     }
 
@@ -162,9 +192,9 @@ export class IntegrationWorktree {
                 rmSync(integrationRoot, { recursive: true, force: true })
             }
             await gitQuiet(["worktree", "prune"], repoRoot)
-            const runDir = dirname(integrationRoot)
-            if (existsSync(runDir) && readdirSync(runDir).length === 0) {
-                rmdirSync(runDir)
+            // __run/<repo> → __run → the run directory, each only once empty.
+            for (const dir of [dirname(integrationRoot), dirname(dirname(integrationRoot))]) {
+                if (existsSync(dir) && readdirSync(dir).length === 0) rmdirSync(dir)
             }
         } catch (error) {
             this.log(

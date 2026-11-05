@@ -104,7 +104,7 @@ Use repository-owned package scripts for focused JavaScript tests, for example
 The final verifier executes ONLY these declared-test forms and skips anything
 else as unprovable: \`npm|pnpm|yarn test\` / \`... run <build|typecheck|test|lint>\`,
 \`node --test <paths>\`, \`node --check <file>\`, \`cargo <build|test|check|clippy>\`,
-and \`git diff --check\`. Never declare inline code (\`node -e ...\`), shell
+\`pytest <paths>\` (or \`python -m pytest <paths>\`), and \`git diff --check\`. Never declare inline code (\`node -e ...\`), shell
 pipelines, or ad-hoc scripts — a skipped declared test fails the whole run.
 
 When in doubt, prefer FEWER stories over more. A single 2-file story is better

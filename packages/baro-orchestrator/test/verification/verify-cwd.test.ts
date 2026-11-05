@@ -27,11 +27,11 @@ import {
 import { withTempDir } from "../execution/helpers.js"
 import { removeWorktreeRun, uniqueRunId } from "../integration/worktree-fixture.js"
 
-/** The real layout: <tmp>/baro-worktrees/<runId>/{__run,<agentId>}. */
+/** The real layout: <tmp>/baro-worktrees/<runId>/{__run,<agentId>}/<repo>. */
 function runLayout(dir: string): { integrationRoot: string; storyRoot: string } {
     const base = join(dir, "baro-worktrees", "run-1")
-    const integrationRoot = join(base, "__run")
-    const storyRoot = join(base, "S1")
+    const integrationRoot = join(base, "__run", "repo")
+    const storyRoot = join(base, "S1", "repo")
     mkdirSync(integrationRoot, { recursive: true })
     return { integrationRoot, storyRoot }
 }
