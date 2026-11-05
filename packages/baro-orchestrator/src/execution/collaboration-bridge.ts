@@ -29,6 +29,9 @@ import {
     GoalLedgerProjectionPersisted,
     PathsClaimed,
     PeerHelpRequested,
+    StoryCheckpointDecided,
+    StoryCheckpointRequested,
+    StoryCheckpointWithdrawn,
     RunCompleted,
     RuntimeReplanApplied,
     RuntimeReplanProposed,
@@ -70,6 +73,11 @@ export interface CollaborationBridgeOptions {
      * after which the agents built the missing pieces themselves.
      */
     pathOwner?: (path: string) => { storyId: string; integrated: boolean } | null
+    /** Reads a running story's committed HEAD and the paths its commits
+     * change, for a checkpoint it asked to publish. */
+    prepareCheckpoint?: (
+        storyId: string,
+    ) => Promise<{ sha: string; changedPaths: string[] } | null>
     /** The Board's decision on a running story taking paths at runtime. */
     claimPaths?: (
         storyId: string,
@@ -562,6 +570,18 @@ export class CollaborationBridge extends SerializedObserver {
             return
         }
         if (
+            (StoryCheckpointDecided.is(event) || StoryCheckpointWithdrawn.is(event)) &&
+            event.payload.runId === this.opts.runId
+        ) {
+            if (
+                context.source !== this.decisionAuthority &&
+                this.opts.unsafeAllowUnboundAuthorities !== true
+            ) return
+            if (StoryCheckpointDecided.is(event)) this.onCheckpointDecided(event.payload)
+            else this.onCheckpointWithdrawn(event.payload)
+            return
+        }
+        if (
             GoalLedgerProjectionPersisted.is(event) &&
             event.payload.runId === this.opts.runId
         ) {
@@ -771,6 +791,8 @@ export class CollaborationBridge extends SerializedObserver {
                     text,
                 }),
             )
+        } else if (record.kind === "checkpoint" && liveSource && activeLease) {
+            void this.requestCheckpoint(agentId, activeLease, record.reason?.trim() || "")
         } else if (record.kind === "claim" && record.paths && liveSource) {
             const claims = this.decideClaim(agentId, record.paths)
             deliveryGaps.push(...this.announceClaim(agentId, claims))
@@ -1275,6 +1297,90 @@ export class CollaborationBridge extends SerializedObserver {
                     "They were unclaimed when your own surface was drawn. Writing one now loses your whole story at the merge gate — ask its owner or block on it.",
                 ].join("\n"),
                 metadata: { kind: "ownership_update", sourceAgentId: "host" },
+            })
+        }
+    }
+
+    private async requestCheckpoint(
+        agentId: string,
+        lease: ActiveLeaseCorrelation,
+        reason: string,
+    ): Promise<void> {
+        const refuse = (why: string) =>
+            this.routeMessageIntent({
+                recipientId: agentId,
+                text: `Checkpoint not published: ${why}`,
+                metadata: { kind: "checkpoint_answer", sourceAgentId: "host" },
+            })
+        let candidate: { sha: string; changedPaths: string[] } | null = null
+        try {
+            candidate = (await this.opts.prepareCheckpoint?.(agentId)) ?? null
+        } catch (error) {
+            refuse(`your worktree could not be read (${(error as Error)?.message ?? String(error)})`)
+            return
+        }
+        if (!candidate) {
+            refuse("this run cannot publish checkpoints for your story")
+            return
+        }
+        // The lease may have ended while git ran.
+        if (this.activeLeaseByStory.get(agentId) !== lease.leaseId) return
+        this.publish(
+            StoryCheckpointRequested.create({
+                runId: this.opts.runId,
+                storyId: agentId,
+                leaseId: lease.leaseId,
+                generation: lease.generation,
+                sha: candidate.sha,
+                changedPaths: candidate.changedPaths,
+                reason: reason || "work dependents can build on",
+            }),
+        )
+    }
+
+    private onCheckpointDecided(
+        decision: Parameters<typeof StoryCheckpointDecided.create>[0],
+    ): void {
+        const short = decision.sha.slice(0, 12)
+        if (decision.outcome === "refused") {
+            this.routeMessageIntent({
+                recipientId: decision.storyId,
+                text: `Checkpoint ${short} not published: ${decision.reason}`,
+                metadata: { kind: "checkpoint_answer", sourceAgentId: "host" },
+            })
+            return
+        }
+        this.routeMessageIntent({
+            recipientId: decision.storyId,
+            text: [
+                `Checkpoint ${short} published.`,
+                decision.admitted.length > 0
+                    ? `Started on it now: ${decision.admitted.join(", ")}. They build on what it contains while you finish and integrate after you; keep it stable, and message them if it must change.`
+                    : "No dependent was waiting on it yet; any that becomes ready starts on it.",
+                ...(decision.alreadyStarted.length > 0
+                    ? [`Already running on your earlier checkpoint: ${decision.alreadyStarted.join(", ")}. Tell them what changed.`]
+                    : []),
+            ].join("\n"),
+            metadata: { kind: "checkpoint_answer", sourceAgentId: "host" },
+        })
+        for (const peer of decision.alreadyStarted) {
+            this.routeMessageIntent({
+                recipientId: peer,
+                text: `${decision.storyId} published a newer checkpoint ${short}: ${decision.reason}. You keep the one you started on; its final work reaches you when it integrates, and you integrate after it.`,
+                metadata: { kind: "checkpoint_update", sourceAgentId: "host" },
+            })
+        }
+    }
+
+    private onCheckpointWithdrawn(
+        withdrawal: Parameters<typeof StoryCheckpointWithdrawn.create>[0],
+    ): void {
+        for (const peer of withdrawal.affected) {
+            if (!this.activeAgents.has(peer)) continue
+            this.routeMessageIntent({
+                recipientId: peer,
+                text: `${withdrawal.storyId}'s checkpoint ${withdrawal.sha.slice(0, 12)}, which you started on, was withdrawn: ${withdrawal.reason}. Your story will retry from the run branch when it finishes; if the rest of your work depends on it, block on ${withdrawal.storyId} now.`,
+                metadata: { kind: "checkpoint_update", sourceAgentId: "host" },
             })
         }
     }
@@ -2068,6 +2174,16 @@ function parseBrokerRecord(value: unknown): OutboxRecord | string {
             return `${kind} text must contain 1-8000 characters`
         }
         return { kind, eventId, text: record.text as string }
+    }
+    if (kind === "checkpoint") {
+        if (!exactKeys("eventId", "reason")) return "checkpoint has unsupported fields"
+        if (!eventId) return "checkpoint event id is invalid"
+        if (
+            typeof record.reason !== "string" ||
+            !record.reason.trim() ||
+            record.reason.length > 2_000
+        ) return "checkpoint reason must contain 1-2000 characters"
+        return { kind, eventId, reason: record.reason }
     }
     if (kind === "claim") {
         if (!exactKeys("eventId", "paths", "reason")) return "claim has unsupported fields"

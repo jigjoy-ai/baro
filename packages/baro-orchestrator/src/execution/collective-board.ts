@@ -115,6 +115,10 @@ import {
     type WorkBlockRejectionCode,
     type WorkLeaseGrantedData,
     type WorkOfferRetractionResolvedData,
+    StoryCheckpointDecided,
+    StoryCheckpointRequested,
+    StoryCheckpointWithdrawn,
+    type StoryCheckpointRequestedData,
 } from "../semantic-events.js"
 import type { ConductorRunSummary } from "./conductor.js"
 import {
@@ -284,6 +288,20 @@ export class CollectiveBoard extends SerializedObserver {
     /** Paths taken at runtime beyond a story's declared writes (path → story). */
     private readonly pathClaims = new Map<string, string>()
     private surfaceRevision = 0
+    /** Checkpoints running stories published for their dependents. */
+    private readonly checkpoints = new Map<
+        string,
+        { sha: string; leaseId: string; reason: string }
+    >()
+    /** Stories started early: prerequisite → the checkpoint sha they started on. */
+    private readonly startedOn = new Map<string, Map<string, string>>()
+    /** Accepted early starters waiting for their prerequisites to integrate. */
+    private readonly integrationHold = new Map<
+        string,
+        { result: StoryResultData; quality?: StoryQualityCompletedData }
+    >()
+    /** Stories whose early start failed once: they wait for integration. */
+    private readonly noEarlyStart = new Set<string>()
     private startedAt = 0
     private wave: WaveState | null = null
     private waveOrdinal = 0
@@ -1021,6 +1039,15 @@ export class CollectiveBoard extends SerializedObserver {
             return
         }
         if (
+            StoryCheckpointRequested.is(event) &&
+            event.payload.runId === this.opts.runId &&
+            (!this.opts.discoveryAuthority ||
+                context.source === this.opts.discoveryAuthority)
+        ) {
+            this.onCheckpointRequested(event.payload)
+            return
+        }
+        if (
             RunVerificationCompleted.is(event) &&
             event.payload.runId === this.opts.runId &&
             this.verificationGate.matchesPendingVerification(
@@ -1528,6 +1555,7 @@ export class CollectiveBoard extends SerializedObserver {
         result: StoryResultData,
         quality?: StoryQualityCompletedData,
     ): void {
+        if (this.holdForPrerequisites(result, quality)) return
         const lease = this.leases.get(result.storyId)
         if (!lease) {
             this.failStory(
@@ -1623,6 +1651,14 @@ export class CollectiveBoard extends SerializedObserver {
         this.healingActionsSinceProgress = 0
         this.runtimeAdaptationsSinceProgress = 0
         this.retryPendingGoalRemediations(true)
+        this.checkpoints.delete(storyId)
+        this.startedOn.delete(storyId)
+        this.releaseIntegrationHolds()
+        this.restoreRetractedStories(
+            this.prd.userStories
+                .filter((story) => story.dependsOn.includes(storyId))
+                .map((story) => story.id),
+        )
         this.reconcileReadyStories()
         this.maybeCompleteWave()
     }
@@ -1654,6 +1690,10 @@ export class CollectiveBoard extends SerializedObserver {
         code?: string,
     ): void {
         if (this.phase !== "running" || !this.wave?.pending.has(storyId)) return
+        this.integrationHold.delete(storyId)
+        if (this.startedOn.has(storyId)) this.noEarlyStart.add(storyId)
+        this.startedOn.delete(storyId)
+        this.withdrawCheckpoint(storyId, `${storyId} failed: ${error}`)
         this.lastFailureByStory.set(
             storyId,
             recoveryKind ? `${error} [${recoveryKind}]` : error,
@@ -2593,8 +2633,8 @@ export class CollectiveBoard extends SerializedObserver {
                 this.offers.hasOffer(storyId) ||
                 this.offers.hasContextRequest(storyId) ||
                 this.replanGate.targetsStory(storyId) ||
-                !story.dependsOn.every(
-                    (dependency) => currentById.get(dependency)?.passes === true,
+                !story.dependsOn.every((dependency) =>
+                    this.dependencyMet(storyId, currentById.get(dependency)),
                 )
             ) continue
             this.requestStoryContext(story)
@@ -2644,8 +2684,8 @@ export class CollectiveBoard extends SerializedObserver {
                 !scheduled.has(story.id) &&
                 !this.failed.has(story.id) &&
                 !blocked.has(story.id) &&
-                story.dependsOn.every(
-                    (dependency) => storyById.get(dependency)?.passes === true,
+                story.dependsOn.every((dependency) =>
+                    this.dependencyMet(story.id, storyById.get(dependency)),
                 ),
         )
         if (ready.length === 0) return
@@ -2661,7 +2701,7 @@ export class CollectiveBoard extends SerializedObserver {
         this.emit(
             ConductorState.create({
                 phase: "running_level",
-                detail: `collective admitted ${ready.map((story) => story.id).join(", ")} as soon as their dependencies were integrated`,
+                detail: `collective admitted ${ready.map((story) => story.id).join(", ")} as soon as their dependencies were integrated or checkpointed`,
                 currentLevel: this.wave.ordinal,
                 storyIds: this.wave.storyIds,
             }),
@@ -3070,17 +3110,30 @@ export class CollectiveBoard extends SerializedObserver {
             this.leases.has(story.id) ||
             this.replanGate.targetsStory(story.id)
         ) return
-        const offerId = this.offers.nextOfferId(story.id)
-        const basePrompt = buildStoryOfferPrompt(this.prd, story)
         const rememberedRecovery = this.recoveryContext.get(story.id)
         const recovery =
             this.wave?.recovery || rememberedRecovery?.kind === "dependency"
                 ? rememberedRecovery
                 : undefined
+        const checkpointBase = this.checkpointBaseFor(story, recovery)
+        // A checkpoint withdrawn since admission, or a resume that re-bases
+        // instead of creating: wait until the prerequisites integrate.
+        if (checkpointBase === null) return
+        const offerId = this.offers.nextOfferId(story.id)
+        const basePrompt = buildStoryOfferPrompt(this.prd, story)
         const recoveryPrompt = recovery
             ? buildRecoveryPromptSection(recovery)
             : null
-        const prompt = [context?.trim() || null, recoveryPrompt, basePrompt]
+        const checkpointPrompt = this.checkpointPromptSection(checkpointBase)
+        if (checkpointBase.length > 0) {
+            this.startedOn.set(
+                story.id,
+                new Map(checkpointBase.map((checkpoint) => [checkpoint.storyId, checkpoint.sha])),
+            )
+        } else {
+            this.startedOn.delete(story.id)
+        }
+        const prompt = [context?.trim() || null, checkpointPrompt, recoveryPrompt, basePrompt]
             .filter((part): part is string => Boolean(part))
             .join("\n\n")
         const excludedRouteIds = [
@@ -3116,6 +3169,7 @@ export class CollectiveBoard extends SerializedObserver {
                     ? { requiresQualityReview: true }
                     : {}),
                 ...(surface ? { surface } : {}),
+                ...(checkpointBase.length > 0 ? { checkpointBase } : {}),
                 ...(recovery ? { recovery } : {}),
                 // A host-suspended or unjudged story re-bases through the
                 // host-owned step rather than starting from a fresh worktree
@@ -3136,6 +3190,197 @@ export class CollectiveBoard extends SerializedObserver {
         })
         this.offers.recordOffer(offered.payload)
         this.emit(offered)
+    }
+
+    /** Integrated, or (for a story allowed to start early) checkpointed by a
+     * live lease. */
+    private dependencyMet(storyId: string, dependency: PrdStory | undefined): boolean {
+        if (!dependency) return false
+        if (dependency.passes === true) return true
+        return (
+            !this.noEarlyStart.has(storyId) &&
+            !this.failed.has(dependency.id) &&
+            this.checkpoints.has(dependency.id)
+        )
+    }
+
+    /** The checkpoints a story starts on, [] when every prerequisite
+     * integrated, or null when it cannot start yet. */
+    private checkpointBaseFor(
+        story: PrdStory,
+        recovery: { kind: string } | undefined,
+    ): Array<{ storyId: string; sha: string }> | null {
+        const byId = new Map((this.prd?.userStories ?? []).map((s) => [s.id, s]))
+        const early = story.dependsOn.filter((id) => byId.get(id)?.passes !== true)
+        if (early.length === 0) return []
+        if (recovery?.kind === "dependency" || this.noEarlyStart.has(story.id)) return null
+        const base: Array<{ storyId: string; sha: string }> = []
+        for (const id of early) {
+            const checkpoint = this.checkpoints.get(id)
+            if (!checkpoint || this.failed.has(id)) return null
+            base.push({ storyId: id, sha: checkpoint.sha })
+        }
+        return base
+    }
+
+    private checkpointPromptSection(
+        base: ReadonlyArray<{ storyId: string; sha: string }>,
+    ): string | null {
+        if (base.length === 0) return null
+        return [
+            "## You start on checkpoints, before your prerequisites integrated",
+            "",
+            ...base.map(({ storyId, sha }) =>
+                `- ${storyId} is still running; it published ${sha.slice(0, 12)}: ${this.checkpoints.get(storyId)?.reason ?? ""}`,
+            ),
+            "",
+            "Your worktree already contains those commits. Build against what they",
+            "provide. If you need something a prerequisite has not delivered yet, message",
+            "it (--kind message --to <ID>); if you cannot honestly continue without its",
+            "finished work, block on it. Your work integrates only after theirs does.",
+        ].join("\n")
+    }
+
+    private onCheckpointRequested(request: StoryCheckpointRequestedData): void {
+        const decide = (
+            outcome: "published" | "refused",
+            reason: string,
+            admitted: string[] = [],
+            alreadyStarted: string[] = [],
+        ) =>
+            this.emit(
+                StoryCheckpointDecided.create({
+                    runId: this.opts.runId,
+                    storyId: request.storyId,
+                    leaseId: request.leaseId,
+                    sha: request.sha,
+                    outcome,
+                    reason,
+                    admitted,
+                    alreadyStarted,
+                }),
+            )
+        const lease = this.leases.get(request.storyId)
+        const stories = this.prd?.userStories ?? []
+        const story = stories.find((candidate) => candidate.id === request.storyId)
+        if (this.phase !== "running" || !this.wave || !story || story.passes) {
+            decide("refused", "only a story that is executing can publish a checkpoint")
+            return
+        }
+        if (
+            !lease ||
+            lease.leaseId !== request.leaseId ||
+            lease.generation !== request.generation
+        ) {
+            decide("refused", "the checkpoint does not come from this story's live lease")
+            return
+        }
+        if (request.changedPaths.length === 0) {
+            decide(
+                "refused",
+                "nothing is committed beyond your base: commit the part your dependents need, then publish",
+            )
+            return
+        }
+        const surface = storyWriteSurface(story, stories, this.pathClaims)
+        const outside = surface
+            ? request.changedPaths.filter((path) => !surface.writes.includes(path))
+            : []
+        if (outside.length > 0) {
+            decide(
+                "refused",
+                `the checkpoint changes files outside your surface (${outside.slice(0, 8).join(", ")}); claim them first or leave them out of the commits`,
+            )
+            return
+        }
+        this.checkpoints.set(story.id, {
+            sha: request.sha,
+            leaseId: request.leaseId,
+            reason: request.reason,
+        })
+        const alreadyStarted = [...this.startedOn]
+            .filter(([, deps]) => deps.has(story.id))
+            .map(([id]) => id)
+            .sort()
+        const before = new Set(this.wave.storyIds)
+        this.reconcileReadyStories()
+        const admitted = this.wave.storyIds.filter((id) => !before.has(id))
+        decide("published", request.reason, admitted, alreadyStarted)
+    }
+
+    /** A checkpoint whose story will not integrate it any more. Stories that
+     * started on it and already finished retry from the run branch; running
+     * ones learn now and fail at integration if they rely on it. */
+    private withdrawCheckpoint(storyId: string, reason: string): void {
+        const checkpoint = this.checkpoints.get(storyId)
+        if (!checkpoint) return
+        this.checkpoints.delete(storyId)
+        const affected = [...this.startedOn]
+            .filter(([, deps]) => deps.has(storyId))
+            .map(([id]) => id)
+            .sort()
+        this.emit(
+            StoryCheckpointWithdrawn.create({
+                runId: this.opts.runId,
+                storyId,
+                sha: checkpoint.sha,
+                reason,
+                affected,
+            }),
+        )
+        for (const id of affected) {
+            if (!this.integrationHold.has(id)) continue
+            this.failStory(
+                id,
+                `started on ${storyId}'s checkpoint, which was withdrawn (${reason}); retrying from the run branch`,
+                true,
+                "execution",
+            )
+        }
+    }
+
+    /** True when an accepted early starter must wait for its prerequisites. */
+    private holdForPrerequisites(
+        result: StoryResultData,
+        quality: StoryQualityCompletedData | undefined,
+    ): boolean {
+        const started = this.startedOn.get(result.storyId)
+        if (!started) return false
+        const byId = new Map((this.prd?.userStories ?? []).map((s) => [s.id, s]))
+        const waiting = [...started.keys()].filter((id) => byId.get(id)?.passes !== true)
+        if (waiting.length === 0) return false
+        const withdrawn = waiting.filter((id) => !this.checkpoints.has(id))
+        if (withdrawn.length > 0) {
+            this.failStory(
+                result.storyId,
+                `started on checkpoints of ${withdrawn.join(", ")} that were withdrawn; retrying from the run branch`,
+                true,
+                "execution",
+            )
+            return true
+        }
+        this.integrationHold.set(result.storyId, { result, ...(quality ? { quality } : {}) })
+        this.emit(
+            ConductorState.create({
+                phase: "running_level",
+                detail: `${result.storyId} is accepted and integrates after ${waiting.join(", ")}`,
+                currentLevel: this.wave?.ordinal ?? this.waveOrdinal,
+                storyIds: this.wave?.storyIds ?? [],
+            }),
+        )
+        return true
+    }
+
+    private releaseIntegrationHolds(): void {
+        const byId = new Map((this.prd?.userStories ?? []).map((s) => [s.id, s]))
+        for (const [storyId, held] of [...this.integrationHold]) {
+            const started = this.startedOn.get(storyId)
+            if (started && [...started.keys()].some((id) => byId.get(id)?.passes !== true)) {
+                continue
+            }
+            this.integrationHold.delete(storyId)
+            this.requestIntegration(held.result, held.quality)
+        }
     }
 
     private computeBlockedStoryIds(): Set<string> {

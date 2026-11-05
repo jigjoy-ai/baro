@@ -304,8 +304,16 @@ export class WorktreeManager {
      * Create a story's worktree off the current run-branch HEAD. Returns
      * its path, or null on any failure so the caller can fall back to the
      * shared repo cwd instead of failing the story.
+     *
+     * A story started early on prerequisites' checkpoints gets them merged
+     * onto that HEAD here, and the merge becomes its recorded base: its own
+     * diff stays its own, and the prerequisite's final merge later contains
+     * the same commits, so integrating afterwards is a clean continuation.
      */
-    async create(storyId: string): Promise<string | null> {
+    async create(
+        storyId: string,
+        options: { checkpoints?: readonly { storyId: string; sha: string }[] } = {},
+    ): Promise<string | null> {
         if (this.shutdownStarted) return null
         const path = this.pathOf(storyId)
         const release = await this.gate.acquire()
@@ -335,11 +343,16 @@ export class WorktreeManager {
                 ["worktree", "add", "-b", branch, path, baseSha],
                 { cwd: this.repoRoot },
             )
+            const startSha = await this.mergeCheckpoints(
+                storyId,
+                path,
+                options.checkpoints ?? [],
+            ) ?? baseSha
             if (this.linkDepDirs) this.depLocations(path)
             await this.ensureWorktreeExcludes()
             if (this.linkDepDirs) this.symlinkDepDirs(path)
             this.paths.set(storyId, path)
-            this.baseShas.set(storyId, baseSha)
+            this.baseShas.set(storyId, startSha)
             this.createdWorktree = true
             this.log(`created ${branch} at ${path}`)
             return path
@@ -388,6 +401,76 @@ export class WorktreeManager {
         } finally {
             release()
         }
+    }
+
+    /** HEAD after merging the checkpoints, or null when there were none. A
+     * conflict throws: the story must not start on a base it cannot have. */
+    private async mergeCheckpoints(
+        storyId: string,
+        path: string,
+        checkpoints: readonly { storyId: string; sha: string }[],
+    ): Promise<string | null> {
+        if (checkpoints.length === 0) return null
+        const label = checkpoints
+            .map((checkpoint) => `${checkpoint.storyId}@${checkpoint.sha.slice(0, 12)}`)
+            .join(", ")
+        try {
+            await exec(
+                "git",
+                [
+                    ...(await this.hasCommitterIdentity(path)
+                        ? []
+                        : ["-c", "user.name=baro", "-c", "user.email=baro@localhost"]),
+                    "merge",
+                    "--no-ff",
+                    "--no-edit",
+                    "-m",
+                    `baro: start ${storyId} on checkpoints of ${label}`,
+                    ...checkpoints.map((checkpoint) => checkpoint.sha),
+                ],
+                { cwd: path },
+            )
+        } catch (error) {
+            await execQuiet("git", ["merge", "--abort"], path)
+            throw new Error(
+                `checkpoints ${label} do not merge onto the run branch: ${errMsg(error)}`,
+                { cause: error },
+            )
+        }
+        const { stdout } = await exec("git", ["rev-parse", "HEAD"], { cwd: path })
+        this.log(`started ${storyId} on checkpoints ${label}`)
+        return stdout.trim()
+    }
+
+    private async hasCommitterIdentity(cwd: string): Promise<boolean> {
+        try {
+            const { stdout } = await exec("git", ["config", "user.email"], { cwd })
+            return stdout.trim().length > 0
+        } catch {
+            return false
+        }
+    }
+
+    /**
+     * What a running story would publish as a checkpoint: its committed HEAD
+     * and the paths its commits change since its own base. Uncommitted work is
+     * not part of a checkpoint.
+     */
+    async checkpointCandidate(
+        storyId: string,
+    ): Promise<{ sha: string; changedPaths: string[] } | null> {
+        const path = this.paths.get(storyId)
+        const base = this.baseShas.get(storyId)
+        if (!path || !base) return null
+        const { stdout: head } = await exec("git", ["rev-parse", "HEAD"], { cwd: path })
+        const sha = head.trim()
+        if (sha === base) return { sha, changedPaths: [] }
+        const { stdout } = await exec(
+            "git",
+            ["diff", "--no-renames", "--name-only", "-z", `${base}..${sha}`],
+            { cwd: path },
+        )
+        return { sha, changedPaths: stdout.split("\0").filter(Boolean).sort() }
     }
 
     /**

@@ -1002,7 +1002,10 @@ export class StoryFactory extends BusMember {
                     createdWorktree = null
                 }
             } else {
-                createdWorktree = await worktrees.create(req.storyId)
+                createdWorktree = await worktrees.create(
+                    req.storyId,
+                    req.checkpointBase ? { checkpoints: req.checkpointBase } : {},
+                )
             }
         }
         // The run may have completed while git worktree creation was queued.
@@ -1394,6 +1397,9 @@ export class StoryFactory extends BusMember {
             `- Ask peers: ${command} emit ${capability} --kind help --text ${JSON.stringify("YOUR QUESTION")}`,
             `- Message a peer: ${command} emit ${capability} --kind message --to S2 --text ${JSON.stringify("YOUR MESSAGE")} (queued if that peer starts in a later wave)`,
             `- Share a finding: ${command} emit ${capability} --kind note --text ${JSON.stringify("YOUR FINDING")} (retained in later agents' launch context)`,
+            `- Need a file you did not declare? Claim it before writing: ${command} emit ${capability} --kind claim --paths-json ${JSON.stringify('["src/x.ts"]')} --reason ${JSON.stringify("WHY")} (answered at once: a file no unintegrated story holds becomes yours)`,
+            `- Unblock your dependents early: once the part of your work they build on (interfaces, types, fixtures, schemas) is committed and its tests pass, publish it: ${command} emit ${capability} --kind checkpoint --reason ${JSON.stringify("WHAT IS STABLE NOW AND WHAT IS STILL COMING")}`,
+            "  Dependents then start on that commit while you finish, and integrate only after you do. Keep what you published stable; if it must change, commit, publish a new checkpoint and message the dependents the Board names.",
             "  These event commands generate a stable id. If one returns `outcome_unknown`, retry the exact same payload with its returned `--event-id`; never mint a replacement id.",
             `- If repository evidence shows a global invariant is unsatisfied or contradicted, fail closed for the collective: ${command} emit ${capability} --kind challenge --invariant G-A1 --reason ${JSON.stringify("CONCRETE EVIDENCE / MISSING WORK")}`,
             // Working around a false premise in silence is what leaves the

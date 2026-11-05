@@ -1016,6 +1016,8 @@ export async function orchestrate(
               // Resolved when asked, not when built: the Board is constructed
               // later, and the plan it reads keeps growing after that.
               pathOwner: (path) => collectiveBoard?.ownerOfPath(path) ?? null,
+              prepareCheckpoint: async (storyId) =>
+                  (await worktrees?.checkpointCandidate(storyId)) ?? null,
               claimPaths: (storyId, paths) =>
                   collectiveBoard?.claimPaths(storyId, paths) ??
                   paths.map((path) => ({

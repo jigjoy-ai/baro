@@ -19,11 +19,11 @@ if (command === "emit") {
     const kind = required("kind")
     let decisionWaitMs = null
     let decisionId = null
-    if (!["message", "help", "note", "discover", "claim", "replan", "block", "challenge", "dispute"].includes(kind)) {
+    if (!["message", "help", "note", "discover", "claim", "checkpoint", "replan", "block", "challenge", "dispute"].includes(kind)) {
         fail(`unsupported kind '${kind}'`)
     }
     const record = { kind }
-    if (["message", "help", "note", "discover", "claim"].includes(kind)) {
+    if (["message", "help", "note", "discover", "claim", "checkpoint"].includes(kind)) {
         record.eventId = safeTransportId(
             flags.get("event-id") ?? `event-${randomUUID()}`,
             "--event-id",
@@ -61,6 +61,10 @@ if (command === "emit") {
         record.reason = required("reason").trim()
         if (!record.reason) fail("--reason must contain non-whitespace text")
         if (record.reason.length > 8_000) fail("--reason exceeds 8000 characters")
+    } else if (kind === "checkpoint") {
+        record.reason = required("reason").trim()
+        if (!record.reason) fail("--reason must say what is stable now")
+        if (record.reason.length > 2_000) fail("--reason exceeds 2000 characters")
     } else if (kind === "claim") {
         const raw = required("paths-json")
         try {
@@ -311,6 +315,7 @@ if (command === "emit") {
         "  agent-collab.mjs emit --endpoint URL --token TOKEN --kind note --text TEXT [--event-id ID]",
         "  agent-collab.mjs emit --endpoint URL --token TOKEN --kind challenge --invariant G-A1 --reason TEXT [--challenge-id ID]",
         "  agent-collab.mjs emit --endpoint URL --token TOKEN --kind discover --story-json JSON [--reason TEXT] [--event-id ID]",
+        "  agent-collab.mjs emit --endpoint URL --token TOKEN --kind checkpoint --reason TEXT [--event-id ID]",
         "  agent-collab.mjs emit --endpoint URL --token TOKEN --kind claim --paths-json '[\"src/a.ts\"]' [--reason TEXT] [--event-id ID]",
         "  agent-collab.mjs emit --endpoint URL --token TOKEN --kind replan --base-version N --replan-json JSON [--reason TEXT] [--wait-ms N]",
         "  agent-collab.mjs emit --endpoint URL --token TOKEN --kind block --requires-json JSON [--reason TEXT] [--wait-ms N]",

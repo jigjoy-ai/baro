@@ -230,6 +230,10 @@ export interface StorySpawnRequestData {
         reason: string
         branch?: string
     }
+    /** Started before these prerequisites integrated, on the checkpoints
+     * they published: the worktree merges each `sha` onto the run branch,
+     * and the story integrates only after every one of them has. */
+    checkpointBase?: ReadonlyArray<{ readonly storyId: string; readonly sha: string }>
     /** Present only on a re-offer of a host-suspended or unjudged story: the
      * spawn must go through the host-owned resume step so the recorded
      * creation SHA moves with the re-base instead of staying on a stale one. */
@@ -471,3 +475,50 @@ export interface StoryInterventionData {
 
 export const StoryIntervention =
     defineSemanticEvent<StoryInterventionData>("story_intervention")
+
+/**
+ * A running story offers a committed part of its work (an interface, fixtures,
+ * a schema) so dependents can start before it integrates. `changedPaths` is
+ * what its commits change since its own base.
+ */
+export interface StoryCheckpointRequestedData {
+    runId: string
+    storyId: string
+    leaseId: string
+    generation: number
+    sha: string
+    changedPaths: string[]
+    reason: string
+}
+
+export const StoryCheckpointRequested =
+    defineSemanticEvent<StoryCheckpointRequestedData>("story_checkpoint_requested")
+
+export interface StoryCheckpointDecidedData {
+    runId: string
+    storyId: string
+    leaseId: string
+    sha: string
+    outcome: "published" | "refused"
+    reason: string
+    /** Dependents admitted on this checkpoint by this decision. */
+    admitted: string[]
+    /** Dependents already running on an earlier checkpoint of this story. */
+    alreadyStarted: string[]
+}
+
+export const StoryCheckpointDecided =
+    defineSemanticEvent<StoryCheckpointDecidedData>("story_checkpoint_decided")
+
+/** The checkpoint no longer describes work that will integrate (its story
+ * failed or lost its lease); `affected` started on it. */
+export interface StoryCheckpointWithdrawnData {
+    runId: string
+    storyId: string
+    sha: string
+    reason: string
+    affected: string[]
+}
+
+export const StoryCheckpointWithdrawn =
+    defineSemanticEvent<StoryCheckpointWithdrawnData>("story_checkpoint_withdrawn")

@@ -528,6 +528,64 @@ describe("WorktreeManager — uncommitted safety net", () => {
     })
 })
 
+describe("WorktreeManager — checkpoints", () => {
+    it("starts a dependent on a running story's checkpoint and integrates both cleanly in order", async () => {
+        const p1 = (await mgr.create("S1"))!
+        commitInWorktree(p1, "contract.ts", "export interface Parser {}\n")
+        const candidate = await mgr.checkpointCandidate("S1")
+        assert.deepEqual(candidate?.changedPaths, ["contract.ts"])
+
+        const p2 = (await mgr.create("S2", {
+            checkpoints: [{ storyId: "S1", sha: candidate!.sha }],
+        }))!
+        assert.equal(readFileSync(join(p2, "contract.ts"), "utf8"), "export interface Parser {}\n")
+        assert.equal(
+            mgr.creationSha("S2"),
+            git(p2, "rev-parse", "HEAD"),
+            "the merge is the dependent's base, so its own diff stays its own",
+        )
+        commitInWorktree(p2, "board.ts", "import './contract'\n")
+        assert.deepEqual((await mgr.checkpointCandidate("S2"))?.changedPaths, ["board.ts"])
+
+        // S1 keeps working after its checkpoint, then integrates first.
+        commitInWorktree(p1, "parser.ts", "export const parse = () => []\n")
+        assert.equal(await mgr.mergeBack("S1"), true)
+        assert.equal(await mgr.mergeBack("S2"), true)
+
+        for (const file of ["contract.ts", "parser.ts", "board.ts"]) {
+            assert.ok(existsSync(join(repo, file)), `${file} integrated`)
+        }
+    })
+
+    it("refuses to start a dependent on a checkpoint that conflicts with the run branch", async () => {
+        const p1 = (await mgr.create("S1"))!
+        commitInWorktree(p1, "a.txt", "S1's version\n")
+        const { sha } = (await mgr.checkpointCandidate("S1"))!
+        writeFileSync(join(repo, "a.txt"), "integrated meanwhile\n")
+        git(repo, "commit", "-am", "conflicting integration")
+
+        assert.equal(await mgr.create("S2", { checkpoints: [{ storyId: "S1", sha }] }), null)
+        assert.equal(mgr.activePath("S2"), null)
+        assert.ok(logs.some((line) => line.includes("do not merge onto the run branch")))
+
+        const isolatedRunId = uniqueRunId("run-checkpoint-isolated")
+        const isolated = new WorktreeManager(repo, new GitGate(), isolatedRunId, {
+            allowSharedFallback: false,
+            onLog: () => {},
+            integrationRoot: repo,
+        })
+        try {
+            await assert.rejects(
+                isolated.create("S2", { checkpoints: [{ storyId: "S1", sha }] }),
+                /do not merge onto the run branch/,
+            )
+        } finally {
+            await isolated.cleanupAll()
+            await removeWorktreeRun(repo, isolatedRunId)
+        }
+    })
+})
+
 describe("WorktreeManager — scratch dir", () => {
     it("cleaning up .baro-scratch leaves the captured fingerprint fresh", async () => {
         // S5 in the hermes-baro run was rejected twice: deleting its scratch

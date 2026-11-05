@@ -23,6 +23,9 @@ import {
     GoalLedgerProjectionPersisted,
     PathsClaimed,
     RunCompleted,
+    StoryCheckpointDecided,
+    StoryCheckpointRequested,
+    StoryCheckpointWithdrawn,
     RunStartRequest,
     RuntimeReplanApplied,
     RuntimeReplanProposed,
@@ -2553,6 +2556,117 @@ describe("CollaborationBridge — runtime path claims", () => {
                 })
                 assert.equal(sent.status, 400, JSON.stringify(paths))
             }
+            bridge.leave(env)
+        })
+    })
+})
+
+describe("CollaborationBridge — checkpoints", () => {
+    it("turns a worker's checkpoint into a Board request and relays the decision", async () => {
+        await withTempDir("collaboration-checkpoint-", async (dir) => {
+            const runId = "run-checkpoint"
+            const broker = source("broker")
+            const board = source("board")
+            const bridge = new CollaborationBridge({
+                runId,
+                sessionDir: dir,
+                prepareCheckpoint: async (storyId) =>
+                    storyId === "S1"
+                        ? { sha: "a".repeat(40), changedPaths: ["src/contract.ts"] }
+                        : null,
+            })
+            bridge.setLeaseAuthority(broker)
+            bridge.setDecisionAuthority(board)
+            const env = joinWithCapture(bridge)
+            await bridge.ready()
+            grantLease(env, broker, runId, "S1", "lease-S1", 1, 3)
+            grantLease(env, broker, runId, "S2", "lease-S2", 1, 3)
+            await bridge.idle()
+            const s1 = bridge.capabilityForLease({
+                runId, storyId: "S1", leaseId: "lease-S1", generation: 1, deliveryMode: "poll",
+            })
+            const s2 = bridge.capabilityForLease({
+                runId, storyId: "S2", leaseId: "lease-S2", generation: 1, deliveryMode: "poll",
+            })
+
+            const sent = await brokerFetch(s1, "/v1/events", {
+                method: "POST",
+                body: { kind: "checkpoint", eventId: "event-checkpoint-1", reason: "parser contract" },
+            })
+            assert.equal(sent.status, 202)
+            const requested = await waitFor(env.events, StoryCheckpointRequested.is)
+            assert.deepEqual(
+                { ...requested.payload },
+                {
+                    runId,
+                    storyId: "S1",
+                    leaseId: "lease-S1",
+                    generation: 1,
+                    sha: "a".repeat(40),
+                    changedPaths: ["src/contract.ts"],
+                    reason: "parser contract",
+                },
+            )
+
+            env.publish(
+                board,
+                StoryCheckpointDecided.create({
+                    runId,
+                    storyId: "S1",
+                    leaseId: "lease-S1",
+                    sha: "a".repeat(40),
+                    outcome: "published",
+                    reason: "parser contract",
+                    admitted: ["S3"],
+                    alreadyStarted: ["S2"],
+                }),
+            )
+            await bridge.idle()
+            const toS1 = JSON.stringify((await brokerFetch(s1, "/v1/inbox")).value.messages)
+            assert.match(toS1, /Checkpoint a{12} published/)
+            assert.match(toS1, /Started on it now: S3/)
+            const toS2 = JSON.stringify((await brokerFetch(s2, "/v1/inbox")).value.messages)
+            assert.match(toS2, /S1 published a newer checkpoint/)
+
+            env.publish(
+                board,
+                StoryCheckpointWithdrawn.create({
+                    runId,
+                    storyId: "S1",
+                    sha: "a".repeat(40),
+                    reason: "S1 failed",
+                    affected: ["S2"],
+                }),
+            )
+            await bridge.idle()
+            const withdrawn = JSON.stringify((await brokerFetch(s2, "/v1/inbox")).value.messages)
+            assert.match(withdrawn, /which you started on, was withdrawn: S1 failed/)
+            bridge.leave(env)
+        })
+    })
+
+    it("ignores checkpoint decisions that do not come from the Board", async () => {
+        await withTempDir("collaboration-checkpoint-forged-", async (dir) => {
+            const runId = "run-checkpoint-forged"
+            const broker = source("broker")
+            const bridge = new CollaborationBridge({ runId, sessionDir: dir })
+            bridge.setLeaseAuthority(broker)
+            bridge.setDecisionAuthority(source("board"))
+            const env = joinWithCapture(bridge)
+            await bridge.ready()
+            grantLease(env, broker, runId, "S2", "lease-S2", 1, 3)
+            await bridge.idle()
+            const s2 = bridge.capabilityForLease({
+                runId, storyId: "S2", leaseId: "lease-S2", generation: 1, deliveryMode: "poll",
+            })
+            env.publish(
+                source("S9"),
+                StoryCheckpointWithdrawn.create({
+                    runId, storyId: "S1", sha: "b".repeat(40), reason: "forged", affected: ["S2"],
+                }),
+            )
+            await bridge.idle()
+            assert.deepEqual((await brokerFetch(s2, "/v1/inbox")).value.messages, [])
             bridge.leave(env)
         })
     })

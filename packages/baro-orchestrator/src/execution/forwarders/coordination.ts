@@ -11,6 +11,9 @@ import {
     RunVerificationRequested,
     RunVerificationRetryClassified,
     RunVerificationTimedOut,
+    PathsClaimed,
+    StoryCheckpointDecided,
+    StoryCheckpointWithdrawn,
     StoryIntervention,
     StoryQualityCompleted,
     WorkClaimed,
@@ -121,6 +124,54 @@ export class CoordinationForwarder extends BusMember {
                 source !== this.interventionAuthority
             ) return
             this.handleIntervention(event.payload)
+            return
+        }
+        if (StoryCheckpointDecided.is(event)) {
+            if (!this.matchesCollective(source, "board")) return
+            const decision = event.payload
+            const runId = this.collectiveAuthorities?.runId
+            if (runId && decision.runId !== runId) return
+            if (decision.outcome === "published") {
+                emit({
+                    type: "checkpoint",
+                    id: decision.storyId,
+                    sha: decision.sha,
+                    reason: decision.reason,
+                    admitted: decision.admitted,
+                })
+            }
+            emit({
+                type: "story_log",
+                id: decision.storyId,
+                line: decision.outcome === "published"
+                    ? `[checkpoint] ${decision.sha.slice(0, 12)} published${decision.admitted.length ? `; started on it: ${decision.admitted.join(", ")}` : ""}`
+                    : `[checkpoint] refused: ${decision.reason}`,
+            })
+            return
+        }
+        if (StoryCheckpointWithdrawn.is(event)) {
+            if (!this.matchesCollective(source, "board")) return
+            emit({
+                type: "checkpoint_withdrawn",
+                id: event.payload.storyId,
+                sha: event.payload.sha,
+                reason: event.payload.reason,
+                affected: event.payload.affected,
+            })
+            return
+        }
+        if (PathsClaimed.is(event)) {
+            if (!this.matchesCollective(source, "bridge")) return
+            const granted = event.payload.decisions
+                .filter((decision) => decision.outcome === "granted")
+                .map((decision) => decision.path)
+            const held = event.payload.decisions.flatMap((decision) =>
+                decision.outcome === "held"
+                    ? [{ path: decision.path, owner: decision.ownerStoryId }]
+                    : [],
+            )
+            if (granted.length === 0 && held.length === 0) return
+            emit({ type: "paths_claimed", id: event.payload.storyId, granted, held })
             return
         }
         if (CoordinationModeSelected.is(event)) {

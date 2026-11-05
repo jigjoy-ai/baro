@@ -167,6 +167,23 @@ messages that owner or blocks on it. The decision is in the broker receipt and
 in a `claim_answer` message, and the bus records it as `paths_claimed`. A claim
 ends when its claimant integrates, exactly like a declared write.
 
+A dependency is a merge order, not a start barrier. A running story whose
+dependents need only part of its work (an interface, fixtures, a schema)
+commits that part and publishes it (`--kind checkpoint --reason "..."`). The
+Board accepts it from the live lease when the commits stay inside the story's
+surface, and admits every dependent whose prerequisites are each integrated or
+checkpointed. Such a dependent's worktree merges the checkpoint commits onto
+the run branch, and that merge is its recorded base, so its own diff and
+fingerprint stay its own. It integrates only after each prerequisite it
+started on has: an accepted early starter waits (`S2 is accepted and
+integrates after S1`), and since the prerequisite's final branch contains the
+same commits, the later merge is a clean continuation. If the prerequisite
+fails or loses its lease, the checkpoint is withdrawn: finished early starters
+retry from the run branch, running ones are told and can block on it, and a
+story whose early start failed once waits for integration next time. A
+dependent that finds it needs the finished work blocks on the prerequisite
+(`--kind block`) as before.
+
 Durably handed-off goal challenges remain replayable until their persisted
 Guardian projection acknowledges them. Before persistence, the Bridge also
 checks the challenge invariant against the exact derived GoalContract allowlist;

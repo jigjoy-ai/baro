@@ -183,6 +183,11 @@ export type BaroEvent =
           rewired: { id: string; depends_on: string[] }[]
       }
     | { type: "intervention"; id: string; source: string; action: string; reason: string }
+    /** A running story published a checkpoint; `admitted` started on it. */
+    | { type: "checkpoint"; id: string; sha: string; reason: string; admitted: string[] }
+    | { type: "checkpoint_withdrawn"; id: string; sha: string; reason: string; affected: string[] }
+    /** A running story took files beyond its declared writes. */
+    | { type: "paths_claimed"; id: string; granted: string[]; held: { path: string; owner: string }[] }
     | { type: "story_merged"; id: string; mode: "worktree" | "shared-tree" }
     | { type: "merge_failed"; id: string; error: string }
     | { type: "level_started"; ordinal: number; story_ids: string[] }
