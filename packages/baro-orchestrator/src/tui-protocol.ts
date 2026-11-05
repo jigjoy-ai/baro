@@ -240,7 +240,9 @@ export type BaroEvent =
  * external harness — has no other way to tell how long anything took.
  */
 export function emit(event: BaroEvent): void {
-    const line = JSON.stringify({ ts: new Date().toISOString(), ...event }) + "\n"
+    const line = redactCapabilities(
+        JSON.stringify({ ts: new Date().toISOString(), ...event }),
+    ) + "\n"
     const accepted = process.stdout.write(line)
     if (!accepted && pendingDrain === null) {
         pendingDrain = new Promise<void>((resolve) => {
@@ -250,6 +252,18 @@ export function emit(event: BaroEvent): void {
             })
         })
     }
+}
+
+/**
+ * Story agents echo the collaboration command they ran, and it carries the
+ * lease's bearer token. The stream feeds terminals, logs and host apps, so a
+ * token never leaves in it. Works on the serialized line: a JSON-escaped
+ * quote is `\\"`.
+ */
+export function redactCapabilities(line: string): string {
+    return line
+        .replace(/(--token(?:=|\s+))(\\?"|')?[^\s"'\\]+/gu, "$1$2<redacted>")
+        .replace(/(Bearer\s+)[A-Za-z0-9._~+\/=-]+/gu, "$1<redacted>")
 }
 
 /**

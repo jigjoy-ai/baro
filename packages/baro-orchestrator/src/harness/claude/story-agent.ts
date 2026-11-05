@@ -50,6 +50,23 @@ import {
 import { criticInput } from "../../acceptance/critic-input.js"
 import { StreamingTurnLifecycle } from "../../acceptance/turn-review.js"
 
+
+/**
+ * What a story's Claude Code may load and use. Project and local settings come
+ * from the worktree, which the agent writes: a `.claude/settings.json` it
+ * planted there must not switch off the guard hooks on its next spawn, so only
+ * the user's own settings load. The tools are named so that every one that
+ * runs commands or writes files is one the guard hooks match; ambient MCP
+ * servers stay out.
+ */
+export const STORY_CLI_ISOLATION: readonly string[] = [
+    "--setting-sources",
+    "user",
+    "--strict-mcp-config",
+    "--tools",
+    "Bash,Read,Write,Edit,Glob,Grep,NotebookEdit",
+]
+
 export class StoryAgent extends BusMember {
     private readonly spec: Required<
         Pick<
@@ -431,7 +448,7 @@ export class StoryAgent extends BusMember {
             )
         const claude = new ClaudeCliParticipant(this.spec.id, {
             cwd: this.spec.cwd,
-            extraArgs: ["--settings", this.settingsPath],
+            extraArgs: ["--settings", this.settingsPath, ...STORY_CLI_ISOLATION],
             model: this.spec.model,
             effort: this.spec.effort,
             claudeBin: this.spec.claudeBin,

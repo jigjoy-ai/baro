@@ -91,3 +91,35 @@ describe("hook bridge — the agent's world shows the mechanisms", () => {
         )
     })
 })
+
+describe("a story's Claude Code tool set", () => {
+    it("names no command-running or writing tool the guard hooks do not match", async () => {
+        const { STORY_CLI_ISOLATION } = await import("../../src/harness/claude/story-agent.js")
+        const tools = STORY_CLI_ISOLATION[STORY_CLI_ISOLATION.indexOf("--tools") + 1]!.split(",")
+        const hookDir = mkdtempSync(join(tmpdir(), "baro-hook-tools-"))
+        try {
+            const settings = JSON.parse(
+                readFileSync(
+                    materializeStoryHooks(
+                        hookDir,
+                        { writes: ["a.ts"], ownedElsewhere: {} },
+                        { command: "c", capability: "n" },
+                        hookDir,
+                    )!,
+                    "utf8",
+                ),
+            )
+            const matchers = settings.hooks.PreToolUse.map(
+                (entry: { matcher: string }) => new RegExp(`^(?:${entry.matcher})$`),
+            )
+            const guarded = (tool: string) => matchers.some((matcher: RegExp) => matcher.test(tool))
+            for (const tool of tools) {
+                if (["Read", "Glob", "Grep"].includes(tool)) continue
+                assert.ok(guarded(tool), `${tool} runs commands or writes files, so a hook must match it`)
+            }
+            assert.equal(STORY_CLI_ISOLATION[STORY_CLI_ISOLATION.indexOf("--setting-sources") + 1], "user")
+        } finally {
+            rmSync(hookDir, { recursive: true, force: true })
+        }
+    })
+})
