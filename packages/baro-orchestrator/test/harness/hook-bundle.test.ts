@@ -105,3 +105,32 @@ describe("the Claude lane's hook, built the way it ships", () => {
         }
     })
 })
+
+describe("the Claude lane's guarding hooks fail closed", () => {
+    const run = (hook: string, mode: string, input: string): string =>
+        execFileSync(process.execPath, [hook, mode], { input, encoding: "utf8" })
+
+    it("refuses what it cannot judge: unreadable input, missing settings, no worktree", () => {
+        const dir = mkdtempSync(join(tmpdir(), "baro-hook-closed-"))
+        try {
+            materializePublishGuardHooks(dir, dir)
+            const hook = join(dir, "hook.mjs")
+            for (const mode of ["pre-bash", "pre-write"]) {
+                assert.equal(JSON.parse(run(hook, mode, "not json")).decision, "block", `${mode}: bad input`)
+            }
+            assert.equal(run(hook, "post-bash", "not json"), "", "the advisory hook still never blocks")
+
+            rmSync(join(dir, "containment.json"))
+            const call = JSON.stringify({ tool_input: { command: "ls", file_path: "a.txt" }, cwd: dir })
+            assert.match(run(hook, "pre-bash", call), /settings are missing/)
+            assert.match(run(hook, "pre-write", call), /settings are missing/)
+
+            writeFileSync(join(dir, "containment.json"), JSON.stringify({ worktreeRoot: null }))
+            const rootless = JSON.stringify({ tool_input: { command: "ls", file_path: "a.txt" } })
+            assert.match(run(hook, "pre-bash", rootless), /no worktree to judge against/)
+            assert.match(run(hook, "pre-write", rootless), /no worktree to judge against/)
+        } finally {
+            rmSync(dir, { recursive: true, force: true })
+        }
+    })
+})

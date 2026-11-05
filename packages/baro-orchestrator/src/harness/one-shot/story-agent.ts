@@ -650,25 +650,23 @@ export abstract class OneShotStoryAgent<
         env: CoordinationBus,
     ): void {
         if (process.platform === "win32") {
-            runner.start(env)
-            return
+            throw new Error(
+                "the publish guard has no Windows implementation; refusing to start this lane unguarded",
+            )
         }
         const originalPath = process.env.PATH
-        try {
-            if (!this.publishGuardDir) {
-                const dir = join(
-                    tmpdir(),
-                    `baro-publish-guard-${this.spec.id}-${process.pid}`,
-                )
-                materializePublishGuardBin(dir, originalPath ?? "")
-                this.publishGuardDir = dir
-            }
-            process.env.PATH = originalPath
-                ? `${this.publishGuardDir}:${originalPath}`
-                : this.publishGuardDir
-        } catch {
-            // An unwritable tmpdir must not keep the story from running.
+        // Fail closed: a lane that cannot be guarded does not start.
+        if (!this.publishGuardDir) {
+            const dir = join(
+                tmpdir(),
+                `baro-publish-guard-${this.spec.id}-${process.pid}`,
+            )
+            materializePublishGuardBin(dir, originalPath ?? "")
+            this.publishGuardDir = dir
         }
+        process.env.PATH = originalPath
+            ? `${this.publishGuardDir}:${originalPath}`
+            : this.publishGuardDir
         try {
             runner.start(env)
         } finally {

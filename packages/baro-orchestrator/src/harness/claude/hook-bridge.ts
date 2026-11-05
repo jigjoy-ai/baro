@@ -52,8 +52,9 @@ interface ContainmentSettings {
 
 // The __name shim covers bundlers that wrap serialized functions with keepNames.
 const HOOK_SCRIPT = `#!/usr/bin/env node
-// Materialized by baro (hook-bridge.ts). A hook must never break the agent:
-// every path ends in exit 0, and a malformed input is treated as no input.
+// Materialized by baro (hook-bridge.ts). The advisory post-bash hook never
+// breaks the agent; the guarding pre-bash and pre-write hooks fail closed:
+// anything they cannot judge is refused.
 import { appendFileSync, readFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -61,10 +62,24 @@ import { fileURLToPath } from "node:url"
 ${shellContainmentHookSource()}
 
 const mode = process.argv[2]
+const guarding = mode === "pre-bash" || mode === "pre-write"
+const denyUnjudged = (reason) => {
+    process.stdout.write(JSON.stringify({
+        decision: "block",
+        reason,
+        hookSpecificOutput: {
+            hookEventName: "PreToolUse",
+            permissionDecision: "deny",
+            permissionDecisionReason: reason,
+        },
+    }))
+    process.exit(0)
+}
 let input = {}
 try {
     input = JSON.parse(readFileSync(0, "utf8"))
 } catch {
+    if (guarding) denyUnjudged("the baro guard could not read this tool call; it was refused")
     process.exit(0)
 }
 const toolInput = input.tool_input ?? {}
@@ -119,7 +134,7 @@ if (mode === "pre-bash") {
             readFileSync(join(here, "containment.json"), "utf8"),
         )
     } catch {
-        process.exit(0)
+        refuse("shell containment settings are missing; the command was refused")
     }
     const worktreeRoot =
         typeof containment.worktreeRoot === "string" && containment.worktreeRoot
@@ -127,7 +142,7 @@ if (mode === "pre-bash") {
             : typeof input.cwd === "string"
               ? input.cwd
               : ""
-    if (!worktreeRoot) process.exit(0)
+    if (!worktreeRoot) refuse("shell containment has no worktree to judge against; the command was refused")
     let contained = null
     try {
         contained = shellContainmentRefusal(
@@ -182,11 +197,14 @@ if (mode === "pre-write") {
     let containment = null
     try {
         containment = JSON.parse(readFileSync(join(here, "containment.json"), "utf8"))
-    } catch {}
+    } catch {
+        deny("write containment settings are missing; the write was refused")
+    }
     const root = containment && typeof containment.worktreeRoot === "string" && containment.worktreeRoot
         ? containment.worktreeRoot
         : typeof input.cwd === "string" ? input.cwd : ""
-    if (root) {
+    if (!root) deny("write containment has no worktree to judge against; the write was refused")
+    {
         const real = (candidate) => {
             let probe = path.resolve(candidate)
             const rest = []

@@ -129,10 +129,11 @@ describe("a Claude story's write hook follows surface revisions", () => {
                 dir,
                 { writes: ["tools.py"], ownedElsewhere: { "tests/test_tools.py": "S3" } },
                 collab,
+                dir,
             )
             const write = () =>
                 execFileSync("node", [join(dir, "hook.mjs"), "pre-write"], {
-                    input: JSON.stringify({ tool_input: { file_path: "tests/test_tools.py" } }),
+                    input: JSON.stringify({ tool_input: { file_path: "tests/test_tools.py" }, cwd: dir }),
                     encoding: "utf8",
                 })
             assert.match(write(), /"decision":"block"/)

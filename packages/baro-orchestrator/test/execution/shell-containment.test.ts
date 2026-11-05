@@ -198,16 +198,18 @@ describe("shell containment — one rule, the native lane and the Claude hook", 
         })
     })
 
-    it("a hook must never break the agent: missing or unparseable containment never blocks", async () => {
+    // Allowing what it could not judge is how the shipped hook let every
+    // command through when a bundler renamed one of its imports.
+    it("missing or unparseable containment settings fail closed", async () => {
         await withTempDir("shell-containment-degraded-", async (dir) => {
             const worktree = join(dir, "wt")
             mkdirSync(worktree)
             const hooks = installStoryHooks(dir, worktree)
 
             writeFileSync(join(hooks, "containment.json"), "{not json")
-            assert.equal(runPreBash(hooks, ESCAPING), "")
+            assert.match(runPreBash(hooks, "ls"), /settings are missing/)
             rmSync(join(hooks, "containment.json"))
-            assert.equal(runPreBash(hooks, ESCAPING), "")
+            assert.match(runPreBash(hooks, "ls"), /settings are missing/)
             // Publishing stays denied: its guard never reads containment.json.
             assert.match(
                 runPreBash(hooks, "git push origin HEAD"),
@@ -228,7 +230,11 @@ describe("shell containment — one rule, the native lane and the Claude hook", 
                     .worktreeRoot,
                 null,
             )
-            assert.equal(runPreBash(hooks, ESCAPING), "", "no root, no verdict")
+            assert.match(
+                runPreBash(hooks, ESCAPING),
+                /no worktree to judge against/,
+                "no root: refused, not waved through",
+            )
             const parsed = JSON.parse(runPreBash(hooks, ESCAPING, worktree))
             assert.equal(parsed.hookSpecificOutput.permissionDecision, "deny")
         })

@@ -25,6 +25,7 @@ describe("hook bridge — the agent's world shows the mechanisms", () => {
             ownedElsewhere: { "src/theirs.ts": "S2" },
         },
         { command: "agent-collab", capability: "note" },
+        dir,
     )
 
     it("materializes trusted settings wiring both hook events", () => {
@@ -70,12 +71,14 @@ describe("hook bridge — the agent's world shows the mechanisms", () => {
         )
     })
 
-    it("a hook must never break the agent: malformed input exits clean and silent", () => {
-        const out = execFileSync("node", [join(dir, "hook.mjs"), "pre-write"], {
-            input: "not json at all",
-            encoding: "utf8",
-        })
-        assert.equal(out, "")
+    it("a guarding hook refuses input it cannot read; the advisory one stays silent", () => {
+        const run = (mode: string) =>
+            execFileSync("node", [join(dir, "hook.mjs"), mode], {
+                input: "not json at all",
+                encoding: "utf8",
+            })
+        assert.equal(JSON.parse(run("pre-write")).decision, "block")
+        assert.equal(run("post-bash"), "")
     })
 
     it("a story with no surface gets no hooks at all", () => {
