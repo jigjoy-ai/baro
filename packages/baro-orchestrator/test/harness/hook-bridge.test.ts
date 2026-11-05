@@ -60,7 +60,7 @@ describe("hook bridge — the agent's world shows the mechanisms", () => {
         )
         assert.match(parsed.reason, /\[gate:write-surface\]/)
         assert.match(parsed.reason, /belongs to story S2/)
-        assert.match(parsed.reason, /Ask the owner/)
+        assert.match(parsed.reason, /Ask that owner/)
     })
 
     it("lets the story write inside its own surface without a word", () => {

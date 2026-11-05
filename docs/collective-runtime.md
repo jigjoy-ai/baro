@@ -154,6 +154,19 @@ the capability after reading each bounded request body, closing a release race;
 release then revokes its attribution. Messages, help, notes, discoveries, and
 replans submitted after the release boundary are stale and cannot influence
 Dialogue or another worker.
+
+A running worker that needs a file it did not declare claims it
+(`agent-collab.mjs emit --kind claim --paths-json '["src/x.ts"]'`) before it
+writes. The Board decides at once, from the same ownership rule as the write
+gate: a path no story that has not integrated declares or holds (unowned, or
+released by an integrated owner) becomes the claimant's, every running lease
+receives the revised surface (`gate_rule_announced` with a `surfaceRevision`,
+so a claim orders within one graph version), and running peers are told who
+owns it; a path such a story still holds stays with it, and the claimant
+messages that owner or blocks on it. The decision is in the broker receipt and
+in a `claim_answer` message, and the bus records it as `paths_claimed`. A claim
+ends when its claimant integrates, exactly like a declared write.
+
 Durably handed-off goal challenges remain replayable until their persisted
 Guardian projection acknowledges them. Before persistence, the Bridge also
 checks the challenge invariant against the exact derived GoalContract allowlist;

@@ -21,6 +21,7 @@ import {
     CollaborationNote,
     GoalInvariantChallengeRaised,
     GoalLedgerProjectionPersisted,
+    PathsClaimed,
     RunCompleted,
     RunStartRequest,
     RuntimeReplanApplied,
@@ -2461,3 +2462,98 @@ async function waitForProposal(
     }
     assert.fail(`timed out waiting for runtime replan proposal ${proposalId}`)
 }
+
+describe("CollaborationBridge — runtime path claims", () => {
+    it("answers a claim in the broker receipt and tells running peers who owns the path now", async () => {
+        await withTempDir("collaboration-claim-", async (dir) => {
+            const runId = "run-claim"
+            const broker = source("broker")
+            const asked: Array<{ storyId: string; paths: readonly string[] }> = []
+            const bridge = new CollaborationBridge({
+                runId,
+                sessionDir: dir,
+                claimPaths: (storyId, paths) => {
+                    asked.push({ storyId, paths })
+                    return [
+                        { path: paths[0]!, outcome: "granted", releasedBy: "S3" },
+                        { path: paths[1]!, outcome: "held", ownerStoryId: "S6" },
+                    ]
+                },
+            })
+            bridge.setLeaseAuthority(broker)
+            const env = joinWithCapture(bridge)
+            await bridge.ready()
+            grantLease(env, broker, runId, "S5", "lease-S5", 1, 3)
+            grantLease(env, broker, runId, "S6", "lease-S6", 1, 3)
+            await bridge.idle()
+            const claimant = bridge.capabilityForLease({
+                runId, storyId: "S5", leaseId: "lease-S5", generation: 1, deliveryMode: "poll",
+            })
+            const peer = bridge.capabilityForLease({
+                runId, storyId: "S6", leaseId: "lease-S6", generation: 1, deliveryMode: "poll",
+            })
+
+            const sent = await brokerFetch(claimant, "/v1/events", {
+                method: "POST",
+                body: {
+                    kind: "claim",
+                    eventId: "event-claim-1",
+                    paths: ["tests/test_tools.py", "__init__.py"],
+                    reason: "O-066 scans tests/",
+                },
+            })
+
+            assert.equal(sent.status, 202)
+            assert.deepEqual(asked, [
+                { storyId: "S5", paths: ["tests/test_tools.py", "__init__.py"] },
+            ])
+            assert.equal(sent.value.claims[0].outcome, "granted")
+            assert.equal(sent.value.claims[1].ownerStoryId, "S6")
+            const audit = await waitFor(env.events, PathsClaimed.is)
+            assert.equal(audit.payload.storyId, "S5")
+
+            const answer = await brokerFetch(claimant, "/v1/inbox")
+            assert.match(
+                JSON.stringify(answer.value.messages),
+                /tests\/test_tools\.py: yours now \(released by S3/,
+            )
+            assert.match(JSON.stringify(answer.value.messages), /held by S6, which has not integrated/)
+            const told = await brokerFetch(peer, "/v1/inbox")
+            assert.match(JSON.stringify(told.value.messages), /Story S5 now owns these paths/)
+            assert.doesNotMatch(
+                JSON.stringify(told.value.messages),
+                /__init__\.py/,
+                "a path that stayed with its owner did not change hands",
+            )
+            bridge.leave(env)
+        })
+    })
+
+    it("rejects a claim that names a tree or escapes the repository", async () => {
+        await withTempDir("collaboration-claim-shape-", async (dir) => {
+            const runId = "run-claim-shape"
+            const broker = source("broker")
+            const bridge = new CollaborationBridge({
+                runId,
+                sessionDir: dir,
+                claimPaths: () => assert.fail("an invalid claim never reaches the Board"),
+            })
+            bridge.setLeaseAuthority(broker)
+            const env = joinWithCapture(bridge)
+            await bridge.ready()
+            grantLease(env, broker, runId, "S5", "lease-S5", 1, 3)
+            await bridge.idle()
+            const claimant = bridge.capabilityForLease({
+                runId, storyId: "S5", leaseId: "lease-S5", generation: 1, deliveryMode: "poll",
+            })
+            for (const paths of [["../outside.ts"], ["/etc/passwd"], ["src/"], [], ["a.ts", "a.ts"]]) {
+                const sent = await brokerFetch(claimant, "/v1/events", {
+                    method: "POST",
+                    body: { kind: "claim", eventId: `event-${paths.length}-${paths[0] ?? "none"}`.replace(/[^\w-]/g, "x"), paths },
+                })
+                assert.equal(sent.status, 400, JSON.stringify(paths))
+            }
+            bridge.leave(env)
+        })
+    })
+})

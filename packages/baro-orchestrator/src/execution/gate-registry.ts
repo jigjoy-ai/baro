@@ -76,7 +76,7 @@ const WRITE_SURFACE: GateDisclosure = {
     id: "write-surface",
     enforcedBy: "src/integration/git-coordinator.ts",
     summary:
-        "A write to a path an active peer owns is refused at the write.",
+        "A write to a path a peer that has not integrated owns is refused at the write; any other path can be claimed at runtime.",
     announce: (ctx) => {
         const surface = ctx.surface
         if (!surface || surface.writes.length === 0) return null
@@ -86,16 +86,14 @@ const WRITE_SURFACE: GateDisclosure = {
         return [
             "## Your write surface [gate:write-surface]",
             "",
-            "The files this story declared it would write, and the only ones",
-            "the merge gate will accept from you:",
+            "The files this story declared it will write:",
             "",
             ...surface.writes.map((path) => `- ${path}`),
             "",
             ...(owners.length > 0
                 ? [
-                      "Owned by other stories in this run. A diff touching one of",
-                      "these is refused at integration, however small and however",
-                      "right it is:",
+                      "Held by other stories that have not integrated yet. A write to",
+                      "one of these is refused, however small and however right it is:",
                       "",
                       ...owners
                           .slice(0, 40)
@@ -120,16 +118,20 @@ export function surfaceRemedyLines(
     capability: string,
 ): string[] {
     return [
-        "If you need a change in a file you do not own — a bug, a wrong",
-        "import, a missing helper — do NOT edit it and do NOT copy it into",
-        "your own surface. One of these instead:",
-        `- Ask the owner, who can still act: ${command} emit ${capability} --kind help --reason ${JSON.stringify("WHAT NEEDS CHANGING IN <FILE>, PLUS THE COMMAND AND OUTPUT THAT SHOW WHY")}`,
+        "If you need a file you did not declare, claim it BEFORE you write it.",
+        "The Board answers immediately; never copy a file into your surface:",
+        `- ${command} emit ${capability} --kind claim --paths-json ${JSON.stringify(JSON.stringify(["<FILE>"]))} --reason ${JSON.stringify("WHY YOU NEED IT")}`,
+        "  A path no other story holds (unowned, or its owner already",
+        "  integrated) becomes yours on the spot, and every running peer is told.",
+        "If a story that has not integrated holds it — a bug, a wrong import,",
+        "a missing helper in its file — do NOT edit it. One of these instead:",
+        `- Ask that owner, who can still act: ${command} emit ${capability} --kind message --to <OWNER> --text ${JSON.stringify("WHAT NEEDS CHANGING IN <FILE>, PLUS THE COMMAND AND OUTPUT THAT SHOW WHY")}`,
         "- If the architecture contract is what is wrong, withdraw that claim",
         "  with the dispute command above instead of repairing around it.",
         "- If you cannot honestly finish without the change, block on the",
         "  owning story rather than reaching into it.",
-        "Working outside your surface loses the whole story at the gate, not",
-        "just the stray edit.",
+        "Writing a file another story holds loses the whole story at the gate,",
+        "not just the stray edit.",
     ]
 }
 

@@ -27,6 +27,7 @@ import {
     CollaborationNote,
     GoalInvariantChallengeRaised,
     GoalLedgerProjectionPersisted,
+    PathsClaimed,
     PeerHelpRequested,
     RunCompleted,
     RuntimeReplanApplied,
@@ -46,6 +47,7 @@ import {
     type WorkBlockedData,
 } from "../semantic-events.js"
 import { snapshotRuntimeReplanMutation } from "../runtime-graph/runtime-replan.js"
+import type { PathClaimDecision } from "./write-surface.js"
 import { correlatedTargetedMessage } from "../runtime/targeted-message-authority.js"
 import {
     SerializedObserver,
@@ -68,6 +70,11 @@ export interface CollaborationBridgeOptions {
      * after which the agents built the missing pieces themselves.
      */
     pathOwner?: (path: string) => { storyId: string; integrated: boolean } | null
+    /** The Board's decision on a running story taking paths at runtime. */
+    claimPaths?: (
+        storyId: string,
+        paths: readonly string[],
+    ) => readonly PathClaimDecision[]
     pollMs?: number
     /** Explicit test-only bypass for object-identity authority binding. */
     unsafeAllowUnboundAuthorities?: boolean
@@ -116,6 +123,8 @@ interface OutboxRecord {
     command?: string
     output?: string
     obligationId?: string
+    /** claim: paths the story needs beyond its declared writes. */
+    paths?: string[]
 }
 
 interface RetainedChallengeRecord {
@@ -168,6 +177,7 @@ interface ProcessedBrokerEvent {
 
 interface ProcessRecordResult {
     deliveryGaps: readonly string[]
+    claims?: readonly PathClaimDecision[]
 }
 
 interface DecisionWaiter {
@@ -761,6 +771,10 @@ export class CollaborationBridge extends SerializedObserver {
                     text,
                 }),
             )
+        } else if (record.kind === "claim" && record.paths && liveSource) {
+            const claims = this.decideClaim(agentId, record.paths)
+            deliveryGaps.push(...this.announceClaim(agentId, claims))
+            return { deliveryGaps, claims }
         } else if (record.kind === "note" && text && liveSource) {
             // A published note reaches a story through its launch context,
             // which is frozen when the Board asks for it — so a wave admitted
@@ -1221,8 +1235,8 @@ export class CollaborationBridge extends SerializedObserver {
             lines.push(
                 `- ${normalized} → ${owner.storyId}` +
                     (owner.integrated
-                        ? " (already integrated; pull the latest run branch)"
-                        : " (not integrated yet; block on it or wait — do not write it)"),
+                        ? " (already integrated, so it released the path: claim it with --kind claim and pull the latest run branch)"
+                        : " (not integrated yet: message it if it is running, block on it, or wait — do not write it)"),
             )
             if (lines.length >= 8) break
         }
@@ -1232,7 +1246,7 @@ export class CollaborationBridge extends SerializedObserver {
             text: [
                 "Ownership answer from the plan:",
                 ...lines,
-                "Writing a path owned by another story loses your whole story at the merge gate, not just that edit.",
+                "Writing a path a story that has not integrated holds loses your whole story at the merge gate, not just that edit.",
             ].join("\n"),
             metadata: { kind: "ownership_answer", sourceAgentId: "host" },
         })
@@ -1263,6 +1277,56 @@ export class CollaborationBridge extends SerializedObserver {
                 metadata: { kind: "ownership_update", sourceAgentId: "host" },
             })
         }
+    }
+
+    private decideClaim(
+        agentId: string,
+        paths: readonly string[],
+    ): readonly PathClaimDecision[] {
+        const claims = this.opts.claimPaths?.(agentId, paths) ??
+            paths.map((path) => ({
+                path,
+                outcome: "refused" as const,
+                reason: "this run has no claim authority",
+            }))
+        this.publish(
+            PathsClaimed.create({
+                runId: this.opts.runId,
+                storyId: agentId,
+                decisions: [...claims],
+            }),
+        )
+        return claims
+    }
+
+    /** The claimant learns each decision (a broker receipt also carries it);
+     * every other running story learns the paths that changed hands. */
+    private announceClaim(
+        agentId: string,
+        claims: readonly PathClaimDecision[],
+    ): string[] {
+        const gaps: string[] = []
+        const answer = this.routeMessageIntent({
+            recipientId: agentId,
+            text: ["Claim decision from the Board:", ...claims.map(claimLine)].join("\n"),
+            metadata: { kind: "claim_answer", sourceAgentId: "host" },
+        })
+        if (answer === "overflow") gaps.push(agentId)
+        const granted = claims.filter((claim) => claim.outcome === "granted")
+        if (granted.length === 0) return gaps
+        for (const peer of this.activeAgents) {
+            if (peer === agentId) continue
+            const result = this.routeMessageIntent({
+                recipientId: peer,
+                text: [
+                    `Story ${agentId} now owns these paths; ask it before changing them:`,
+                    ...granted.slice(0, 8).map((claim) => `- ${claim.path}`),
+                ].join("\n"),
+                metadata: { kind: "ownership_update", sourceAgentId: "host" },
+            })
+            if (result === "overflow") gaps.push(peer)
+        }
+        return gaps
     }
 
     private broadcastPeerNote(sourceAgentId: string, text: string): string[] {
@@ -1748,6 +1812,7 @@ export class CollaborationBridge extends SerializedObserver {
                     ? { proposalId: record.proposalId }
                     : {}),
                 ...(record.blockId ? { blockId: record.blockId } : {}),
+                ...(processed.claims ? { claims: processed.claims } : {}),
                 ...(record.challengeId
                     ? { challengeId: record.challengeId }
                     : {}),
@@ -2004,6 +2069,24 @@ function parseBrokerRecord(value: unknown): OutboxRecord | string {
         }
         return { kind, eventId, text: record.text as string }
     }
+    if (kind === "claim") {
+        if (!exactKeys("eventId", "paths", "reason")) return "claim has unsupported fields"
+        if (!eventId) return "claim event id is invalid"
+        const paths = claimPaths(record.paths)
+        if (!paths) {
+            return "claim paths must be 1-20 distinct repository-relative file paths"
+        }
+        if (
+            record.reason !== undefined &&
+            (typeof record.reason !== "string" || record.reason.length > 2_000)
+        ) return "claim reason is invalid"
+        return {
+            kind,
+            eventId,
+            paths,
+            ...(typeof record.reason === "string" ? { reason: record.reason } : {}),
+        }
+    }
     if (kind === "discover") {
         if (!exactKeys("eventId", "story", "reason")) return "discover has unsupported fields"
         if (!eventId) return "discover event id is invalid"
@@ -2204,6 +2287,45 @@ function validReplanStory(value: unknown): boolean {
         (story.goalInvariantIds === undefined ||
             validGoalInvariantIds(story.goalInvariantIds))
     )
+}
+
+const MAX_CLAIM_PATHS = 20
+
+/** Repository-relative file paths only: a claim names files, never a tree. */
+function claimPaths(value: unknown): string[] | null {
+    if (!Array.isArray(value) || value.length === 0 || value.length > MAX_CLAIM_PATHS) {
+        return null
+    }
+    const paths: string[] = []
+    for (const entry of value) {
+        if (typeof entry !== "string") return null
+        const path = entry.trim().replace(/^\.\//u, "")
+        if (
+            !path ||
+            path.length > 512 ||
+            path.startsWith("/") ||
+            path.endsWith("/") ||
+            path.includes("\\") ||
+            path.split("/").some((segment) => segment === ".." || segment === "." || segment === "")
+        ) return null
+        paths.push(path)
+    }
+    return new Set(paths).size === paths.length ? paths : null
+}
+
+function claimLine(claim: PathClaimDecision): string {
+    switch (claim.outcome) {
+        case "granted":
+            return claim.releasedBy
+                ? `- ${claim.path}: yours now (released by ${claim.releasedBy}, which integrated; pull the latest run branch before editing)`
+                : `- ${claim.path}: yours now`
+        case "already_owned":
+            return `- ${claim.path}: already yours`
+        case "held":
+            return `- ${claim.path}: held by ${claim.ownerStoryId}, which has not integrated; message it with --kind message --to ${claim.ownerStoryId} if it is running, otherwise block on it`
+        case "refused":
+            return `- ${claim.path}: refused (${claim.reason})`
+    }
 }
 
 function hasOnlyKeys(

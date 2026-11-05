@@ -6,7 +6,9 @@
  * `generation` from the request into that terminal result.
  */
 
-import { CoordinationBus, type BusMember } from "../runtime/coordination.js"
+import { BusMember, CoordinationBus } from "../runtime/coordination.js"
+import { GateRuleAnnounced } from "../semantic-events.js"
+import type { SemanticEvent } from "../runtime/mozaik.js"
 
 import type { GatewayBillingCoordinator } from "../telemetry/billing/index.js"
 import type { StorySpawnRequestData } from "../semantic-events.js"
@@ -20,7 +22,10 @@ import { OpenCodeStoryAgent } from "../harness/opencode/story-agent.js"
 import { PiStoryAgent } from "../harness/pi/story-agent.js"
 import { DevinStoryAgent } from "../harness/devin/story-agent.js"
 import { StoryAgent } from "../harness/claude/story-agent.js"
-import { materializeStoryHooks } from "../harness/claude/hook-bridge.js"
+import {
+    materializeStoryHooks,
+    refreshStoryHookSurface,
+} from "../harness/claude/hook-bridge.js"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -163,6 +168,11 @@ export class LocalStoryExecutor implements StoryExecutor {
             leaseId: req.leaseId,
             generation: req.generation,
         }
+        const hookDir = join(tmpdir(), `baro-hooks-${req.storyId}-${process.pid}`)
+        const hookCollab = {
+            command: opts.collaboration?.commandPath ?? "agent-collab",
+            capability: "note",
+        }
         const agent: AnyStoryAgent =
             route.backend === "devin"
                 ? new DevinStoryAgent({
@@ -280,17 +290,9 @@ export class LocalStoryExecutor implements StoryExecutor {
                       cwd,
                       ...(() => {
                           const settings = materializeStoryHooks(
-                              join(
-                                  tmpdir(),
-                                  `baro-hooks-${req.storyId}-${process.pid}`,
-                              ),
+                              hookDir,
                               req.surface,
-                              {
-                                  command:
-                                      opts.collaboration?.commandPath ??
-                                      "agent-collab",
-                                  capability: "note",
-                              },
+                              hookCollab,
                           )
                           return settings ? { cliSettingsPath: settings } : {}
                       })(),
@@ -323,12 +325,25 @@ export class LocalStoryExecutor implements StoryExecutor {
         }
 
         agent.join(env)
+        const surfaceFollower =
+            agent instanceof StoryAgent && req.surface
+                ? new HookSurfaceFollower(
+                      req,
+                      opts.runtimeReplanDecisionAuthority,
+                      (surface) =>
+                          refreshStoryHookSurface(hookDir, surface, hookCollab),
+                  )
+                : null
+        surfaceFollower?.join(env)
 
         // Fire-and-forget: Conductor reacts to the StoryResult bus event.
         void agent.run(env)
 
         return {
-            dispose: (e: CoordinationBus) => agent.leave(e),
+            dispose: (e: CoordinationBus) => {
+                surfaceFollower?.leave(e)
+                agent.leave(e)
+            },
             abort: () => (agent as { abort?: () => void }).abort?.(),
             ...("suspend" in agent && typeof agent.suspend === "function"
                 ? {
@@ -339,6 +354,55 @@ export class LocalStoryExecutor implements StoryExecutor {
                           })),
                   }
                 : {}),
+        }
+    }
+}
+
+/**
+ * Keeps a Claude story's write hook on the current surface. The OpenAI lane
+ * applies revisions in-process; the Claude CLI only re-reads its hook file.
+ */
+class HookSurfaceFollower extends BusMember {
+    private appliedGraphVersion = -1
+    private appliedRevision = -1
+
+    constructor(
+        private readonly req: StorySpawnRequestData,
+        private readonly authority: BusMember | undefined,
+        private readonly apply: (
+            surface: NonNullable<StorySpawnRequestData["surface"]>,
+        ) => void,
+    ) {
+        super()
+    }
+
+    override onExternalEvent(
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
+    ): void {
+        if (!GateRuleAnnounced.is(event)) return
+        const rule = event.payload
+        if (
+            (this.authority && source !== this.authority) ||
+            rule.gateId !== "write-surface" ||
+            !rule.surface ||
+            rule.runId !== this.req.runId ||
+            rule.storyId !== this.req.storyId ||
+            rule.leaseId !== this.req.leaseId ||
+            rule.generation !== this.req.generation
+        ) return
+        const revision = rule.surfaceRevision ?? 0
+        if (
+            rule.graphVersion < this.appliedGraphVersion ||
+            (rule.graphVersion === this.appliedGraphVersion &&
+                revision <= this.appliedRevision)
+        ) return
+        this.appliedGraphVersion = rule.graphVersion
+        this.appliedRevision = revision
+        try {
+            this.apply(rule.surface)
+        } catch {
+            // The spawn-time file stays in force; integration still judges.
         }
     }
 }

@@ -19,11 +19,11 @@ if (command === "emit") {
     const kind = required("kind")
     let decisionWaitMs = null
     let decisionId = null
-    if (!["message", "help", "note", "discover", "replan", "block", "challenge", "dispute"].includes(kind)) {
+    if (!["message", "help", "note", "discover", "claim", "replan", "block", "challenge", "dispute"].includes(kind)) {
         fail(`unsupported kind '${kind}'`)
     }
     const record = { kind }
-    if (["message", "help", "note", "discover"].includes(kind)) {
+    if (["message", "help", "note", "discover", "claim"].includes(kind)) {
         record.eventId = safeTransportId(
             flags.get("event-id") ?? `event-${randomUUID()}`,
             "--event-id",
@@ -61,6 +61,23 @@ if (command === "emit") {
         record.reason = required("reason").trim()
         if (!record.reason) fail("--reason must contain non-whitespace text")
         if (record.reason.length > 8_000) fail("--reason exceeds 8000 characters")
+    } else if (kind === "claim") {
+        const raw = required("paths-json")
+        try {
+            record.paths = JSON.parse(raw)
+        } catch {
+            fail("--paths-json must be valid JSON")
+        }
+        if (
+            !Array.isArray(record.paths) ||
+            record.paths.length === 0 ||
+            record.paths.length > 20 ||
+            !record.paths.every((path) => typeof path === "string" && path.trim())
+        ) {
+            fail("--paths-json must be an array of 1-20 file paths")
+        }
+        const reason = flags.get("reason")?.trim()
+        if (reason) record.reason = reason.slice(0, 2_000)
     } else if (kind === "discover") {
         const raw = required("story-json")
         try {
@@ -294,6 +311,7 @@ if (command === "emit") {
         "  agent-collab.mjs emit --endpoint URL --token TOKEN --kind note --text TEXT [--event-id ID]",
         "  agent-collab.mjs emit --endpoint URL --token TOKEN --kind challenge --invariant G-A1 --reason TEXT [--challenge-id ID]",
         "  agent-collab.mjs emit --endpoint URL --token TOKEN --kind discover --story-json JSON [--reason TEXT] [--event-id ID]",
+        "  agent-collab.mjs emit --endpoint URL --token TOKEN --kind claim --paths-json '[\"src/a.ts\"]' [--reason TEXT] [--event-id ID]",
         "  agent-collab.mjs emit --endpoint URL --token TOKEN --kind replan --base-version N --replan-json JSON [--reason TEXT] [--wait-ms N]",
         "  agent-collab.mjs emit --endpoint URL --token TOKEN --kind block --requires-json JSON [--reason TEXT] [--wait-ms N]",
         "  agent-collab.mjs emit --endpoint URL --token TOKEN --kind dispute --claim TEXT --command TEXT --output TEXT [--obligation O-011]",

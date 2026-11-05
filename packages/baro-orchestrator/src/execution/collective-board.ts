@@ -128,7 +128,13 @@ import {
 import { ProgressivePlanningCoordinator } from "../planning/application/progressive-planning-coordinator.js"
 import { OperationalRecoveryPolicy } from "./operational-recovery.js"
 import { writeSurfaceOf } from "../planning/domain/dependency-evidence.js"
-import { storyWriteSurface, surfaceKey } from "./write-surface.js"
+import {
+    decidePathClaim,
+    isActiveOwner,
+    storyWriteSurface,
+    surfaceKey,
+    type PathClaimDecision,
+} from "./write-surface.js"
 import type { StoryOutcomeAuthority } from "../runtime/story-outcome-authority.js"
 import { isProviderCapacityFailure } from "../harness/provider-failure.js"
 import {
@@ -275,6 +281,9 @@ const MAX_GOAL_REMEDIATION_ADMISSION_ATTEMPTS = 3
 export class CollectiveBoard extends SerializedObserver {
     private phase: BoardPhase = "idle"
     private prd: PrdFile | null = null
+    /** Paths taken at runtime beyond a story's declared writes (path → story). */
+    private readonly pathClaims = new Map<string, string>()
+    private surfaceRevision = 0
     private startedAt = 0
     private wave: WaveState | null = null
     private waveOrdinal = 0
@@ -3012,12 +3021,46 @@ export class CollectiveBoard extends SerializedObserver {
      * exist yet at its own offer time.
      */
     ownerOfPath(path: string): { storyId: string; integrated: boolean } | null {
-        for (const story of this.prd?.userStories ?? []) {
-            if (writeSurfaceOf(story).includes(path)) {
-                return { storyId: story.id, integrated: story.passes === true }
-            }
+        const stories = this.prd?.userStories ?? []
+        const owns = (story: PrdStory) =>
+            writeSurfaceOf(story).includes(path) ||
+            this.pathClaims.get(path) === story.id
+        // An active owner is the one that matters; a story that integrated
+        // only released the path.
+        const owner =
+            stories.find((story) => isActiveOwner(story) && owns(story)) ??
+            stories.find(owns)
+        return owner
+            ? { storyId: owner.id, integrated: owner.passes === true }
+            : null
+    }
+
+    /**
+     * A running story takes paths beyond its declared writes, decided now
+     * instead of after an attempt: free paths (unowned, or released by a story
+     * that integrated) become its own, and every running lease is told the
+     * new boundary; a path an active peer owns stays with that peer.
+     */
+    claimPaths(storyId: string, paths: readonly string[]): PathClaimDecision[] {
+        const stories = this.prd?.userStories ?? []
+        if (!this.leases.has(storyId)) {
+            return paths.map((path) => ({
+                path,
+                outcome: "refused" as const,
+                reason: "only a running story can claim paths",
+            }))
         }
-        return null
+        const decisions = paths.map((path) =>
+            decidePathClaim(storyId, path, stories, this.pathClaims),
+        )
+        const granted = decisions.filter(
+            (decision) => decision.outcome === "granted",
+        )
+        for (const decision of granted) this.pathClaims.set(decision.path, storyId)
+        if (granted.length > 0) {
+            this.announceRevisedSurfaces(this.runtimeReplans.graphVersion)
+        }
+        return decisions
     }
 
     private offerStory(story: PrdStory, context: string | null): void {
@@ -3046,7 +3089,11 @@ export class CollectiveBoard extends SerializedObserver {
                 ...this.operationalRecovery.exclusions(story.id),
             ]),
         ].sort()
-        const surface = storyWriteSurface(story, this.prd?.userStories ?? [])
+        const surface = storyWriteSurface(
+            story,
+            this.prd?.userStories ?? [],
+            this.pathClaims,
+        )
         const offered = WorkOffered.create({
             runId: this.opts.runId,
             offerId,
@@ -3430,7 +3477,7 @@ export class CollectiveBoard extends SerializedObserver {
         const stories = this.prd?.userStories ?? []
         const story = stories.find((candidate) => candidate.id === storyId)
         if (!story) return
-        const surface = storyWriteSurface(story, stories)
+        const surface = storyWriteSurface(story, stories, this.pathClaims)
         const key = surfaceKey(surface)
         if (key === lease.announcedSurfaceKey) return
         lease.announcedSurfaceKey = key
@@ -3443,6 +3490,7 @@ export class CollectiveBoard extends SerializedObserver {
                 generation: lease.generation,
                 gateId: "write-surface",
                 graphVersion,
+                surfaceRevision: ++this.surfaceRevision,
                 surface,
             }),
         )

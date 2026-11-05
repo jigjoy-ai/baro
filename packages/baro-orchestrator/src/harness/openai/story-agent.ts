@@ -255,6 +255,7 @@ export class OpenAIStoryAgent extends BusMember {
      * these. */
     private readonly pendingPeerNotes: string[] = []
     private appliedSurfaceGraphVersion = 0
+    private appliedSurfaceRevision = 0
 
     constructor(spec: StorySpec, opts: OpenAIStoryAgentOptions = {}) {
         super()
@@ -426,9 +427,12 @@ export class OpenAIStoryAgent extends BusMember {
             event.payload.storyId === this.spec.id &&
             event.payload.leaseId === this.spec.leaseId &&
             event.payload.generation === this.spec.generation &&
-            event.payload.graphVersion > this.appliedSurfaceGraphVersion
+            (event.payload.graphVersion > this.appliedSurfaceGraphVersion ||
+                (event.payload.graphVersion === this.appliedSurfaceGraphVersion &&
+                    (event.payload.surfaceRevision ?? 0) > this.appliedSurfaceRevision))
         ) {
             this.appliedSurfaceGraphVersion = event.payload.graphVersion
+            this.appliedSurfaceRevision = event.payload.surfaceRevision ?? 0
             this.liveSurface.writes.splice(
                 0,
                 this.liveSurface.writes.length,
@@ -617,7 +621,7 @@ export class OpenAIStoryAgent extends BusMember {
     }> {
         // A fresh attempt rebuilds context from the spawn prompt, whose
         // surface section a mid-flight revision may have superseded.
-        if (this.appliedSurfaceGraphVersion > 0) {
+        if (this.appliedSurfaceGraphVersion > 0 || this.appliedSurfaceRevision > 0) {
             this.pendingRuleUpdates.length = 0
             this.pendingRuleUpdates.push(
                 this.renderSurfaceRuleUpdate(this.appliedSurfaceGraphVersion),
@@ -836,7 +840,7 @@ export class OpenAIStoryAgent extends BusMember {
                 : {}),
         }).join("\n\n")
         return [
-            `RULE UPDATE [gate:write-surface] — the run's dependency graph changed (graphVersion ${graphVersion}).`,
+            `RULE UPDATE [gate:write-surface] — the run's write surfaces changed (graphVersion ${graphVersion}).`,
             "The write-surface rule below replaces the one in your instructions; the merge gate already enforces this revision.",
             "",
             rendered,

@@ -1032,6 +1032,82 @@ describe("OpenAIStoryAgent", () => {
         })
     })
 
+    it("applies a claim's surface revision within the same graph version", async () => {
+        await withTempDir("openai-story-claim-rule-", async (dir) => {
+            const board = source("collective-board")
+            const agent = new OpenAIStoryAgent(
+                {
+                    id: "S1",
+                    prompt: "implement S1",
+                    cwd: dir,
+                    retries: 0,
+                    quietTimeoutMs: 1,
+                    maxTurns: 1,
+                    runId: "run-claim",
+                    leaseId: "lease-claim-1",
+                    generation: 0,
+                    surface: {
+                        writes: ["src/one.ts"],
+                        ownedElsewhere: { "src/two.ts": "S2" },
+                    },
+                },
+                {
+                    model: "fake-model",
+                    maxRoundsPerTurn: 6,
+                    perRoundTimeoutSecs: 60,
+                    runtimeReplanDecisionAuthority: board,
+                },
+            )
+            const env = captureEnv()
+            agent.join(env)
+            const revision = (surfaceRevision: number, owned: Record<string, string>) =>
+                GateRuleAnnounced.create({
+                    runId: "run-claim",
+                    storyId: "S1",
+                    leaseId: "lease-claim-1",
+                    generation: 0,
+                    gateId: "write-surface",
+                    graphVersion: 2,
+                    surfaceRevision,
+                    surface: {
+                        writes: Object.keys(owned).length ? ["src/one.ts"] : ["src/one.ts", "src/two.ts"],
+                        ownedElsewhere: owned,
+                    },
+                })
+
+            const contexts: ModelContext[] = []
+            const rounds: Array<
+                () => Promise<Array<FunctionCallItem | ModelMessageItem>>
+            > = [
+                async () => {
+                    env.publish(board, revision(1, { "src/two.ts": "S2" }))
+                    // S2 integrated and S1 claimed its file: same graph, newer surface.
+                    env.publish(board, revision(2, {}))
+                    // A stale revision delivered late must not take it back.
+                    env.publish(board, revision(1, { "src/two.ts": "S2" }))
+                    await delay(10)
+                    return [writeCall("call-claimed-write", "src/two.ts")]
+                },
+                async () => [ModelMessageItem.rehydrate({ text: "S1 complete" })],
+            ]
+            let index = 0
+            Object.defineProperty(agent, "runRound", {
+                value: async (context: ModelContext) => {
+                    contexts.push(context)
+                    const round = rounds[index++]
+                    assert.ok(round, `unexpected inference round ${index}`)
+                    return { items: await round(), usage: undefined }
+                },
+            })
+
+            const outcome = await agent.run(env)
+
+            assert.equal(outcome.success, true)
+            assert.equal(existsSync(join(dir, "src/two.ts")), true)
+            agent.leave(env)
+        })
+    })
+
     it("injects peer awareness at the round boundary without spending a turn", async () => {
         await withTempDir("openai-story-peer-note-", async (dir) => {
             const bridge = source("collaboration-bridge")

@@ -278,11 +278,30 @@ export interface GateRuleAnnouncedData {
     gateId: string
     /** Graph version whose application revised the rule. */
     graphVersion: number
+    /** Orders revisions within one graph version: a runtime path claim
+     * changes surfaces without changing the graph. */
+    surfaceRevision?: number
     surface?: StorySpawnRequestData["surface"]
 }
 
 export const GateRuleAnnounced =
     defineSemanticEvent<GateRuleAnnouncedData>("gate_rule_announced")
+
+export type PathClaimDecision =
+    | { path: string; outcome: "granted"; releasedBy?: string }
+    | { path: string; outcome: "already_owned" }
+    | { path: string; outcome: "held"; ownerStoryId: string }
+    | { path: string; outcome: "refused"; reason: string }
+
+/** A running story took paths beyond its declared writes, or was told who holds them. */
+export interface PathsClaimedData {
+    runId: string
+    storyId: string
+    decisions: PathClaimDecision[]
+}
+
+export const PathsClaimed =
+    defineSemanticEvent<PathsClaimedData>("paths_claimed")
 
 export interface StorySpawnedData {
     storyId: string

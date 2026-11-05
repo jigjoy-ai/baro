@@ -12,7 +12,7 @@
  * this orchestrator rather than to whatever bundle a machine has installed.
  */
 
-import { mkdirSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 
 import {
@@ -163,7 +163,7 @@ if (mode === "pre-write") {
     )
     if (owner) {
         const reason = [
-            \`[gate:write-surface] \${owner[0]} belongs to story \${owner[1]} in this run. A diff touching it is refused at integration, however small and however right it is — this refusal now costs you one edit instead of the whole story at the gate.\`,
+            \`[gate:write-surface] \${owner[0]} belongs to story \${owner[1]}, which has not integrated yet. A diff touching it is refused at integration, however small and however right it is — this refusal now costs you one edit instead of the whole story at the gate.\`,
             ...surface.remedy,
         ].join("\\n")
         process.stdout.write(JSON.stringify({
@@ -196,8 +196,37 @@ export function materializeStoryHooks(
 ): string | null {
     if (!surface || surface.writes.length === 0) return null
     mkdirSync(dir, { recursive: true })
+    writeSurfaceFile(dir, surface, collab)
+    return writeHookSettings(dir, true, {
+        ...(worktreeRoot === undefined ? {} : { worktreeRoot }),
+        collabCommand: collab.command,
+        collabCapability: collab.capability,
+    })
+}
+
+/**
+ * A mid-flight surface revision (a released or claimed path) for a story whose
+ * hook is already installed: the hook reads surface.json on every write, so
+ * the boundary it enforces moves with the plan instead of staying at spawn.
+ */
+export function refreshStoryHookSurface(
+    dir: string,
+    surface: StoryHookSurface,
+    collab: { command: string; capability: string },
+): void {
+    if (!existsSync(join(dir, "surface.json"))) return
+    writeSurfaceFile(dir, surface, collab)
+}
+
+function writeSurfaceFile(
+    dir: string,
+    surface: StoryHookSurface,
+    collab: { command: string; capability: string },
+): void {
+    const file = join(dir, "surface.json")
+    const staged = `${file}.${process.pid}.tmp`
     writeFileSync(
-        join(dir, "surface.json"),
+        staged,
         JSON.stringify(
             {
                 writes: surface.writes,
@@ -208,11 +237,8 @@ export function materializeStoryHooks(
             2,
         ),
     )
-    return writeHookSettings(dir, true, {
-        ...(worktreeRoot === undefined ? {} : { worktreeRoot }),
-        collabCommand: collab.command,
-        collabCapability: collab.capability,
-    })
+    // Atomic swap: the hook may read it at any moment.
+    renameSync(staged, file)
 }
 
 /** Publish and containment denial alone, for a story with no write surface. */
