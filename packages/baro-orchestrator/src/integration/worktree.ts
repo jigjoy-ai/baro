@@ -83,6 +83,7 @@ export type IntegrationRefusalInvariant =
     | "sealed_merge_dirty"
     | "merge_conflict"
     | "host_checkout_dirty"
+    | "write_surface_violation"
 
 export class WorktreeRefusalError extends Error {
     constructor(
@@ -899,6 +900,7 @@ export class WorktreeManager {
     async mergeBack(
         storyId: string,
         candidateSeal?: WorktreeCandidateSeal,
+        heldElsewhere: Readonly<Record<string, string>> = {},
     ): Promise<boolean> {
         const path = this.paths.get(storyId)
         if (!path) return false
@@ -914,6 +916,7 @@ export class WorktreeManager {
             const mergeTarget = candidateSeal
                 ? await this.sealedMergeTarget(storyId, path, candidateSeal)
                 : branch
+            await this.assertSurfaceRespected(storyId, mergeTarget, heldElsewhere)
             const blocked = await this.integrationTreeBlocks(mergeTarget)
             if (blocked.length) {
                 this.markPreserved(storyId)
@@ -1683,6 +1686,39 @@ export class WorktreeManager {
 
     private async deleteBranchQuiet(branch: string): Promise<void> {
         await execQuiet("git", ["branch", "-D", branch], this.repoRoot)
+    }
+
+    /**
+     * Ownership judged on what actually lands, whichever lane wrote it: the
+     * write-time guards cover only the lanes and tools they hook, and a script
+     * or a one-shot CLI can write anything. A story whose commits change a
+     * path another unintegrated story holds does not merge.
+     */
+    private async assertSurfaceRespected(
+        storyId: string,
+        mergeTarget: string,
+        heldElsewhere: Readonly<Record<string, string>>,
+    ): Promise<void> {
+        if (Object.keys(heldElsewhere).length === 0) return
+        const base = this.baseShas.get(storyId)
+        if (!base) return
+        const { stdout } = await exec(
+            "git",
+            ["diff", "--no-renames", "--name-only", "-z", `${base}..${mergeTarget}`],
+            { cwd: this.integrationRoot },
+        )
+        const touched = stdout
+            .split("\0")
+            .filter((entry) => entry && heldElsewhere[entry] !== undefined)
+            .sort()
+        if (touched.length === 0) return
+        this.markPreserved(storyId)
+        throw new WorktreeRefusalError(
+            "write_surface_violation",
+            `story ${storyId} changes files other unintegrated stories hold: ` +
+                touched.map((file) => `${file} (${heldElsewhere[file]})`).join(", ") +
+                `; it was not merged and stays intact on ${this.branchOf(storyId)}`,
+        )
     }
 
     /**

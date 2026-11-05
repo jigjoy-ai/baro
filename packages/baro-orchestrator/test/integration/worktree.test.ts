@@ -466,9 +466,11 @@ describe("WorktreeManager — failed execution recovery", () => {
     it("retains the dirty worktree when the preservation commit fails", async () => {
         const failedPath = (await mgr.create("S1"))!
         writeFileSync(join(failedPath, "partial.txt"), "must not disappear\n")
-        const hook = join(repo, ".git", "hooks", "pre-commit")
-        writeFileSync(hook, "#!/bin/sh\nexit 1\n")
-        chmodSync(hook, 0o755)
+        // A held index lock makes the preservation commit fail. (A failing
+        // pre-commit hook no longer can: the orchestrator's git runs no hooks.)
+        const gitDir = git(failedPath, "rev-parse", "--absolute-git-dir")
+        const lock = join(gitDir, "index.lock")
+        writeFileSync(lock, "")
 
         await assert.rejects(
             () => mgr.cleanupFailed("S1", true),
@@ -482,7 +484,7 @@ describe("WorktreeManager — failed execution recovery", () => {
             "logical branch remains while preservation is unresolved",
         )
 
-        rmSync(hook, { force: true })
+        rmSync(lock, { force: true })
         await mgr.cleanup("S1")
     })
 })
@@ -525,6 +527,27 @@ describe("WorktreeManager — uncommitted safety net", () => {
             logs.some((l) => l.includes("uncommitted")),
             "a safety-net warning was surfaced",
         )
+    })
+})
+
+describe("WorktreeManager — ownership at integration", () => {
+    it("refuses a merge whose diff touches a file another unintegrated story holds", async () => {
+        // The write-time guards only cover the tools they hook; a script or a
+        // one-shot CLI lane can write any file. Ownership is judged on what lands.
+        const p1 = (await mgr.create("S1"))!
+        commitInWorktree(p1, "mine.ts", "export const mine = 1\n")
+        commitInWorktree(p1, "theirs.ts", "export const stolen = 1\n")
+
+        await assert.rejects(
+            mgr.mergeBack("S1", undefined, { "theirs.ts": "S2" }),
+            (error: Error & { invariant?: string }) =>
+                error.invariant === "write_surface_violation" && /theirs\.ts \(S2\)/.test(error.message),
+        )
+        assert.equal(existsSync(join(repo, "mine.ts")), false, "nothing landed")
+
+        const p3 = (await mgr.create("S3"))!
+        commitInWorktree(p3, "own.ts", "export const own = 1\n")
+        assert.equal(await mgr.mergeBack("S3", undefined, { "theirs.ts": "S2" }), true)
     })
 })
 

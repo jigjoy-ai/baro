@@ -1578,6 +1578,7 @@ export class CollectiveBoard extends SerializedObserver {
                 durationSecs: result.durationSecs,
                 candidateFingerprintRequired,
                 ...(candidateFingerprint ? { candidateFingerprint } : {}),
+                heldElsewhere: this.heldElsewhereFor(result.storyId),
             }),
         )
     }
@@ -3190,6 +3191,28 @@ export class CollectiveBoard extends SerializedObserver {
         })
         this.offers.recordOffer(offered.payload)
         this.emit(offered)
+    }
+
+    /** What other unintegrated stories hold, declared or claimed; computed
+     * even for a story that declared nothing, which may write anywhere else. */
+    private heldElsewhereFor(storyId: string): Record<string, string> {
+        const stories = this.prd?.userStories ?? []
+        const self = stories.find((candidate) => candidate.id === storyId)
+        const own = new Set([
+            ...(self ? writeSurfaceOf(self) : []),
+            ...[...this.pathClaims].filter(([, owner]) => owner === storyId).map(([path]) => path),
+        ])
+        const held: Record<string, string> = {}
+        for (const peer of stories) {
+            if (peer.id === storyId || !isActiveOwner(peer)) continue
+            const claimed = [...this.pathClaims]
+                .filter(([, owner]) => owner === peer.id)
+                .map(([path]) => path)
+            for (const path of [...writeSurfaceOf(peer), ...claimed]) {
+                if (!own.has(path)) held[path] ??= peer.id
+            }
+        }
+        return held
     }
 
     /** Integrated, or (for a story allowed to start early) checkpointed by a

@@ -85,6 +85,7 @@ interface LeaseCorrelation {
 interface CandidateSealRequest {
     required: boolean
     fingerprint?: string
+    heldElsewhere?: Readonly<Record<string, string>>
 }
 
 /** Carries which pre-merge seal check refused the candidate, so the outer
@@ -188,6 +189,7 @@ export class GitCoordinator extends SerializedObserver {
                     runId: event.payload.runId,
                     leaseId: event.payload.leaseId,
                 }, {
+                    heldElsewhere: event.payload.heldElsewhere ?? {},
                     required:
                         event.payload.candidateFingerprintRequired === true,
                     ...(event.payload.candidateFingerprint
@@ -455,7 +457,11 @@ export class GitCoordinator extends SerializedObserver {
             try {
                 merged = await this.mergeSurvivingSignals(
                     storyId,
-                    () => worktrees.mergeBack(storyId, candidateSeal),
+                    () => worktrees.mergeBack(
+                        storyId,
+                        candidateSeal,
+                        requestedSeal?.heldElsewhere ?? {},
+                    ),
                 )
             } catch (e) {
                 const error = (e as Error)?.message ?? String(e)
