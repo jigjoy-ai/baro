@@ -528,6 +528,53 @@ describe("WorktreeManager — uncommitted safety net", () => {
     })
 })
 
+describe("WorktreeManager — scratch dir", () => {
+    it("cleaning up .baro-scratch leaves the captured fingerprint fresh", async () => {
+        // S5 in the hermes-baro run was rejected twice: deleting its scratch
+        // venv after the tests made the evidence it had just captured stale.
+        const path = (await mgr.create("S1"))!
+        writeFileSync(join(path, "feature.txt"), "real work\n")
+        mkdirSync(join(path, ".baro-scratch", "venv"), { recursive: true })
+        writeFileSync(join(path, ".baro-scratch", "venv", "pyvenv.cfg"), "home = /x\n")
+        const target = { cwd: path, baseSha: mgr.creationSha("S1") }
+
+        const captured = await captureCriticRepositoryFingerprint(target)
+        rmSync(join(path, ".baro-scratch"), { recursive: true, force: true })
+
+        assert.equal(await captureCriticRepositoryFingerprint(target), captured)
+    })
+
+    it("never auto-commits scratch leftovers", async () => {
+        const path = (await mgr.create("S1"))!
+        writeFileSync(join(path, "feature.txt"), "real work\n")
+        mkdirSync(join(path, ".baro-scratch"), { recursive: true })
+        writeFileSync(join(path, ".baro-scratch", "probe.log"), "scratch\n")
+
+        await mgr.mergeBack("S1")
+
+        const tracked = git(repo, "ls-files").split("\n")
+        assert.ok(tracked.includes("feature.txt"))
+        assert.ok(!tracked.some((file) => file.startsWith(".baro-scratch")))
+    })
+
+    it("is excluded even when dep dirs are not linked", async () => {
+        const noLinkRunId = uniqueRunId("run-nolink-scratch")
+        const noLink = new WorktreeManager(repo, new GitGate(), noLinkRunId, {
+            linkDepDirs: false,
+            onLog: () => {},
+        })
+        try {
+            const p = (await noLink.create("S1"))!
+            mkdirSync(join(p, ".baro-scratch"), { recursive: true })
+            writeFileSync(join(p, ".baro-scratch", "x"), "1\n")
+            assert.equal(git(p, "status", "--porcelain"), "")
+        } finally {
+            await noLink.cleanupAll()
+            await removeWorktreeRun(repo, noLinkRunId)
+        }
+    })
+})
+
 describe("WorktreeManager — fallback", () => {
     it("mergeBack returns false for a story that never got a worktree", async () => {
         const merged = await mgr.mergeBack("never-created")
@@ -539,7 +586,7 @@ describe("WorktreeManager — fallback", () => {
         git(repo, "add", "package.json")
         git(repo, "commit", "-m", "add package manifest")
 
-        // Force ensureDepDirsExcluded() to fail after `git worktree add` has
+        // Force ensureWorktreeExcludes() to fail after `git worktree add` has
         // succeeded, exercising the transactional rollback path.
         const rawExcludePath = git(repo, "rev-parse", "--git-path", "info/exclude")
         const excludePath = rawExcludePath.startsWith("/")
@@ -766,6 +813,24 @@ describe("WorktreeManager — dependency dir symlink", () => {
         assert.ok(
             !existsSync(join(p1, "target")),
             "a story builds Rust in its own worktree, not in the repository's",
+        )
+    })
+
+    it("shares the dep dir of a manifest an earlier story merged with later stories", async () => {
+        // The hermes-baro run: S1 wrote pyproject.toml, and every later story
+        // built its own venv because the dep dirs were discovered once, at start.
+        const p1 = (await mgr.create("S1"))!
+        commitInWorktree(p1, "pyproject.toml", '[project]\nname = "x"\n')
+        assert.equal(await mgr.mergeBack("S1"), true)
+
+        const p2 = (await mgr.create("S2"))!
+        mkdirSync(join(p2, ".venv", "bin"), { recursive: true })
+        writeFileSync(join(p2, ".venv", "bin", "pytest"), "1\n")
+
+        const p3 = (await mgr.create("S3"))!
+        assert.ok(
+            existsSync(join(p3, ".venv", "bin", "pytest")),
+            "S3 sees the venv S2 built, via the shared .venv",
         )
     })
 

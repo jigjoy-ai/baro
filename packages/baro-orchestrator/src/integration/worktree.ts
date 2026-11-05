@@ -21,6 +21,7 @@ import {
 import { tmpdir } from "os"
 import { join, resolve } from "path"
 
+import { SHELL_SCRATCH_DIRNAME } from "../execution/gate-registry.js"
 import { GitGate } from "./git.js"
 import { INTEGRATION_WORKTREE_DIRNAME } from "./integration-worktree.js"
 import {
@@ -137,7 +138,7 @@ export class WorktreeManager {
     private readonly resolveConflictsWithTheirs: boolean
     private readonly integrationRoot: string
     private readonly log: (line: string) => void
-    private depExcludesReady = false
+    private readonly excludedPatterns = new Set<string>()
     /** One-way run shutdown latch. No worktree may appear after the final
      * cleanup sweep has begun. */
     private shutdownStarted = false
@@ -334,10 +335,9 @@ export class WorktreeManager {
                 ["worktree", "add", "-b", branch, path, baseSha],
                 { cwd: this.repoRoot },
             )
-            if (this.linkDepDirs) {
-                await this.ensureDepDirsExcluded()
-                this.symlinkDepDirs(path)
-            }
+            if (this.linkDepDirs) this.depLocations(path)
+            await this.ensureWorktreeExcludes()
+            if (this.linkDepDirs) this.symlinkDepDirs(path)
             this.paths.set(storyId, path)
             this.baseShas.set(storyId, baseSha)
             this.createdWorktree = true
@@ -453,10 +453,9 @@ export class WorktreeManager {
                 ["worktree", "add", "-b", branch, path, baseSha],
                 { cwd: this.repoRoot },
             )
-            if (this.linkDepDirs) {
-                await this.ensureDepDirsExcluded()
-                this.symlinkDepDirs(path)
-            }
+            if (this.linkDepDirs) this.depLocations(path)
+            await this.ensureWorktreeExcludes()
+            if (this.linkDepDirs) this.symlinkDepDirs(path)
             if (restoreSha) {
                 await this.replayPreservedWork(storyId, path, baseSha, restoreSha)
             }
@@ -1206,26 +1205,37 @@ export class WorktreeManager {
     }
 
     /**
-     * Package roots (root + nested) mapped to their stack's dep dir; cached
-     * per run. Manifest-driven so monorepo subpackages are found.
+     * Package roots (root + nested) mapped to their stack's dep dir.
+     * Manifest-driven so monorepo subpackages are found. The list only grows:
+     * each new worktree is scanned too, because a manifest an earlier story
+     * merged (a pyproject.toml the first story wrote) must share its dep dir
+     * with every later story instead of each one building its own.
      */
-    private depLocs?: Array<{ rel: string; dir: string }>
-    private depLocations(): Array<{ rel: string; dir: string }> {
-        if (this.depLocs) return this.depLocs
-        const out: Array<{ rel: string; dir: string }> = []
-        const seen = new Set<string>()
+    private readonly depLocs: Array<{ rel: string; dir: string }> = []
+    private readonly depLocKeys = new Set<string>()
+    private scannedRepoRoot = false
+    private depLocations(scanRoot?: string): Array<{ rel: string; dir: string }> {
+        if (!this.scannedRepoRoot) {
+            this.scannedRepoRoot = true
+            this.scanDepLocations(this.repoRoot)
+        }
+        if (scanRoot) this.scanDepLocations(scanRoot)
+        return this.depLocs
+    }
+
+    private scanDepLocations(root: string): void {
         const scan = (rel: string, depth: number): void => {
             let entries: import("fs").Dirent[]
             try {
-                entries = readdirSync(join(this.repoRoot, rel) || this.repoRoot, { withFileTypes: true })
+                entries = readdirSync(join(root, rel) || root, { withFileTypes: true })
             } catch {
                 return
             }
             const record = (dir: string): void => {
                 const key = `${rel}|${dir}`
-                if (!seen.has(key)) {
-                    seen.add(key)
-                    out.push({ rel, dir })
+                if (!this.depLocKeys.has(key)) {
+                    this.depLocKeys.add(key)
+                    this.depLocs.push({ rel, dir })
                 }
             }
             for (const e of entries) {
@@ -1242,20 +1252,29 @@ export class WorktreeManager {
             }
         }
         scan("", SCAN_DEPTH)
-        this.depLocs = out
-        return out
     }
 
     /**
-     * A pattern such as `node_modules/` does not ignore a symlink named
-     * `node_modules`, so an agent's explicit `git add -A` could commit our
-     * shared dependency link and turn the run root into a self-referential
-     * symlink after merge-back. Add exact manager-owned paths to the common
-     * repo-local exclude file (linked worktrees share it). Tracked paths are
-     * unaffected by info/exclude.
+     * Keep manager-owned paths out of every story's commits and changed-content
+     * fingerprint, via the common repo-local exclude file (linked worktrees
+     * share it; tracked paths are unaffected):
+     * - the sanctioned scratch dir, so an agent cleaning it up does not turn
+     *   the evidence it just captured stale, and leftovers never auto-commit;
+     * - shared dependency links: a pattern such as `node_modules/` does not
+     *   ignore a symlink named `node_modules`, so an explicit `git add -A`
+     *   could commit our link and make the run root a self-referential
+     *   symlink after merge-back.
      */
-    private async ensureDepDirsExcluded(): Promise<void> {
-        if (this.depExcludesReady) return
+    private async ensureWorktreeExcludes(): Promise<void> {
+        const patterns = [
+            `/${SHELL_SCRATCH_DIRNAME}/`,
+            ...(this.linkDepDirs
+                ? this.depLocations().map(({ rel, dir }) =>
+                      `/${rel ? `${rel}/` : ""}${dir}`,
+                  )
+                : []),
+        ].filter((pattern) => !this.excludedPatterns.has(pattern))
+        if (patterns.length === 0) return
         const { stdout } = await exec(
             "git",
             ["rev-parse", "--git-path", "info/exclude"],
@@ -1272,17 +1291,14 @@ export class WorktreeManager {
             /* git normally creates it; appendFileSync will create if needed */
         }
         const present = new Set(existing.split("\n").map((line) => line.trim()))
-        const patterns = this.depLocations().map(({ rel, dir }) =>
-            `/${rel ? `${rel}/` : ""}${dir}`,
-        )
         const missing = patterns.filter((pattern) => !present.has(pattern))
         if (missing.length > 0) {
             appendFileSync(
                 excludePath,
-                `\n# baro: shared dependency symlinks\n${missing.join("\n")}\n`,
+                `\n# baro: scratch dir and shared dependency symlinks\n${missing.join("\n")}\n`,
             )
         }
-        this.depExcludesReady = true
+        for (const pattern of patterns) this.excludedPatterns.add(pattern)
     }
 
     private symlinkDepDirs(worktreePath: string): void {
