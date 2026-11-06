@@ -105,9 +105,9 @@ export function createPrdStatusWriter({
 /**
  * Bus adapter: turns StoryMerged / StoryMergeFailed into writer calls. When a
  * repository authority is bound (git runs, collective runs) only that
- * participant is trusted. A legacy non-git run has no authority at all, and
- * refusing its events is what left prd.json stale across an interrupt — so
- * with no authority bound every source is accepted, deduped per event kind
+ * participant is trusted. Refusing events while no authority was bound is
+ * what left prd.json stale across an interrupt — so with none bound every
+ * source is accepted, deduped per event kind
  * and story so a relayed copy cannot re-run the write.
  */
 export class PrdStatusObserver extends BusMember {

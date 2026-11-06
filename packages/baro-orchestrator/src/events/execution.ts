@@ -140,8 +140,8 @@ export const RecoveryDecision =
 export interface RunStartedData {
     project: string
     storyCount: number
-    /** Current durable runtime-DAG version. Optional for legacy/replay
-     * compatibility; collective control participants should provide it. */
+    /** Current durable runtime-DAG version. Optional for replay
+     * compatibility; control participants should provide it. */
     graphVersion?: number
     /** Full logical run set; optional for replay compatibility. */
     storyIds?: readonly string[]
@@ -173,9 +173,8 @@ export const LevelCompleted =
     defineSemanticEvent<LevelCompletedData>("level_completed")
 
 /**
- * Conductor actually started a recovery level (visibility only; the
- * recovery flow itself stays hook-driven). `attempt` counts recovery
- * levels started in this run, 1-based.
+ * The Board actually started a recovery level (visibility only). `attempt`
+ * counts recovery levels started in this run, 1-based.
  */
 export interface RecoveryStartedData {
     attempt: number
@@ -311,7 +310,7 @@ export interface StoryRoutedData {
     storyId: string
     backend: string
     model: string
-    /** Collective-only authority correlation; legacy routing omits it. */
+    /** Lease correlation; absent only when the spawn request carried none. */
     runId?: string
     leaseId?: string
     generation?: number

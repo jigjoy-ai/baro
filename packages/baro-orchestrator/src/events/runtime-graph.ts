@@ -1,4 +1,4 @@
-/** Runtime DAG mutations: legacy Replan and transactional runtime replans. Wire `type` strings are frozen (see ../semantic-events.ts). */
+/** Runtime DAG mutations: Surgeon Replan proposals and transactional runtime replans. Wire `type` strings are frozen (see ../semantic-events.ts). */
 
 import { defineSemanticEvent } from "./define.js"
 

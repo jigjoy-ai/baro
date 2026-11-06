@@ -4,7 +4,7 @@
  * and telemetry are identical across backends; a subclass supplies only the
  * subprocess invocation and its verdict parser.
  *
- * Library-grade: no imports from prd.ts, story-agent.ts, or conductor.ts.
+ * Library-grade: no imports from prd.ts or story-agent.ts.
  */
 
 import { SemanticEvent } from "../../runtime/mozaik.js"

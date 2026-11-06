@@ -139,7 +139,7 @@ export interface PrdFile {
     goalEnvelope?: GoalEnvelope
     /**
      * Architect's DecisionDocument (file paths, schema shapes, naming).
-     * Conductor prepends it verbatim to every story prompt so agents never
+     * The Board prepends it verbatim to every story prompt so agents never
      * re-decide things upstream already pinned down.
      */
     decisionDocument?: string

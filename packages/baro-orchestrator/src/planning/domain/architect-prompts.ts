@@ -1,7 +1,7 @@
 /**
  * Architect system prompt, shared by every provider backend so they
  * produce comparable ADR decision documents. The ADRs' Decision fields
- * are what the Conductor prepends to every story prompt as authoritative
+ * are what the Board prepends to every story prompt as authoritative
  * spec. The triage block is load-bearing: trivial goals emit ONE short
  * ADR instead of a full design spec (baro 0.26+ relies on this).
  */

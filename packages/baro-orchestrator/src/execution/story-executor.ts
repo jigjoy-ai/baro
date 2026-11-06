@@ -70,7 +70,7 @@ export interface StoryExecOpts {
     /**
      * Collective executors must synchronously register the exact Participant
      * that will source StoryResult before emitting a result or returning from
-     * start(). Legacy execution leaves this unset.
+     * start().
      */
     registerResultAuthority?: (source: BusMember) => void
     /**
@@ -338,7 +338,7 @@ export class LocalStoryExecutor implements StoryExecutor {
                 : null
         surfaceFollower?.join(env)
 
-        // Fire-and-forget: Conductor reacts to the StoryResult bus event.
+        // Fire-and-forget: the Board reacts to the StoryResult bus event.
         void agent.run(env)
 
         return {
