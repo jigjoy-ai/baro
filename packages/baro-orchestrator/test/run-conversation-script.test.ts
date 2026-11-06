@@ -122,50 +122,42 @@ describe("run-conversation isolated turn", () => {
                 sidecar.repositoryBrief.facts[0]?.evidencePath,
                 "src/runtime/cancellation/abort-coordinator.ts",
             )
-            const calls = readJson<Array<{
-                backend: string
-                role: string
-                correlation: string
-                prompt: string
-            }>>(capture)
-            // Conversation-first: the model answers once without context,
-            // wants ready, and only then RepoScout runs before the retry.
+            const calls = readFileSync(capture, "utf8")
+                .split("\n")
+                .filter(Boolean)
+                .map((line) => JSON.parse(line) as {
+                    backend: string
+                    role: string
+                    correlation: string
+                    prompt: string
+                })
+            // A goal's RepoScout runs alongside the model's first answer, so
+            // only the order within each role is fixed; the answer that sees
+            // the brief comes last.
             assert.equal(calls.length, 5)
-            assert.deepEqual(calls.map((call) => call.backend), [
-                "claude",
-                "claude",
-                "claude",
-                "claude",
-                "claude",
-            ])
-            assert.deepEqual(calls.map((call) => call.role), [
-                "conversation",
-                "repository-scout",
-                "repository-scout",
-                "repository-scout",
-                "conversation",
-            ])
-            for (const call of calls.slice(1, 4)) {
+            assert.ok(calls.every((call) => call.backend === "claude"))
+            const scouts = calls.filter((call) => call.role === "repository-scout")
+            const answers = calls.filter((call) => call.role === "conversation")
+            assert.equal(scouts.length, 3)
+            assert.equal(answers.length, 2)
+            assert.equal(calls[4]!.role, "conversation")
+            for (const call of scouts) {
                 assert.match(call.correlation, /^repository:[a-f0-9]{64}$/u)
-                assert.equal(call.correlation, calls[1]!.correlation)
+                assert.equal(call.correlation, scouts[0]!.correlation)
             }
-            assert.equal(calls[0]!.correlation, input.requestId)
-            assert.equal(calls[4]!.correlation, input.requestId)
-            assert.notEqual(calls[1]!.correlation, calls[4]!.correlation)
-            assert.match(calls[1]!.prompt, /CURRENT STEP: 1/)
-            assert.match(calls[1]!.prompt, /CURRENT ATTEMPT: 1/)
-            assert.match(calls[2]!.prompt, /CURRENT STEP: 2/)
+            for (const call of answers) assert.equal(call.correlation, input.requestId)
+            assert.match(scouts[0]!.prompt, /CURRENT STEP: 1/)
+            assert.match(scouts[0]!.prompt, /CURRENT ATTEMPT: 1/)
+            assert.match(scouts[1]!.prompt, /CURRENT STEP: 2/)
             assert.match(
-                calls[2]!.prompt,
+                scouts[1]!.prompt,
                 /src\/runtime\/cancellation\/abort-coordinator\.ts/u,
             )
-            assert.match(calls[3]!.prompt, /CURRENT STEP: 3/)
+            assert.match(scouts[2]!.prompt, /CURRENT STEP: 3/)
+            assert.match(scouts[2]!.prompt, /baro-sidecar-deep-evidence/u)
+            assert.doesNotMatch(answers[0]!.prompt, /Autonomous scout inspected/u)
             assert.match(
-                calls[3]!.prompt,
-                /baro-sidecar-deep-evidence/u,
-            )
-            assert.match(
-                calls[4]!.prompt,
+                answers[1]!.prompt,
                 /Autonomous scout inspected the deep cancellation coordinator\./u,
             )
         })
@@ -677,7 +669,7 @@ function writeFakeClaude(dir: string, response: unknown, capture: string): strin
 function writeAdaptiveFakeClaude(dir: string, capture: string): string {
     const binary = join(dir, "fake-adaptive-claude.mjs")
     writeFileSync(binary, `#!/usr/bin/env node
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync } from "node:fs";
 const argv = process.argv.slice(2);
 const after = (flag) => argv[argv.indexOf(flag) + 1] ?? "";
 const system = after("--system-prompt");
@@ -689,9 +681,6 @@ const field = (label) => {
     return match[1];
 };
 const scout = system.includes("You are Baro RepoScout");
-const previous = existsSync(${JSON.stringify(capture)})
-    ? JSON.parse(readFileSync(${JSON.stringify(capture)}, "utf8"))
-    : [];
 let response;
 let record;
 if (scout) {
@@ -702,7 +691,9 @@ if (scout) {
         contextRequestId: field("CONTEXT REQUEST ID"),
         step: Number(field("CURRENT STEP")),
     };
-    const scoutCalls = previous.filter((call) => call.role === "repository-scout").length;
+    // RepoScout and the first Conversation answer run concurrently, so the
+    // step comes from the prompt, never from what other calls recorded.
+    const scoutCalls = base.step - 1;
     if (scoutCalls === 0) {
         response = {
             ...base,
@@ -760,8 +751,7 @@ if (scout) {
         prompt,
     };
 }
-previous.push(record);
-writeFileSync(${JSON.stringify(capture)}, JSON.stringify(previous));
+appendFileSync(${JSON.stringify(capture)}, JSON.stringify(record) + "\\n");
 process.stdout.write(JSON.stringify({
     type: "result",
     result: JSON.stringify(response),
