@@ -39,7 +39,7 @@ import {
     gitSandboxPaths,
     shellContainmentHookSource,
 } from "../../execution/shell-containment.js"
-import { storyPackageCache } from "../package-cache.js"
+import { sharedDependencyTargets, storyPackageCache } from "../package-cache.js"
 
 export interface StoryHookSurface {
     writes: readonly string[]
@@ -414,7 +414,7 @@ const SANDBOX_REGISTRY_DOMAINS = [
  * bubblewrap on Linux), so a script the agent writes and runs is held to the
  * same boundary as the commands the hook judges. Writes: the worktree, the
  * exact git metadata a commit needs (not the shared config), Claude's temp,
- * and Baro's package cache (package-cache.ts).
+ * Baro's package cache and the run's shared dependency dirs (package-cache.ts).
  * Reads: everything but credential stores. Network: package registries and
  * this lease's loopback broker. No escape hatch, and a story whose sandbox
  * cannot start does not run (verified against Claude Code 2.1.318; see
@@ -427,7 +427,11 @@ export function claudeStorySandbox(
 ): Record<string, unknown> | null {
     if (env.BARO_UNSAFE_NO_SANDBOX === "1") return null
     const cache = storyPackageCache(env)
-    const allowWrite = [...gitSandboxPaths(worktreeRoot).paths, cache.root]
+    const allowWrite = [
+        ...gitSandboxPaths(worktreeRoot).paths,
+        cache.root,
+        ...sharedDependencyTargets(worktreeRoot),
+    ]
     const extra = (env.BARO_SANDBOX_ALLOWED_DOMAINS ?? "")
         .split(",")
         .map((domain) => domain.trim())

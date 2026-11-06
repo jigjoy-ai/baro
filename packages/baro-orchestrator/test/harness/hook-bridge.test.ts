@@ -134,6 +134,10 @@ describe("a Claude story's OS sandbox", () => {
             // Stories always run in a linked worktree, as here.
             const worktree = join(repo, ".story")
             execFileSync("git", ["worktree", "add", "-q", "-b", "s1", worktree], { cwd: repo })
+            // integration/worktree.ts links dependency dirs to the run's shared copy.
+            const shared = join(repo, "shared-node_modules")
+            execFileSync("mkdir", ["-p", shared, join(worktree, "web")])
+            execFileSync("ln", ["-s", shared, join(worktree, "web", "node_modules")])
             const cacheRoot = join(repo, ".cache-root")
             const settings = claudeStorySandbox(worktree, "http://127.0.0.1:43123/v1", { BARO_PACKAGE_CACHE: cacheRoot }) as {
                 sandbox: {
@@ -163,6 +167,7 @@ describe("a Claude story's OS sandbox", () => {
             assert.ok(writes.includes(cache))
             assert.ok(!writes.some((path) => /\/(\.npm|\.cache|Library\/Caches)$/u.test(path)))
             assert.equal(settings.env.npm_config_cache, join(cache, "npm"))
+            assert.ok(writes.includes(realpathSync(shared)), "a story's install reaches the shared node_modules")
             assert.equal(settings.env.PIP_CACHE_DIR, join(cache, "pip"))
             // pnpm 12 ignores npm_config_store_dir, and npm warns about it.
             assert.equal(settings.env.pnpm_config_store_dir, join(cache, "pnpm-store"))

@@ -1,4 +1,4 @@
-import { mkdirSync, realpathSync } from "node:fs"
+import { mkdirSync, readdirSync, realpathSync, type Dirent } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
@@ -35,4 +35,39 @@ export function storyPackageCache(env: NodeJS.ProcessEnv = process.env): StoryPa
             CARGO_HOME: at("cargo"),
         },
     }
+}
+
+const SHARED_DEPENDENCY_DIRS = new Set(["node_modules", ".venv", "vendor"])
+const SCAN_SKIP = new Set([".git", "dist", "build", "target", ".next", "out", "coverage"])
+
+/**
+ * The real targets of the dependency dirs a worktree links to its run's
+ * shared copy (integration/worktree.ts): one story's install must be visible
+ * to the others, so a sandbox has to let a story write through those links.
+ * Only symlinked dependency dirs count; a real one is inside the worktree.
+ */
+export function sharedDependencyTargets(worktreeRoot: string, depth = 4): string[] {
+    const targets = new Set<string>()
+    const scan = (dir: string, left: number): void => {
+        let entries: Dirent[]
+        try {
+            entries = readdirSync(dir, { withFileTypes: true })
+        } catch {
+            return
+        }
+        for (const entry of entries) {
+            const full = join(dir, entry.name)
+            if (SHARED_DEPENDENCY_DIRS.has(entry.name)) {
+                if (entry.isSymbolicLink()) {
+                    try {
+                        targets.add(realpathSync(full))
+                    } catch {}
+                }
+                continue
+            }
+            if (left > 0 && entry.isDirectory() && !SCAN_SKIP.has(entry.name)) scan(full, left - 1)
+        }
+    }
+    scan(worktreeRoot, depth)
+    return [...targets]
 }

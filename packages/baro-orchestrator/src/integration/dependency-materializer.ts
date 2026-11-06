@@ -10,7 +10,7 @@
  */
 
 import { createHash } from "node:crypto"
-import { existsSync, readFileSync, symlinkSync } from "node:fs"
+import { existsSync, readdirSync, readFileSync, symlinkSync, type Dirent } from "node:fs"
 import { homedir } from "node:os"
 import { join, relative, resolve } from "node:path"
 
@@ -146,10 +146,44 @@ async function npmCi(workspaceDir: string, signal: AbortSignal | undefined): Pro
 }
 
 function workspaceDirs(root: string): string[] {
-    return workspacePackageDirs(root, [
+    const declared = workspacePackageDirs(root, [
         ...workspacePatterns(readWorkspacesField(root)),
         ...pnpmWorkspacePatterns(root),
     ])
+    const seen = new Set([resolve(root), ...declared.map((dir) => resolve(dir))])
+    // An independent package in a subdirectory (`js/` with its own lockfile)
+    // is no workspace, yet its tests import what its lockfile pins; smoke
+    // run 5 failed its final gate on exactly that.
+    const nested = nestedLockedPackages(root).filter((dir) => !seen.has(resolve(dir)))
+    return [...declared, ...nested]
+}
+
+const NESTED_SCAN_SKIP = new Set(["node_modules", ".git", ".venv", "vendor", "dist", "build", "target", ".next", "out", "coverage"])
+
+function nestedLockedPackages(root: string, depth = 3): string[] {
+    const found: string[] = []
+    const scan = (dir: string, left: number): void => {
+        if (left <= 0) return
+        let entries: Dirent[]
+        try {
+            entries = readdirSync(dir, { withFileTypes: true })
+        } catch {
+            return
+        }
+        for (const entry of entries) {
+            if (!entry.isDirectory() || NESTED_SCAN_SKIP.has(entry.name) || entry.name.startsWith(".")) continue
+            const child = join(dir, entry.name)
+            if (
+                existsSync(join(child, "package.json")) &&
+                LOCKFILE_NAMES.some((name) => existsSync(join(child, name)))
+            ) {
+                found.push(child)
+            }
+            scan(child, left - 1)
+        }
+    }
+    scan(root, depth)
+    return found
 }
 
 function readWorkspacesField(dir: string): unknown {

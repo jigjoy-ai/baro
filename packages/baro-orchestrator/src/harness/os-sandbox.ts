@@ -4,7 +4,7 @@ import { delimiter, join, resolve } from "node:path"
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process"
 
 import { gitSandboxPaths } from "../execution/shell-containment.js"
-import { storyPackageCache } from "./package-cache.js"
+import { sharedDependencyTargets, storyPackageCache } from "./package-cache.js"
 
 /**
  * OS confinement for a story's CLI agent process (Codex, OpenCode, Pi, Devin)
@@ -86,7 +86,11 @@ export function confinedSpawn(
     const writable = [
         ...(worktreeRoot === null
             ? []
-            : [realpathSync(resolve(worktreeRoot)), ...gitSandboxPaths(worktreeRoot).paths]),
+            : [
+                  realpathSync(resolve(worktreeRoot)),
+                  ...gitSandboxPaths(worktreeRoot).paths,
+                  ...sharedDependencyTargets(worktreeRoot),
+              ]),
         scratch,
         "/dev/null",
         cache.root,
