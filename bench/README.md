@@ -14,6 +14,9 @@ node bench/run.mjs --label local --baro ~/.baro/local-v4/baro
 # One case only
 node bench/run.mjs --label local --baro ~/.baro/local-v4/baro --only bugfix
 
+# Multi-story cases vary run to run: repeat and compare medians
+node bench/run.mjs --label local --baro ~/.baro/local-v4/baro --only shared-file --repeat 3
+
 # Record every child process (git, model CLIs, installs, tests) with its duration
 node bench/run.mjs --label local --baro ~/.baro/local-v4/baro --only single-route --trace
 node bench/profile/summarize.mjs bench/results/local/single-route.trace.jsonl

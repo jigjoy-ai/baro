@@ -15,7 +15,7 @@ import { metrics, parseStream } from "./metrics.mjs"
 const here = dirname(fileURLToPath(import.meta.url))
 
 function parseArgs(argv) {
-    const opts = { model: "sonnet", timeoutMin: 30, only: null, label: null, baro: null, out: null, trace: false }
+    const opts = { model: "sonnet", timeoutMin: 30, only: null, label: null, baro: null, out: null, trace: false, repeat: 1 }
     for (let i = 0; i < argv.length; i++) {
         const key = argv[i].replace(/^--/, "")
         if (key === "trace") {
@@ -25,11 +25,12 @@ function parseArgs(argv) {
         const value = argv[++i]
         if (key === "only") opts.only = value.split(",")
         else if (key === "timeout-min") opts.timeoutMin = Number(value)
+        else if (key === "repeat") opts.repeat = Math.max(1, Number(value))
         else if (key in opts) opts[key] = value
         else throw new Error(`unknown option --${key}`)
     }
     if (!opts.label || !opts.baro) {
-        throw new Error('usage: node bench/run.mjs --label <name> --baro "<command>" [--model sonnet] [--only a,b] [--timeout-min 30] [--out dir] [--trace]')
+        throw new Error('usage: node bench/run.mjs --label <name> --baro "<command>" [--model sonnet] [--only a,b] [--timeout-min 30] [--out dir] [--trace] [--repeat 3]')
     }
     opts.out ??= join(here, "results", opts.label)
     return opts
@@ -84,6 +85,27 @@ function runCase(opts, testCase, dir, streamPath, errPath, tracePath) {
     })
 }
 
+const median = (values) => {
+    const xs = values.filter((x) => typeof x === "number").sort((a, b) => a - b)
+    if (xs.length === 0) return null
+    const mid = Math.floor(xs.length / 2)
+    return xs.length % 2 ? xs[mid] : (xs[mid - 1] + xs[mid]) / 2
+}
+
+// One run is reported as is. Repeats report the median of each number, and a
+// case succeeds only if every repeat did; the individual runs are kept.
+function aggregate(runs) {
+    if (runs.length === 1) return runs[0]
+    const numeric = ["wall_secs", "total_secs", "architect_secs", "to_first_story_secs", "stories_secs", "finalize_secs", "story_count", "retries", "replans", "cost_usd"]
+    return {
+        ...runs[0],
+        ...Object.fromEntries(numeric.map((key) => [key, median(runs.map((r) => r[key]))])),
+        success: runs.every((r) => r.success),
+        repeats: runs.length,
+        runs,
+    }
+}
+
 const fmt = (x, d = 0) => (x == null ? "-" : Number(x).toFixed(d))
 
 async function main() {
@@ -96,21 +118,26 @@ async function main() {
         ? JSON.parse(readFileSync(summaryPath, "utf8"))
         : { label: opts.label, baro: opts.baro, model: opts.model, cases: {} }
     for (const testCase of cases) {
-        const dir = join(tmpdir(), "baro-bench", opts.label, testCase.id)
-        prepareRepo(testCase.fixture, dir)
-        process.stdout.write(`${testCase.id}: running in ${dir} ... `)
-        const r = await runCase(
-            opts,
-            testCase,
-            dir,
-            join(opts.out, `${testCase.id}.jsonl`),
-            join(opts.out, `${testCase.id}.stderr.txt`),
-            join(opts.out, `${testCase.id}.trace.jsonl`),
-        )
-        const m = metrics(parseStream(r.text), { startedAt: r.startedAt })
-        summary.cases[testCase.id] = { ...m, wall_secs: r.wallSecs, exit_code: r.exitCode, timed_out: r.timedOut, ran_at: new Date(r.startedAt).toISOString() }
+        const runs = []
+        for (let rep = 1; rep <= opts.repeat; rep++) {
+            const name = opts.repeat > 1 ? `${testCase.id}.r${rep}` : testCase.id
+            const dir = join(tmpdir(), "baro-bench", opts.label, name)
+            prepareRepo(testCase.fixture, dir)
+            process.stdout.write(`${name}: running in ${dir} ... `)
+            const r = await runCase(
+                opts,
+                testCase,
+                dir,
+                join(opts.out, `${name}.jsonl`),
+                join(opts.out, `${name}.stderr.txt`),
+                join(opts.out, `${name}.trace.jsonl`),
+            )
+            const m = metrics(parseStream(r.text), { startedAt: r.startedAt })
+            runs.push({ ...m, wall_secs: r.wallSecs, exit_code: r.exitCode, timed_out: r.timedOut, ran_at: new Date(r.startedAt).toISOString() })
+            console.log(`${m.success ? "ok" : "FAILED"} ${fmt(r.wallSecs)}s $${fmt(m.cost_usd, 2)} stories=${m.story_count}`)
+        }
+        summary.cases[testCase.id] = aggregate(runs)
         writeFileSync(summaryPath, JSON.stringify(summary, null, 2) + "\n")
-        console.log(`${m.success ? "ok" : "FAILED"} ${fmt(r.wallSecs)}s $${fmt(m.cost_usd, 2)} stories=${m.story_count}`)
     }
     console.log(`\n${resolve(summaryPath)}`)
 }

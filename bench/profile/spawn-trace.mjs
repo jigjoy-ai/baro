@@ -11,7 +11,16 @@ if (file) {
         const list = Array.isArray(args) ? args : []
         const name = String(cmd).split("/").pop()
         const model = list.indexOf("--model")
-        const head = list.filter((a) => typeof a === "string" && !a.startsWith("--") && a.length < 60).slice(0, 3)
+        const words = []
+        for (let i = 0; i < list.length; i++) {
+            const a = list[i]
+            if (a === "-c" || a === "-C") {
+                i++
+                continue
+            }
+            if (typeof a === "string" && !a.startsWith("-") && a.length < 60) words.push(a)
+        }
+        const head = words.slice(0, 4)
         return [name, ...(model >= 0 ? [`model=${list[model + 1]}`] : []), ...head].join(" ").replace(/\s+/g, " ")
     }
     const record = (fields) => {
