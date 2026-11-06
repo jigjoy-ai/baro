@@ -37,7 +37,7 @@ import { readAuthoritativeVerifyPlanOptions } from "../verification/prd-declared
 import { formatDeclaredBudgetEvidence } from "../verification/declared-test-budget.js"
 import { provesOnlyHygiene } from "../verification/hygiene-command.js"
 import { renderRuntimeAmendments } from "../planning/domain/runtime-amendments.js"
-import { materializeDependencies } from "./dependency-materializer.js"
+import { materializeBeforeGate } from "./dependency-materializer.js"
 import { runRepositoryCommand as execFileAsync } from "./repository-command.js"
 import {
     buildLinkedRepositoryReports,
@@ -517,23 +517,11 @@ export class Finalizer extends BusMember {
                     this.log(`[finalizer] ${line}`)
                 }
             }
-            // Packages the stories added (a js/ with its own lockfile) did not
-            // exist when the integration worktree was first materialized.
-            if (this.opts.hostRepoRoot) {
-                try {
-                    const { workspaces } = await materializeDependencies({
-                        hostRoot: this.opts.hostRepoRoot,
-                        integrationRoot: this.opts.integrationRoot,
-                    })
-                    for (const workspace of workspaces) {
-                        if (workspace.action !== "skipped") {
-                            this.log(`[finalizer] dependencies ${workspace.action} in ${workspace.dir} (${workspace.reason})`)
-                        }
-                    }
-                } catch (error) {
-                    this.log(`[finalizer] could not install dependencies before the final gate: ${error instanceof Error ? error.message : String(error)}`)
-                }
-            }
+            await materializeBeforeGate(
+                this.opts.hostRepoRoot,
+                this.opts.integrationRoot,
+                (line) => this.log(`[finalizer] ${line}`),
+            )
             verify = await verifyBuild(this.opts.integrationRoot, {
                 plan: mergeVerifyPlans(this.baselineVerifyPlan, finalVerifyPlan),
                 hostRepoRoot: this.opts.hostRepoRoot,

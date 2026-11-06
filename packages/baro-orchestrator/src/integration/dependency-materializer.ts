@@ -215,3 +215,26 @@ function sha256(path: string): string | null {
 function errMsg(error: unknown): string {
     return (error as Error)?.message ?? String(error)
 }
+
+/**
+ * Right before a final gate: packages the stories added (a js/ with its own
+ * lockfile) did not exist when the integration worktree was first
+ * materialized. Never throws; the gate reports whatever is still missing.
+ */
+export async function materializeBeforeGate(
+    hostRoot: string | undefined,
+    integrationRoot: string,
+    log: (line: string) => void,
+): Promise<void> {
+    if (!hostRoot) return
+    try {
+        const { workspaces } = await materializeDependencies({ hostRoot, integrationRoot })
+        for (const workspace of workspaces) {
+            if (workspace.action !== "skipped") {
+                log(`dependencies ${workspace.action} in ${workspace.dir} (${workspace.reason})`)
+            }
+        }
+    } catch (error) {
+        log(`could not install dependencies before the final gate: ${errMsg(error)}`)
+    }
+}

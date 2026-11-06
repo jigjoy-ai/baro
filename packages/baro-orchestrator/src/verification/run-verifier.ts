@@ -11,6 +11,7 @@ import {
     type RunVerificationRetryClassifiedData,
     type VerificationCommandEvidence,
 } from "../semantic-events.js"
+import { materializeBeforeGate } from "../integration/dependency-materializer.js"
 import { classifyFailureTail } from "./failure-classifier.js"
 import {
     SerializedObserver,
@@ -75,8 +76,11 @@ export class RunVerifier extends SerializedObserver {
             opts.storyExecutorsActive ?? (() => this.runningStories.size > 0)
         this.verify =
             opts.verify ??
-            ((cwd, signal) =>
-                verifyBuild(cwd, {
+            (async (cwd, signal) => {
+                await materializeBeforeGate(opts.hostRepoRoot, cwd, (line) =>
+                    process.stderr.write(`[run-verifier] ${line}\n`),
+                )
+                return await verifyBuild(cwd, {
                     plan: mergeVerifyPlans(
                         baselinePlan,
                         createFinalPlan(cwd),
@@ -86,7 +90,8 @@ export class RunVerifier extends SerializedObserver {
                     storyExecutorsActive,
                     onRetryDecision: (info) =>
                         void this.retryDecisions.set(info.command, info),
-                }))
+                })
+            })
     }
 
     setRequestAuthority(authority: BusMember): void {
