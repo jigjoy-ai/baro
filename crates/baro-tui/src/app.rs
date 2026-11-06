@@ -396,6 +396,8 @@ pub struct App {
     /// into prd.json for the orchestrator to prepend to story prompts.
     pub decision_document: Option<String>,
     pub architect_status: ArchitectStatus,
+    /// Set when the intake sized the accepted goal as one focused change.
+    pub architect_fast_path: Option<crate::architect_fast_path::FastPath>,
 
     // Planning screen
     pub planning_start: Option<Instant>,
@@ -680,6 +682,7 @@ impl App {
             linked_repositories_context: None,
             decision_document: None,
             architect_status: ArchitectStatus::Idle,
+            architect_fast_path: None,
 
             planning_start: None,
             planning_error: None,

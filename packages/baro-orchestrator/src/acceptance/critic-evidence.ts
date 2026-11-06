@@ -879,11 +879,16 @@ export async function prepareCriticEvaluation(
     source?: CriticEvidenceSource,
 ): Promise<CriticEvaluationPreparation> {
     const beforeFingerprint = await repositoryFingerprintFor(agentId, source)
-    const commandEvidence = await commandEvidenceFor(agentId, source)
-    const repositoryEvidence = await repositoryEvidenceFor(agentId, source)
-    const decisionDocument = await decisionDocumentFor(source)
-    const publishedNotes = await publishedNotesFor(agentId, source)
-    const altitude = await altitudeEvidenceFor(agentId, source)
+    // Read-only and independent, each failing closed on its own; the two
+    // fingerprints around them still prove the repository held still.
+    const [commandEvidence, repositoryEvidence, decisionDocument, publishedNotes, altitude] =
+        await Promise.all([
+            commandEvidenceFor(agentId, source),
+            repositoryEvidenceFor(agentId, source),
+            decisionDocumentFor(source),
+            publishedNotesFor(agentId, source),
+            altitudeEvidenceFor(agentId, source),
+        ])
     const afterFingerprint = await repositoryFingerprintFor(agentId, source)
     const readinessIssues = source
         ? evidenceReadinessIssues(commandEvidence, repositoryEvidence)

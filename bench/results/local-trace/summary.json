@@ -1,0 +1,68 @@
+{
+  "label": "local-trace",
+  "baro": "/Users/miodrag.todorovic/.baro/local-v4/baro",
+  "model": "sonnet",
+  "cases": {
+    "single-route": {
+      "success": true,
+      "verification": "passed",
+      "abort_reason": null,
+      "total_secs": 241.3,
+      "architect_secs": 63.2,
+      "to_first_story_secs": 135.1,
+      "stories_secs": 90.6,
+      "finalize_secs": 15.5,
+      "story_count": 1,
+      "retries": 0,
+      "replans": 1,
+      "critic_reviews": {
+        "total": 3,
+        "rejected": 2,
+        "stale_evidence": 0
+      },
+      "cost_usd": 0.9212,
+      "tokens": {
+        "input": 598935,
+        "cached_input": 497444,
+        "cache_write": 101441,
+        "output": 15386
+      },
+      "cache_hit_ratio": 0.8305,
+      "phases": {
+        "architect": {
+          "calls": 3,
+          "cost_usd": 0.0798,
+          "model_secs": 27
+        },
+        "planner": {
+          "calls": 1,
+          "cost_usd": 0.122,
+          "model_secs": 25
+        },
+        "story": {
+          "calls": 3,
+          "cost_usd": 0.5252,
+          "model_secs": 50
+        },
+        "critic": {
+          "calls": 3,
+          "cost_usd": 0.1941,
+          "model_secs": 19
+        }
+      },
+      "stories": [
+        {
+          "id": "S1",
+          "secs": 90.6,
+          "attempts": 1,
+          "reviews": 3,
+          "cost_usd": 0.7193
+        }
+      ],
+      "wall_secs": 241.6,
+      "exit_code": 0,
+      "timed_out": false,
+      "ran_at": "2026-11-06T17:49:31.985Z"
+    }
+  }
+}

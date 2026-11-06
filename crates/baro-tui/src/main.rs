@@ -1,4 +1,5 @@
 mod app;
+mod architect_fast_path;
 mod architect_runner;
 mod awake_clock;
 mod baro_home;
@@ -259,6 +260,13 @@ enum AppEvent {
         candidate: ConversationWireResponse,
         repository_context: String,
         transport: architect_runner::ArchitectOutcomeTransportV1,
+    },
+    /// The intake sized the candidate as one focused change, so it is
+    /// accepted without the Architect's repository validation.
+    ConversationFastPath {
+        candidate: ConversationWireResponse,
+        repository_context: String,
+        fast_path: architect_fast_path::FastPath,
     },
     ConversationError {
         request_id: String,
@@ -1810,6 +1818,33 @@ async fn run_app(
                     app.screen = Screen::Conversation;
                 }
             }
+            Some(AppEvent::ConversationFastPath {
+                candidate,
+                repository_context,
+                fast_path,
+            }) => {
+                app.conversation_stream = None;
+                app.architect_fast_path = Some(fast_path);
+                if let Err(error) = accept_conversation_response(
+                    &mut app,
+                    &cwd,
+                    tx.clone(),
+                    candidate,
+                    headless,
+                    Some(PrevalidatedArchitect {
+                        repository_context,
+                        decision_document: None,
+                    }),
+                )
+                .await
+                {
+                    if headless {
+                        return Err(error.into());
+                    }
+                    app.conversation_error = Some(error);
+                    app.screen = Screen::Conversation;
+                }
+            }
             Some(AppEvent::ConversationArchitectOutcome {
                 candidate,
                 repository_context,
@@ -1829,7 +1864,7 @@ async fn run_app(
                         headless,
                         Some(PrevalidatedArchitect {
                             repository_context,
-                            decision_document,
+                            decision_document: Some(decision_document),
                         }),
                     )
                     .await
@@ -4105,14 +4140,19 @@ fn start_prevalidated_planning_from_conversation(
     app.conversation
         .transition_to(ConversationPhase::Planning)
         .map_err(|error| error.to_string())?;
+    let note = if architect.decision_document.is_some() {
+        "Goal validated against repository evidence. Planner is starting."
+    } else {
+        "Goal sized as one focused change. Planner is starting without an Architect pass."
+    };
     app.conversation
-        .record_system_turn("Goal validated against repository evidence. Planner is starting.")
+        .record_system_turn(note)
         .map_err(|error| error.to_string())?;
     persist_conversation(&app.conversation, cwd);
 
     app.claude_md_content = Some(architect.repository_context);
     app.start_planning();
-    spawn_planner(app, cwd, tx, headless, Some(architect.decision_document));
+    spawn_planner(app, cwd, tx, headless, architect.decision_document);
     Ok(())
 }
 
@@ -4172,6 +4212,7 @@ fn spawn_planner(
     let quick = app.quick;
     let mode = app.mode.clone();
     let confirm_mode = app.confirm_mode;
+    let fast_path = app.architect_fast_path.clone();
     // Per-phase routing lets hybrid runs split Architect/Planner from
     // Story/Critic/Surgeon; unset overrides fall back to the global --llm.
     let architect_llm = app.architect_llm;
@@ -4189,7 +4230,8 @@ fn spawn_planner(
         // mode-aware OpenAI planning phases see the same execution shape. Auto
         // remains undecided here: the Architect may run its own intake, and
         // the shared intake below can still incorporate its decision document.
-        let fixed_mode_json = fixed_mode_contract(quick, &mode);
+        let fixed_mode_json = fixed_mode_contract(quick, &mode)
+            .or_else(|| fast_path.as_ref().map(|fast| fast.contract_json.clone()));
 
         // Quick mode skips the Architect — its job is aligning parallel
         // agents, and quick runs are single-agent. Still emit
@@ -4207,6 +4249,9 @@ fn spawn_planner(
             // second model call rediscovering the same decision document.
             let _ = tx.send(AppEvent::ArchitectComplete(doc.clone())).await;
             Some(doc)
+        } else if let Some(fast) = &fast_path {
+            let _ = tx.send(AppEvent::ArchitectSkipped(fast.reason.clone())).await;
+            None
         } else {
             // The Architect runs for every backend (run-architect.ts
             // handles all providers) — only quick mode skips it. Routing

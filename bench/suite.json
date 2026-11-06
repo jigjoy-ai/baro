@@ -1,0 +1,34 @@
+{
+  "cases": [
+    {
+      "id": "single-route",
+      "fixture": "notes-api",
+      "shape": "one small change in one file",
+      "goal": "Add GET /notes/:id to server.mjs: it returns the note as JSON, or 404 for an unknown or malformed id. Add node:test tests for it in server.test.mjs."
+    },
+    {
+      "id": "bugfix",
+      "fixture": "dates-bug",
+      "shape": "find and fix bugs that failing tests expose",
+      "goal": "The tests in tests/test_ranges.py fail. Fix the bugs in dates/ranges.py so every test passes, without changing the tests."
+    },
+    {
+      "id": "parallel-py-js",
+      "fixture": "empty",
+      "shape": "two independent stacks, then a joining doc story",
+      "goal": "Build two small, independent pieces in this empty repo, as two parallel stories:\n\n1. A Python package `textstats/` (stdlib only) with `word_count(text)`, `top_words(text, n)` and `reading_time_minutes(text, wpm=200)`, plus pytest tests in `tests/test_textstats.py`. Add a `pyproject.toml` declaring pytest as a test dependency. The tests must run with `pytest`.\n\n2. A Node.js ES module `js/slug.mjs` exporting `slugify(text)` (lowercase, ASCII, hyphen-separated, strips punctuation), with tests in `js/slug.test.mjs` using `node:test`. Add `js/package.json` with a `test` script, and use the npm package `diacritics` (install it with npm) to fold accents before slugifying.\n\nUpdate README.md with one short section per piece describing how to run its tests."
+    },
+    {
+      "id": "three-modules",
+      "fixture": "notes-api",
+      "shape": "three independent modules, then a joining doc story",
+      "goal": "As separate parallel stories: (1) a CLI `cli/notes.mjs` that lists, adds and deletes notes through the HTTP API (base URL from NOTES_URL, default http://localhost:3000), with node:test tests in `cli/notes.test.mjs` that start the server on a free port; (2) a `lib/export.mjs` module that turns a notes array into Markdown, with tests in `lib/export.test.mjs`; (3) a `lib/validate.mjs` module that validates a note body (non-empty text, at most 500 characters), with tests in `lib/validate.test.mjs`. After those, (4) update README.md with a section for the CLI, the exporter and the validator."
+    },
+    {
+      "id": "shared-file",
+      "fixture": "notes-api",
+      "shape": "two features that both edit server.mjs",
+      "goal": "Add two features to server.mjs, each with node:test tests in its own test file: (1) request logging that writes one line per request (method, path, status, duration in ms) to stderr, tested in test/logging.test.mjs; (2) a per-IP rate limit of 20 requests per 10 seconds that answers 429 with a Retry-After header, tested in test/rate-limit.test.mjs."
+    }
+  ]
+}

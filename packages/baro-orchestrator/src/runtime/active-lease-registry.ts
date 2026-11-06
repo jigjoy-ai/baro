@@ -53,6 +53,11 @@ export class ActiveLeaseRegistry {
         return true
     }
 
+    hasActive(storyId: string, runId: string | undefined): boolean {
+        const active = this.byStory.get(storyId)
+        return !!active && !!runId && active.runId === runId
+    }
+
     matchesLease(
         storyId: string,
         runId: string | undefined,

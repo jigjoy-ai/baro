@@ -515,6 +515,80 @@ describe("CoordinationForwarder", () => {
         assert.deepEqual(lines, [])
     })
 
+    it("presents each Critic turn verdict, rejections included, only inside an active lease", async () => {
+        const forwarder = new CoordinationForwarder(true)
+        const broker = source("broker")
+        const critic = source("critic")
+        forwarder.sealCollectiveAuthorities({
+            runId: "run-turns",
+            board: source("board"),
+            broker,
+            verifier: source("verifier"),
+            bridge: source("bridge"),
+            critique: critic,
+        })
+        const verdict = (turn: number, reasoning: string, extra = {}) =>
+            Critique.create({
+                agentId: "S1",
+                status: "evaluated",
+                verdict: "fail",
+                reasoning,
+                violatedCriteria: ["tests"],
+                turn,
+                modelUsed: "critic",
+                ...extra,
+            })
+        const grant = WorkLeaseGranted.create({
+            runId: "run-turns",
+            offerId: "offer-1",
+            leaseId: "lease-1",
+            workerId: "worker",
+            generation: 1,
+            request: { storyId: "S1", prompt: "work", retries: 0, timeoutSecs: 60 },
+        })
+        const release = WorkLeaseReleased.create({
+            runId: "run-turns",
+            storyId: "S1",
+            leaseId: "lease-1",
+            workerId: "worker",
+            reason: "integrated",
+        })
+
+        const lines = await captureStdout(async () => {
+            await forwarder.onExternalEvent(critic, verdict(1, "before any lease"))
+            await forwarder.onExternalEvent(broker, grant)
+            await forwarder.onExternalEvent(source("forged-critic"), verdict(1, "forged"))
+            await forwarder.onExternalEvent(critic, verdict(1, "evidence predates the edit", { status: "inconclusive", staleCommands: ["npm test"] }))
+            await forwarder.onExternalEvent(critic, verdict(2, "missing 404 test"))
+            await forwarder.onExternalEvent(broker, release)
+            await forwarder.onExternalEvent(critic, verdict(3, "after release"))
+        })
+        const reviews = lines
+            .map((line) => JSON.parse(line) as BaroEvent)
+            .filter((event) => event.type === "turn_review")
+        assert.deepEqual(reviews, [
+            {
+                type: "turn_review",
+                id: "S1",
+                turn: 1,
+                status: "inconclusive",
+                verdict: "fail",
+                reasoning: "evidence predates the edit",
+                violated: ["tests"],
+                stale_commands: ["npm test"],
+            },
+            {
+                type: "turn_review",
+                id: "S1",
+                turn: 2,
+                status: "evaluated",
+                verdict: "fail",
+                reasoning: "missing 404 test",
+                violated: ["tests"],
+            },
+        ])
+    })
+
     it("presents only the AcceptanceGate projection for the active collective lease", async () => {
         const forwarder = new CoordinationForwarder(true)
         const board = source("board")

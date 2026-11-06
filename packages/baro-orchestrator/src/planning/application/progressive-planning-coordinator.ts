@@ -324,6 +324,20 @@ export class ProgressivePlanningCoordinator {
             // to a worker and the prefix is immutable from that moment. Each
             // edge is judged from its own two stories alone, so pruning here
             // and pruning the final PRD cannot disagree.
+            // A focused one-story plan has a single possible owner for every
+            // goal invariant, as in completeSoleStoryOwnership: ownership is a
+            // host fact, not something the planner must transcribe. Without
+            // it a plan made without an Architect pass leaves each invariant
+            // to its own remediation story.
+            const mode = state.prd.executionMode
+            const soleOwnerInvariantIds =
+                goalContract &&
+                mode?.mode === "focused" &&
+                mode.maxStories === 1 &&
+                state.prd.userStories.length === 0 &&
+                parsed.stories.length === 1
+                    ? goalContract.invariants.map(({ id }) => id)
+                    : []
             const repairedStories = parsed.stories.map((story) => {
                     const repaired = canonicalObligationAcceptance(
                         obligationContract,
@@ -334,7 +348,7 @@ export class ProgressivePlanningCoordinator {
                         acceptance: repaired.acceptance,
                         goalInvariantIds: completeImpliedInvariantIds(
                             story.goalInvariantIds,
-                            repaired.invariantIds,
+                            [...repaired.invariantIds, ...soleOwnerInvariantIds],
                         ),
                     }
             })

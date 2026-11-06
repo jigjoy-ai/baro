@@ -59,6 +59,7 @@ test, not a schema change:
 | `story_start` | a story took its lease |
 | `story_suspended` | a story yielded to a prerequisite (cooperative) |
 | `critique` | the Critic's verdict — certification, not activity |
+| `turn_review` | the Critic's verdict on one story turn, rejections included: `{id, turn, status, verdict, reasoning, violated, stale_commands?}`; `critique` stays the final outcome |
 | `story_merged` / `merge_failed` | the merge gate's outcome |
 | `story_complete` / `story_error` | a story's terminal state |
 | `level_started` / `level_completed` / `recovery_started` | graph progress |

@@ -1,0 +1,677 @@
+{
+  "label": "local-multi",
+  "baro": "/Users/miodrag.todorovic/.baro/local-v4/baro",
+  "model": "sonnet",
+  "cases": {
+    "parallel-py-js": {
+      "success": true,
+      "verification": "passed",
+      "abort_reason": null,
+      "total_secs": 325.15,
+      "architect_secs": 86.85,
+      "to_first_story_secs": 174.5,
+      "stories_secs": 127.80000000000001,
+      "finalize_secs": 22.799999999999997,
+      "story_count": 2,
+      "retries": 0,
+      "replans": 1,
+      "critic_reviews": {
+        "total": 4,
+        "rejected": 1,
+        "stale_evidence": 0
+      },
+      "cost_usd": 1.10045,
+      "tokens": {
+        "input": 1016380,
+        "cached_input": 800123,
+        "cache_write": 216187,
+        "output": 27810
+      },
+      "cache_hit_ratio": 0.7872,
+      "phases": {
+        "architect": {
+          "calls": 4,
+          "cost_usd": 0.1368,
+          "model_secs": 52
+        },
+        "planner": {
+          "calls": 1,
+          "cost_usd": 0.2002,
+          "model_secs": 51
+        },
+        "story": {
+          "calls": 4,
+          "cost_usd": 0.697,
+          "model_secs": 167
+        },
+        "critic": {
+          "calls": 4,
+          "cost_usd": 0.3578,
+          "model_secs": 39
+        }
+      },
+      "stories": [
+        {
+          "id": "S1",
+          "secs": 194.8,
+          "attempts": 2,
+          "reviews": 3,
+          "cost_usd": 0.8334
+        },
+        {
+          "id": "S2",
+          "secs": 49.8,
+          "attempts": 1,
+          "reviews": 1,
+          "cost_usd": 0.2213
+        }
+      ],
+      "wall_secs": 325.45,
+      "exit_code": 0,
+      "timed_out": false,
+      "ran_at": "2026-11-06T18:28:53.869Z",
+      "repeats": 2,
+      "runs": [
+        {
+          "success": true,
+          "verification": "passed",
+          "abort_reason": null,
+          "total_secs": 385.7,
+          "architect_secs": 80.4,
+          "to_first_story_secs": 167.5,
+          "stories_secs": 194.8,
+          "finalize_secs": 23.4,
+          "story_count": 2,
+          "retries": 0,
+          "replans": 1,
+          "critic_reviews": {
+            "total": 4,
+            "rejected": 1,
+            "stale_evidence": 0
+          },
+          "cost_usd": 1.3917,
+          "tokens": {
+            "input": 1016380,
+            "cached_input": 800123,
+            "cache_write": 216187,
+            "output": 27810
+          },
+          "cache_hit_ratio": 0.7872,
+          "phases": {
+            "architect": {
+              "calls": 4,
+              "cost_usd": 0.1368,
+              "model_secs": 52
+            },
+            "planner": {
+              "calls": 1,
+              "cost_usd": 0.2002,
+              "model_secs": 51
+            },
+            "story": {
+              "calls": 4,
+              "cost_usd": 0.697,
+              "model_secs": 167
+            },
+            "critic": {
+              "calls": 4,
+              "cost_usd": 0.3578,
+              "model_secs": 39
+            }
+          },
+          "stories": [
+            {
+              "id": "S1",
+              "secs": 194.8,
+              "attempts": 2,
+              "reviews": 3,
+              "cost_usd": 0.8334
+            },
+            {
+              "id": "S2",
+              "secs": 49.8,
+              "attempts": 1,
+              "reviews": 1,
+              "cost_usd": 0.2213
+            }
+          ],
+          "wall_secs": 386,
+          "exit_code": 0,
+          "timed_out": false,
+          "ran_at": "2026-11-06T18:28:53.869Z"
+        },
+        {
+          "success": true,
+          "verification": "passed",
+          "abort_reason": null,
+          "total_secs": 264.6,
+          "architect_secs": 93.3,
+          "to_first_story_secs": 181.5,
+          "stories_secs": 60.8,
+          "finalize_secs": 22.2,
+          "story_count": 2,
+          "retries": 0,
+          "replans": 1,
+          "critic_reviews": {
+            "total": 2,
+            "rejected": 0,
+            "stale_evidence": 0
+          },
+          "cost_usd": 0.8092,
+          "tokens": {
+            "input": 487759,
+            "cached_input": 347445,
+            "cache_write": 140276,
+            "output": 21328
+          },
+          "cache_hit_ratio": 0.7123,
+          "phases": {
+            "architect": {
+              "calls": 4,
+              "cost_usd": 0.1391,
+              "model_secs": 50
+            },
+            "planner": {
+              "calls": 1,
+              "cost_usd": 0.2005,
+              "model_secs": 46
+            },
+            "story": {
+              "calls": 2,
+              "cost_usd": 0.3061,
+              "model_secs": 61
+            },
+            "critic": {
+              "calls": 2,
+              "cost_usd": 0.1635,
+              "model_secs": 16
+            }
+          },
+          "stories": [
+            {
+              "id": "S1",
+              "secs": 57.5,
+              "attempts": 1,
+              "reviews": 1,
+              "cost_usd": 0.2383
+            },
+            {
+              "id": "S2",
+              "secs": 51,
+              "attempts": 1,
+              "reviews": 1,
+              "cost_usd": 0.2313
+            }
+          ],
+          "wall_secs": 264.9,
+          "exit_code": 0,
+          "timed_out": false,
+          "ran_at": "2026-11-06T18:35:20.095Z"
+        }
+      ]
+    },
+    "three-modules": {
+      "success": true,
+      "verification": "passed",
+      "abort_reason": null,
+      "total_secs": 358.1,
+      "architect_secs": 94.85,
+      "to_first_story_secs": 185.05,
+      "stories_secs": 155.9,
+      "finalize_secs": 17.2,
+      "story_count": 4,
+      "retries": 0,
+      "replans": 1,
+      "critic_reviews": {
+        "total": 7,
+        "rejected": 2,
+        "stale_evidence": 0
+      },
+      "cost_usd": 1.50645,
+      "tokens": {
+        "input": 1046876,
+        "cached_input": 779548,
+        "cache_write": 267250,
+        "output": 34004
+      },
+      "cache_hit_ratio": 0.7446,
+      "phases": {
+        "architect": {
+          "calls": 4,
+          "cost_usd": 0.1514,
+          "model_secs": 49
+        },
+        "planner": {
+          "calls": 1,
+          "cost_usd": 0.2289,
+          "model_secs": 54
+        },
+        "story": {
+          "calls": 6,
+          "cost_usd": 0.9504,
+          "model_secs": 146
+        },
+        "critic": {
+          "calls": 7,
+          "cost_usd": 0.4549,
+          "model_secs": 56
+        }
+      },
+      "stories": [
+        {
+          "id": "S2",
+          "secs": 41.2,
+          "attempts": 1,
+          "reviews": 2,
+          "cost_usd": 0.4002
+        },
+        {
+          "id": "S3",
+          "secs": 46.1,
+          "attempts": 1,
+          "reviews": 1,
+          "cost_usd": 0.1956
+        },
+        {
+          "id": "S1",
+          "secs": 63.3,
+          "attempts": 1,
+          "reviews": 1,
+          "cost_usd": 0.2751
+        },
+        {
+          "id": "S4",
+          "secs": 103.8,
+          "attempts": 1,
+          "reviews": 3,
+          "cost_usd": 0.5344
+        }
+      ],
+      "wall_secs": 358.45,
+      "exit_code": 0,
+      "timed_out": false,
+      "ran_at": "2026-11-06T18:39:45.236Z",
+      "repeats": 2,
+      "runs": [
+        {
+          "success": true,
+          "verification": "passed",
+          "abort_reason": null,
+          "total_secs": 387.5,
+          "architect_secs": 90.9,
+          "to_first_story_secs": 181.7,
+          "stories_secs": 189,
+          "finalize_secs": 16.9,
+          "story_count": 4,
+          "retries": 0,
+          "replans": 1,
+          "critic_reviews": {
+            "total": 7,
+            "rejected": 2,
+            "stale_evidence": 0
+          },
+          "cost_usd": 1.7856,
+          "tokens": {
+            "input": 1046876,
+            "cached_input": 779548,
+            "cache_write": 267250,
+            "output": 34004
+          },
+          "cache_hit_ratio": 0.7446,
+          "phases": {
+            "architect": {
+              "calls": 4,
+              "cost_usd": 0.1514,
+              "model_secs": 49
+            },
+            "planner": {
+              "calls": 1,
+              "cost_usd": 0.2289,
+              "model_secs": 54
+            },
+            "story": {
+              "calls": 6,
+              "cost_usd": 0.9504,
+              "model_secs": 146
+            },
+            "critic": {
+              "calls": 7,
+              "cost_usd": 0.4549,
+              "model_secs": 56
+            }
+          },
+          "stories": [
+            {
+              "id": "S2",
+              "secs": 41.2,
+              "attempts": 1,
+              "reviews": 2,
+              "cost_usd": 0.4002
+            },
+            {
+              "id": "S3",
+              "secs": 46.1,
+              "attempts": 1,
+              "reviews": 1,
+              "cost_usd": 0.1956
+            },
+            {
+              "id": "S1",
+              "secs": 63.3,
+              "attempts": 1,
+              "reviews": 1,
+              "cost_usd": 0.2751
+            },
+            {
+              "id": "S4",
+              "secs": 103.8,
+              "attempts": 1,
+              "reviews": 3,
+              "cost_usd": 0.5344
+            }
+          ],
+          "wall_secs": 387.9,
+          "exit_code": 0,
+          "timed_out": false,
+          "ran_at": "2026-11-06T18:39:45.236Z"
+        },
+        {
+          "success": true,
+          "verification": "passed",
+          "abort_reason": null,
+          "total_secs": 328.7,
+          "architect_secs": 98.8,
+          "to_first_story_secs": 188.4,
+          "stories_secs": 122.8,
+          "finalize_secs": 17.5,
+          "story_count": 4,
+          "retries": 0,
+          "replans": 1,
+          "critic_reviews": {
+            "total": 4,
+            "rejected": 0,
+            "stale_evidence": 0
+          },
+          "cost_usd": 1.2273,
+          "tokens": {
+            "input": 841036,
+            "cached_input": 617460,
+            "cache_write": 223514,
+            "output": 27135
+          },
+          "cache_hit_ratio": 0.7342,
+          "phases": {
+            "architect": {
+              "calls": 4,
+              "cost_usd": 0.1397,
+              "model_secs": 50
+            },
+            "planner": {
+              "calls": 1,
+              "cost_usd": 0.2014,
+              "model_secs": 48
+            },
+            "story": {
+              "calls": 4,
+              "cost_usd": 0.6029,
+              "model_secs": 134
+            },
+            "critic": {
+              "calls": 4,
+              "cost_usd": 0.2833,
+              "model_secs": 26
+            }
+          },
+          "stories": [
+            {
+              "id": "S1",
+              "secs": 72.7,
+              "attempts": 1,
+              "reviews": 1,
+              "cost_usd": 0.2644
+            },
+            {
+              "id": "S2",
+              "secs": 43.8,
+              "attempts": 1,
+              "reviews": 1,
+              "cost_usd": 0.1963
+            },
+            {
+              "id": "S3",
+              "secs": 49.2,
+              "attempts": 1,
+              "reviews": 1,
+              "cost_usd": 0.197
+            },
+            {
+              "id": "S4",
+              "secs": 48.5,
+              "attempts": 1,
+              "reviews": 1,
+              "cost_usd": 0.2284
+            }
+          ],
+          "wall_secs": 329,
+          "exit_code": 0,
+          "timed_out": false,
+          "ran_at": "2026-11-06T18:46:13.326Z"
+        }
+      ]
+    },
+    "shared-file": {
+      "success": true,
+      "verification": "passed",
+      "abort_reason": null,
+      "total_secs": 371,
+      "architect_secs": 121.25,
+      "to_first_story_secs": 229.7,
+      "stories_secs": 122.55,
+      "finalize_secs": 18.75,
+      "story_count": 2.5,
+      "retries": 0,
+      "replans": 1,
+      "critic_reviews": {
+        "total": 2,
+        "rejected": 0,
+        "stale_evidence": 0
+      },
+      "cost_usd": 1.4536,
+      "tokens": {
+        "input": 681371,
+        "cached_input": 520471,
+        "cache_write": 160854,
+        "output": 28580
+      },
+      "cache_hit_ratio": 0.7639,
+      "phases": {
+        "architect": {
+          "calls": 5,
+          "cost_usd": 0.175,
+          "model_secs": 63
+        },
+        "planner": {
+          "calls": 1,
+          "cost_usd": 0.2017,
+          "model_secs": 59
+        },
+        "story": {
+          "calls": 2,
+          "cost_usd": 0.4307,
+          "model_secs": 87
+        },
+        "critic": {
+          "calls": 2,
+          "cost_usd": 0.1741,
+          "model_secs": 11
+        }
+      },
+      "stories": [
+        {
+          "id": "S1",
+          "secs": 64.2,
+          "attempts": 1,
+          "reviews": 1,
+          "cost_usd": 0.2935
+        },
+        {
+          "id": "S2",
+          "secs": 53.3,
+          "attempts": 1,
+          "reviews": 1,
+          "cost_usd": 0.3112
+        }
+      ],
+      "wall_secs": 371.4,
+      "exit_code": 0,
+      "timed_out": false,
+      "ran_at": "2026-11-06T18:51:42.528Z",
+      "repeats": 2,
+      "runs": [
+        {
+          "success": true,
+          "verification": "passed",
+          "abort_reason": null,
+          "total_secs": 353.5,
+          "architect_secs": 113.9,
+          "to_first_story_secs": 217.4,
+          "stories_secs": 119,
+          "finalize_secs": 17.1,
+          "story_count": 2,
+          "retries": 0,
+          "replans": 1,
+          "critic_reviews": {
+            "total": 2,
+            "rejected": 0,
+            "stale_evidence": 0
+          },
+          "cost_usd": 0.9814,
+          "tokens": {
+            "input": 681371,
+            "cached_input": 520471,
+            "cache_write": 160854,
+            "output": 28580
+          },
+          "cache_hit_ratio": 0.7639,
+          "phases": {
+            "architect": {
+              "calls": 5,
+              "cost_usd": 0.175,
+              "model_secs": 63
+            },
+            "planner": {
+              "calls": 1,
+              "cost_usd": 0.2017,
+              "model_secs": 59
+            },
+            "story": {
+              "calls": 2,
+              "cost_usd": 0.4307,
+              "model_secs": 87
+            },
+            "critic": {
+              "calls": 2,
+              "cost_usd": 0.1741,
+              "model_secs": 11
+            }
+          },
+          "stories": [
+            {
+              "id": "S1",
+              "secs": 64.2,
+              "attempts": 1,
+              "reviews": 1,
+              "cost_usd": 0.2935
+            },
+            {
+              "id": "S2",
+              "secs": 53.3,
+              "attempts": 1,
+              "reviews": 1,
+              "cost_usd": 0.3112
+            }
+          ],
+          "wall_secs": 353.9,
+          "exit_code": 0,
+          "timed_out": false,
+          "ran_at": "2026-11-06T18:51:42.528Z"
+        },
+        {
+          "success": true,
+          "verification": "passed",
+          "abort_reason": null,
+          "total_secs": 388.5,
+          "architect_secs": 128.6,
+          "to_first_story_secs": 242,
+          "stories_secs": 126.1,
+          "finalize_secs": 20.4,
+          "story_count": 3,
+          "retries": 0,
+          "replans": 1,
+          "critic_reviews": {
+            "total": 5,
+            "rejected": 2,
+            "stale_evidence": 0
+          },
+          "cost_usd": 1.9258,
+          "tokens": {
+            "input": 1212814,
+            "cached_input": 949308,
+            "cache_write": 263428,
+            "output": 39488
+          },
+          "cache_hit_ratio": 0.7827,
+          "phases": {
+            "architect": {
+              "calls": 4,
+              "cost_usd": 0.1552,
+              "model_secs": 58
+            },
+            "planner": {
+              "calls": 1,
+              "cost_usd": 0.2516,
+              "model_secs": 76
+            },
+            "story": {
+              "calls": 5,
+              "cost_usd": 1.0417,
+              "model_secs": 170
+            },
+            "critic": {
+              "calls": 5,
+              "cost_usd": 0.4773,
+              "model_secs": 57
+            }
+          },
+          "stories": [
+            {
+              "id": "S3",
+              "secs": 103.7,
+              "attempts": 1,
+              "reviews": 2,
+              "cost_usd": 0.654
+            },
+            {
+              "id": "S2",
+              "secs": 116.2,
+              "attempts": 1,
+              "reviews": 2,
+              "cost_usd": 0.6366
+            },
+            {
+              "id": "S1",
+              "secs": 55.8,
+              "attempts": 1,
+              "reviews": 1,
+              "cost_usd": 0.2284
+            }
+          ],
+          "wall_secs": 388.9,
+          "exit_code": 0,
+          "timed_out": false,
+          "ran_at": "2026-11-06T18:57:36.663Z"
+        }
+      ]
+    }
+  }
+}
