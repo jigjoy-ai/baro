@@ -428,8 +428,6 @@ export function buildRunArgs(dispatch: RunDispatchMsg, cwd: string): string[] {
         cwd,
         "--llm",
         dispatch.route?.backend ?? "claude",
-        "--coordination",
-        "collective",
         "--parallel",
         String(dispatch.parallel),
         "--timeout",
