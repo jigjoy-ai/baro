@@ -38,6 +38,10 @@ export interface SupervisorOptions {
      * a non-converging loop; shell commands are work, not exploration, and do
      * not count. Default 80. */
     noProgressToolCalls?: number
+    /** …and only once this long has passed without a file change. A survey
+     * story read 80 files in 90 seconds and was aborted for it; exploring
+     * fast is not looping. Default 10 minutes. */
+    noProgressMinMs?: number
     /** Consecutive SHELL invocations with no file change before we call it a
      * non-converging probe loop. Independent of noProgressToolCalls, because a
      * command's runtime is legitimate work and needs far more headroom.
@@ -96,6 +100,7 @@ export class Supervisor extends BusMember {
         const noProgressToolCalls = opts.noProgressToolCalls ?? 80
         this.opts = {
             noProgressToolCalls,
+            noProgressMinMs: opts.noProgressMinMs ?? 10 * 60_000,
             noProgressShellCalls: opts.noProgressShellCalls ?? 240,
             repeatThreshold: opts.repeatThreshold ?? 12,
             repeatsNeedNoProgress: opts.repeatsNeedNoProgress ?? Math.floor(noProgressToolCalls / 2),
@@ -266,7 +271,10 @@ export class Supervisor extends BusMember {
     }
 
     private stallReason(st: StoryProgress, repeats: number): string | null {
-        if (st.sinceLastChange >= this.opts.noProgressToolCalls) {
+        if (
+            st.sinceLastChange >= this.opts.noProgressToolCalls &&
+            this.opts.now() - st.lastProgressAt >= this.opts.noProgressMinMs
+        ) {
             return `${st.sinceLastChange} tool calls with no file change — exploring, not converging`
         }
         // Commands are work, but a story running them forever without touching
