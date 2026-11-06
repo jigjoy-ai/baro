@@ -164,6 +164,9 @@ describe("a Claude story's OS sandbox", () => {
             assert.ok(!writes.some((path) => /\/(\.npm|\.cache|Library\/Caches)$/u.test(path)))
             assert.equal(settings.env.npm_config_cache, join(cache, "npm"))
             assert.equal(settings.env.PIP_CACHE_DIR, join(cache, "pip"))
+            // pnpm 12 ignores npm_config_store_dir, and npm warns about it.
+            assert.equal(settings.env.pnpm_config_store_dir, join(cache, "pnpm-store"))
+            assert.equal(settings.env.npm_config_store_dir, undefined)
             assert.equal(claudeStorySandbox(repo, undefined, { BARO_UNSAFE_NO_SANDBOX: "1" }), null)
         } finally {
             rmSync(repo, { recursive: true, force: true })

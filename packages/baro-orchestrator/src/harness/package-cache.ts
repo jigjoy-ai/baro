@@ -25,7 +25,7 @@ export function storyPackageCache(env: NodeJS.ProcessEnv = process.env): StoryPa
         root,
         env: {
             npm_config_cache: at("npm"),
-            npm_config_store_dir: at("pnpm-store"),
+            pnpm_config_store_dir: at("pnpm-store"),
             YARN_CACHE_FOLDER: at("yarn"),
             PIP_CACHE_DIR: at("pip"),
             UV_CACHE_DIR: at("uv"),
