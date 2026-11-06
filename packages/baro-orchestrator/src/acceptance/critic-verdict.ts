@@ -5,10 +5,18 @@
  * per-backend critics and the shared skeleton both depend on it.
  */
 
-/** A criterion this story cannot meet as written; Baro moves it to a follow-up story. */
+/**
+ * A criterion this story cannot meet as written. One that needs files outside
+ * the story's write surface moves to a follow-up story that may change them;
+ * one that contradicts another of the story's criteria cannot be fixed by
+ * moving it (the follow-up would undo the other side, or meet a "this story"
+ * rule vacuously), so the story is judged on the rest and the contradiction
+ * stays on the record for the run-level reviews.
+ */
 export interface ContractConflict {
     criterion: string
     reason: string
+    kind: "outside_write_surface" | "contradiction"
 }
 
 const MAX_CONTRACT_CONFLICTS = 32
@@ -21,12 +29,14 @@ export function parseContractConflicts(value: unknown): ContractConflict[] {
     const conflicts: ContractConflict[] = []
     for (const entry of value) {
         if (typeof entry !== "object" || entry === null) continue
-        const { criterion, reason } = entry as Record<string, unknown>
+        const { criterion, reason, kind } = entry as Record<string, unknown>
         if (typeof criterion !== "string" || !criterion.trim()) continue
         if (typeof reason !== "string" || !reason.trim()) continue
+        // Without a known kind it stays an ordinary violation.
+        if (kind !== "outside_write_surface" && kind !== "contradiction") continue
         if (seen.has(criterion)) continue
         seen.add(criterion)
-        conflicts.push({ criterion, reason: reason.trim().slice(0, MAX_CONFLICT_REASON_CHARS) })
+        conflicts.push({ criterion, reason: reason.trim().slice(0, MAX_CONFLICT_REASON_CHARS), kind })
         if (conflicts.length >= MAX_CONTRACT_CONFLICTS) break
     }
     return conflicts
@@ -83,8 +93,8 @@ export function verdictSystemPrompt(
         : ""
     const conflictsRule = options.contractConflicts
         ? `
-- "contract_conflicts" (optional, default []) lists criteria this story cannot satisfy as written, each as {"criterion":"exact criterion string","reason":"…"}. Use it only when meeting the criterion requires changing files outside the "## Write surface" Baro lists for this story, or when it directly contradicts another of this story's criteria. The reason must name those files or that other criterion.
-- A conflicted criterion is not this story's to meet: leave it out of "violated_criteria" and decide "verdict" on every other criterion. Baro moves it to a follow-up story that can meet it.
+- "contract_conflicts" (optional, default []) lists criteria this story cannot satisfy as written, each as {"criterion":"exact criterion string","kind":"outside_write_surface" or "contradiction","reason":"…"}. Use "outside_write_surface" only when meeting the criterion requires changing files outside the "## Write surface" Baro lists for this story, and name those files. Use "contradiction" only when no change could meet it together with another of this story's criteria, and quote that other criterion.
+- A conflicted criterion is not this story's to meet: leave it out of "violated_criteria" and decide "verdict" on every other criterion. Baro moves an "outside_write_surface" criterion to a follow-up story that may change those files, and records a "contradiction" for the run-level reviews.
 - Never list a criterion the story could meet within its write surface but did not, or one that merely lacks evidence: those are violations. Without a "## Write surface" section, only the contradiction case applies.`
         : ""
     return `\

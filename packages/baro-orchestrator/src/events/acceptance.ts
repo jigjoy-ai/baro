@@ -38,6 +38,7 @@ export interface CritiqueData {
 export interface ContractConflictData {
     criterion: string
     reason: string
+    kind: "outside_write_surface" | "contradiction"
 }
 
 export const Critique = defineSemanticEvent<CritiqueData>("critique")

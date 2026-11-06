@@ -1602,7 +1602,9 @@ export class CollectiveBoard extends SerializedObserver {
         ) return
         this.pendingQuality.delete(data.storyId)
         if (data.status === "passed") {
-            const conflicts = data.critique?.contractConflicts ?? []
+            const conflicts = (data.critique?.contractConflicts ?? []).filter(
+                ({ kind }) => kind === "outside_write_surface",
+            )
             if (conflicts.length > 0) this.pendingContractTransfers.set(data.storyId, conflicts)
             else this.pendingContractTransfers.delete(data.storyId)
             this.requestIntegration(result, data)
@@ -2376,9 +2378,8 @@ export class CollectiveBoard extends SerializedObserver {
     }
 
     /**
-     * The Critic passed `sourceId` while reporting criteria it could not meet
-     * as written: they need files outside its write surface, or contradict
-     * another of its criteria. Revising it again cannot help, so once it has
+     * The Critic passed `sourceId` while reporting criteria that need files
+     * outside its write surface. Revising it again cannot help, so once it has
      * merged those criteria become a story of their own, with no write surface
      * and the goal invariants their obligations carry. Idempotent per source
      * and criteria, since a re-verification reports the same conflicts again.
@@ -2420,7 +2421,7 @@ export class CollectiveBoard extends SerializedObserver {
                         priority: source?.priority ?? 1,
                         title: `Meet the criteria ${sourceId} could not`,
                         description: [
-                            `Story ${sourceId} integrated without these acceptance criteria: meeting them needs files outside its write surface, or they contradicted another of its criteria. Meet each one, changing whichever files it needs.`,
+                            `Story ${sourceId} integrated without these acceptance criteria because meeting them needs files outside its write surface. Meet each one, changing whichever files it needs, without undoing what ${sourceId} delivered.`,
                             "",
                             ...reasons,
                         ].join("\n"),

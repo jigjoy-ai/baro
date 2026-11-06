@@ -15,14 +15,20 @@ describe("Critic contract conflicts", () => {
         assert.deepEqual(parseContractConflicts("not a list"), [])
         assert.deepEqual(
             parseContractConflicts([
-                { criterion: "A", reason: " outside the surface " },
-                { criterion: "A", reason: "repeat" },
-                { criterion: "", reason: "empty criterion" },
-                { criterion: "B" },
+                { criterion: "A", kind: "outside_write_surface", reason: " outside the surface " },
+                { criterion: "A", kind: "contradiction", reason: "repeat" },
+                { criterion: "", kind: "contradiction", reason: "empty criterion" },
+                { criterion: "B", kind: "contradiction" },
+                { criterion: "D", reason: "no kind: stays an ordinary violation" },
+                { criterion: "E", kind: "too hard", reason: "unknown kind" },
+                { criterion: "F", kind: "contradiction", reason: "contradicts A" },
                 null,
                 "C",
             ]),
-            [{ criterion: "A", reason: "outside the surface" }],
+            [
+                { criterion: "A", reason: "outside the surface", kind: "outside_write_surface" },
+                { criterion: "F", reason: "contradicts A", kind: "contradiction" },
+            ],
         )
     })
 
@@ -33,15 +39,15 @@ describe("Critic contract conflicts", () => {
                 reasoning: "r",
                 violatedCriteria: ["B"],
                 contractConflicts: [
-                    { criterion: "B", reason: "outside" },
-                    { criterion: "Z", reason: "invented" },
+                    { criterion: "B", reason: "outside", kind: "outside_write_surface" as const },
+                    { criterion: "Z", reason: "invented", kind: "contradiction" as const },
                 ],
             },
             ["A", "B"],
         )
         assert.equal(evaluation.verdict, "pass")
         assert.deepEqual(evaluation.violatedCriteria, [])
-        assert.deepEqual(evaluation.contractConflicts, [{ criterion: "B", reason: "outside" }])
+        assert.deepEqual(evaluation.contractConflicts, [{ criterion: "B", reason: "outside", kind: "outside_write_surface" }])
     })
 
     it("still fails on a real violation, and a conflict never hides one", () => {
@@ -50,7 +56,7 @@ describe("Critic contract conflicts", () => {
                 verdict: "fail" as const,
                 reasoning: "r",
                 violatedCriteria: ["A", "B"],
-                contractConflicts: [{ criterion: "B", reason: "outside" }],
+                contractConflicts: [{ criterion: "B", reason: "outside", kind: "outside_write_surface" as const }],
             },
             ["A", "B"],
         )
@@ -64,7 +70,7 @@ describe("Critic contract conflicts", () => {
                 verdict: "pass" as const,
                 reasoning: "r",
                 violatedCriteria: [],
-                contractConflicts: [{ criterion: "Z", reason: "invented" }],
+                contractConflicts: [{ criterion: "Z", reason: "invented", kind: "contradiction" as const }],
             },
             ["A"],
         )
@@ -73,8 +79,8 @@ describe("Critic contract conflicts", () => {
 
     it("unions conflicts across segment verdicts", () => {
         const merged = mergeSegmentVerdicts([
-            { verdict: "pass", reasoning: "1", violatedCriteria: [], contractConflicts: [{ criterion: "A", reason: "x" }] },
-            { verdict: "pass", reasoning: "2", violatedCriteria: [], contractConflicts: [{ criterion: "B", reason: "y" }] },
+            { verdict: "pass", reasoning: "1", violatedCriteria: [], contractConflicts: [{ criterion: "A", reason: "x", kind: "contradiction" }] },
+            { verdict: "pass", reasoning: "2", violatedCriteria: [], contractConflicts: [{ criterion: "B", reason: "y", kind: "outside_write_surface" }] },
         ])
         assert.deepEqual(merged.contractConflicts?.map(({ criterion }) => criterion), ["A", "B"])
     })
@@ -82,6 +88,7 @@ describe("Critic contract conflicts", () => {
     it("asks story critics for conflicts, and only story critics", () => {
         assert.match(VERDICT_SYSTEM_PROMPT, /"contract_conflicts"/)
         assert.match(VERDICT_SYSTEM_PROMPT, /merely lacks evidence: those are violations/)
+        assert.match(VERDICT_SYSTEM_PROMPT, /"outside_write_surface" or "contradiction"/)
         assert.doesNotMatch(verdictSystemPrompt({ remediationGroups: true }), /contract_conflicts/)
     })
 

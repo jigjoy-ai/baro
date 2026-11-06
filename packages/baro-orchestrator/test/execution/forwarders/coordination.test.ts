@@ -559,7 +559,9 @@ describe("CoordinationForwarder", () => {
             await forwarder.onExternalEvent(broker, grant)
             await forwarder.onExternalEvent(source("forged-critic"), verdict(1, "forged"))
             await forwarder.onExternalEvent(critic, verdict(1, "evidence predates the edit", { status: "inconclusive", staleCommands: ["npm test"] }))
-            await forwarder.onExternalEvent(critic, verdict(2, "missing 404 test"))
+            await forwarder.onExternalEvent(critic, verdict(2, "missing 404 test", {
+                contractConflicts: [{ criterion: "suites use deepStrictEqual", reason: "lib/a.test.mjs is outside", kind: "outside_write_surface" }],
+            }))
             await forwarder.onExternalEvent(broker, release)
             await forwarder.onExternalEvent(critic, verdict(3, "after release"))
         })
@@ -585,6 +587,9 @@ describe("CoordinationForwarder", () => {
                 verdict: "fail",
                 reasoning: "missing 404 test",
                 violated: ["tests"],
+                contract_conflicts: [
+                    { criterion: "suites use deepStrictEqual", reason: "lib/a.test.mjs is outside", kind: "outside_write_surface" },
+                ],
             },
         ])
     })

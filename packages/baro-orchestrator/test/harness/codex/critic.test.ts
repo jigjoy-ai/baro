@@ -116,8 +116,8 @@ describe("CriticCodex", () => {
                         reasoning: "README is complete; the suites belong to other stories",
                         violated_criteria: [tests],
                         contract_conflicts: [
-                            { criterion: tests, reason: "lib/export.test.mjs is outside the write surface" },
-                            { criterion: "a criterion of some other story", reason: "not this story's" },
+                            { criterion: tests, kind: "outside_write_surface", reason: "lib/export.test.mjs is outside the write surface" },
+                            { criterion: "a criterion of some other story", kind: "contradiction", reason: "not this story's" },
                         ],
                     },
                 }),
@@ -133,7 +133,7 @@ describe("CriticCodex", () => {
             assert.equal(critique!.payload.verdict, "pass")
             assert.deepEqual(critique!.payload.violatedCriteria, [])
             assert.deepEqual(critique!.payload.contractConflicts, [
-                { criterion: tests, reason: "lib/export.test.mjs is outside the write surface" },
+                { criterion: tests, reason: "lib/export.test.mjs is outside the write surface", kind: "outside_write_surface" },
             ])
             assert.equal(env.events.filter(AgentTargetedMessage.is).length, 0)
         })
@@ -151,7 +151,7 @@ describe("CriticCodex", () => {
                         reasoning: "README misses the validator",
                         violated_criteria: [readme],
                         contract_conflicts: [
-                            { criterion: tests, reason: "lib/export.test.mjs is outside the write surface" },
+                            { criterion: tests, kind: "outside_write_surface", reason: "lib/export.test.mjs is outside the write surface" },
                         ],
                     },
                 }),

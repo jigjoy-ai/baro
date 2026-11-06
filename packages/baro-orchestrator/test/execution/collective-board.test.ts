@@ -1368,7 +1368,8 @@ describe("CollectiveBoard", () => {
                         turn: 1,
                         modelUsed: "critic-test",
                         contractConflicts: [
-                            { criterion: suites, reason: "lib/export.test.mjs is outside the write surface" },
+                            { criterion: suites, reason: "lib/export.test.mjs is outside the write surface", kind: "outside_write_surface" },
+                            { criterion: readme, reason: "contradicts the suites rule", kind: "contradiction" },
                         ],
                     },
                 }),
@@ -1383,7 +1384,7 @@ describe("CollectiveBoard", () => {
             const applied = await waitFor(env.events, RuntimeReplanApplied.is)
             const [added] = applied.payload.mutation.addedStories
             assert.match(added!.id, /^XFER-[0-9a-f]{12}$/)
-            assert.deepEqual(added!.acceptance, [suites])
+            assert.deepEqual(added!.acceptance, [suites], "a contradiction is never moved")
             assert.deepEqual(added!.dependsOn, [])
             assert.deepEqual(added!.tests, ["npm test"])
             assert.equal(added!.writes, undefined, "the follow-up may change whichever files it needs")
