@@ -4,13 +4,15 @@ import { delimiter, join, resolve } from "node:path"
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process"
 
 import { gitSandboxPaths } from "../execution/shell-containment.js"
+import { storyPackageCache } from "./package-cache.js"
 
 /**
  * OS confinement for a story's CLI agent process (Codex, OpenCode, Pi, Devin)
  * and everything it runs. These CLIs run their tools with approvals and their
  * own sandboxes off, so the guard has to sit around the whole process tree:
  * on macOS a Seatbelt profile that allows writes only to the story worktree,
- * the git metadata a commit needs, a private temp dir and the CLI's own state,
+ * the git metadata a commit needs, a private temp dir, Baro's package cache
+ * (package-cache.ts) and the CLI's own state,
  * and denies reading credential stores. Claude stories use Claude Code's own
  * sandbox instead (hook-bridge.ts).
  *
@@ -43,8 +45,6 @@ const LANE_STATE = {
     devin: [".devin", ".config/devin", ".local/share/devin", ".cache/devin"],
 } as const satisfies Record<string, readonly string[]>
 
-/** Package-manager caches a build may need to write. */
-const SHARED_CACHES = [".npm", ".cache", ".cargo/registry", ".cargo/git", "Library/Caches"]
 
 /**
  * For the roles that only read and answer (architect, planner, intake,
@@ -81,6 +81,7 @@ export function confinedSpawn(
         }
     }
     const home = homedir()
+    const cache = storyPackageCache(env)
     const scratch = realpathSync(mkdtempSync(join(tmpdir(), `baro-${lane}-tmp-`)))
     const writable = [
         ...(worktreeRoot === null
@@ -88,9 +89,8 @@ export function confinedSpawn(
             : [realpathSync(resolve(worktreeRoot)), ...gitSandboxPaths(worktreeRoot).paths]),
         scratch,
         "/dev/null",
-        ...[...(LANE_STATE[lane as keyof typeof LANE_STATE] ?? []), ...SHARED_CACHES].map((dir) =>
-            join(home, dir),
-        ),
+        cache.root,
+        ...(LANE_STATE[lane as keyof typeof LANE_STATE] ?? []).map((dir) => join(home, dir)),
     ]
     return {
         binary: "/usr/bin/sandbox-exec",
@@ -100,7 +100,7 @@ export function confinedSpawn(
             binary,
             ...args,
         ],
-        env: { ...credentialEnv, TMPDIR: scratch, TMP: scratch, TEMP: scratch },
+        env: { ...credentialEnv, ...cache.env, TMPDIR: scratch, TMP: scratch, TEMP: scratch },
     }
 }
 

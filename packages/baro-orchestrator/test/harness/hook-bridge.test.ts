@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { execFileSync } from "node:child_process"
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { after, describe, it } from "node:test"
@@ -134,7 +134,8 @@ describe("a Claude story's OS sandbox", () => {
             // Stories always run in a linked worktree, as here.
             const worktree = join(repo, ".story")
             execFileSync("git", ["worktree", "add", "-q", "-b", "s1", worktree], { cwd: repo })
-            const settings = claudeStorySandbox(worktree, "http://127.0.0.1:43123/v1", {}) as {
+            const cacheRoot = join(repo, ".cache-root")
+            const settings = claudeStorySandbox(worktree, "http://127.0.0.1:43123/v1", { BARO_PACKAGE_CACHE: cacheRoot }) as {
                 sandbox: {
                     enabled: boolean
                     failIfUnavailable: boolean
@@ -143,6 +144,7 @@ describe("a Claude story's OS sandbox", () => {
                     network: { allowedDomains: string[]; strictAllowlist: boolean }
                 }
                 permissions: { blockWritesOutsideWorkingDirectories: boolean }
+                env: Record<string, string>
             }
             assert.equal(settings.sandbox.enabled, true)
             assert.equal(settings.sandbox.failIfUnavailable, true, "a story whose sandbox cannot start does not run")
@@ -155,6 +157,13 @@ describe("a Claude story's OS sandbox", () => {
             assert.ok(settings.sandbox.network.allowedDomains.includes("127.0.0.1:43123"), "the lease's broker")
             assert.ok(!settings.sandbox.network.allowedDomains.some((domain) => domain.includes("github")))
             assert.equal(settings.sandbox.network.strictAllowlist, true)
+            // npm refuses to install without a writable cache; the user's own
+            // caches stay out of reach, so a story cannot poison them.
+            const cache = realpathSync(cacheRoot)
+            assert.ok(writes.includes(cache))
+            assert.ok(!writes.some((path) => /\/(\.npm|\.cache|Library\/Caches)$/u.test(path)))
+            assert.equal(settings.env.npm_config_cache, join(cache, "npm"))
+            assert.equal(settings.env.PIP_CACHE_DIR, join(cache, "pip"))
             assert.equal(claudeStorySandbox(repo, undefined, { BARO_UNSAFE_NO_SANDBOX: "1" }), null)
         } finally {
             rmSync(repo, { recursive: true, force: true })

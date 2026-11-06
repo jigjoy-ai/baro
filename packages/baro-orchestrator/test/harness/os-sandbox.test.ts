@@ -56,12 +56,15 @@ describe("OS confinement of a story's CLI lane", () => {
                     `echo x > ${join(root, "S2", "stolen.txt")} 2>/dev/null && echo sibling-WRITTEN`,
                     `printf '[x]\\n' >> ${join(root, "repo", ".git", "config")} 2>/dev/null && echo config-WRITTEN`,
                     'ls "$HOME/.ssh" >/dev/null 2>&1 && echo ssh-READ',
+                    'mkdir -p "$npm_config_cache" && echo c > "$npm_config_cache/probe" && echo cache-ok',
+                    `P="$HOME/Library/Caches/baro-probe-$$"; touch "$P" 2>/dev/null && rm -f "$P" && echo host-cache-WRITTEN`,
                     "exit 0",
                 ].join("\n"),
             )
             chmodSync(cli, 0o755)
 
-            const { BARO_UNSAFE_NO_SANDBOX: _optOut, ...env } = process.env
+            const { BARO_UNSAFE_NO_SANDBOX: _optOut, ...hostEnv } = process.env
+            const env = { ...hostEnv, BARO_PACKAGE_CACHE: join(root, "cache") }
             const plan = confinedSpawn("codex", cli, [], worktree, env)
             assert.ok(!("refusal" in plan), JSON.stringify(plan))
             const run = spawnSync(plan.binary, plan.args, { cwd: worktree, env: plan.env, encoding: "utf8" })
@@ -70,6 +73,8 @@ describe("OS confinement of a story's CLI lane", () => {
             assert.doesNotMatch(run.stdout, /sibling-WRITTEN/)
             assert.doesNotMatch(run.stdout, /config-WRITTEN/)
             assert.doesNotMatch(run.stdout, /ssh-READ/)
+            assert.match(run.stdout, /cache-ok/, run.stderr)
+            assert.doesNotMatch(run.stdout, /host-cache-WRITTEN/)
             assert.equal(existsSync(join(root, "S2", "stolen.txt")), false)
         } finally {
             rmSync(root, { recursive: true, force: true })

@@ -183,6 +183,20 @@ Verified against Claude Code 2.1.318: a commit succeeds; a script writing the
 shared `.git/config` or a sibling story's worktree gets `Operation not
 permitted`; `~/.ssh` is unreadable; github.com is unreachable; the broker is.
 
+Package managers write to a Baro-owned cache (`~/.baro/cache/packages`,
+`BARO_PACKAGE_CACHE` overrides it), set through `npm_config_cache`,
+`PIP_CACHE_DIR`, `XDG_CACHE_HOME`, `CARGO_HOME` and their peers; the user's own
+caches stay unwritable, so a story cannot poison the user's next install. The
+Codex, OpenCode, Pi and Devin lanes use the same cache. The Claude sandbox sets
+`enableWeakerNetworkIsolation`, which lets clients that verify TLS through
+macOS `trustd` (pip, Go, gh) do so; without it pip fails with `OSStatus
+-26276`. The domain allowlist still applies.
+
+Read-only Claude roles (architect, scouts, planner, surgeon) run under
+`dontAsk`, which refuses every read outside the checkout. They approve
+Read/Glob/Grep explicitly and deny the same credential stores, so a goal can
+point at a symlinked SDK or a sibling checkout.
+
 A dependency is a merge order, not a start barrier. A running story whose
 dependents need only part of its work (an interface, fixtures, a schema)
 commits that part and publishes it (`--kind checkpoint --reason "..."`). The
