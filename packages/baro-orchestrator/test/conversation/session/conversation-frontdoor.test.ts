@@ -62,6 +62,127 @@ describe("pre-PRD conversation front door", () => {
         assert.match(prompt, /src\/billing\.ts/)
     })
 
+    it("starts RepoScout for a goal while the model is still answering", async () => {
+        const scanStarted = deferred<void>()
+        let scans = 0
+        let calls = 0
+        const intake = new ConversationIntake({
+            sessionId: "session-prefetch",
+            responder: {
+                backend: "codex",
+                async respond(input) {
+                    calls += 1
+                    // Without the prefetch the scan only starts after this
+                    // first answer, so it never starts while we wait here.
+                    if (calls === 1) {
+                        await Promise.race([
+                            scanStarted.promise,
+                            new Promise((_resolve, reject) => setTimeout(
+                                () => reject(new Error("RepoScout did not start alongside the first answer")),
+                                2_000,
+                            )),
+                        ])
+                    }
+                    return JSON.stringify(readyWire(input.sessionId, input.requestId))
+                },
+            },
+        })
+        const response = await runFrontDoorConversationTurn({
+            sessionId: "session-prefetch",
+            turn: { requestId: "request-prefetch", intent: "goal", text: "Add GET /notes/:id." },
+            intake,
+            scanner: {
+                async scan() {
+                    scans += 1
+                    scanStarted.resolve()
+                    return validBrief("c", "server.mjs")
+                },
+            },
+            repositoryTimeoutMs: 1_000,
+            turnTimeoutMs: 5_000,
+        })
+        assert.equal(response.kind, "ready")
+        assert.equal(scans, 1)
+        assert.equal(calls, 2)
+    })
+
+    it("does not wait for a goal's prefetched scan when the model asks a question", async () => {
+        let aborted = false
+        const intake = new ConversationIntake({
+            sessionId: "session-prefetch-clarify",
+            responder: {
+                backend: "codex",
+                async respond(input) {
+                    return JSON.stringify(clarifyWire(input.sessionId, input.requestId))
+                },
+            },
+        })
+        const started = Date.now()
+        const response = await runFrontDoorConversationTurn({
+            sessionId: "session-prefetch-clarify",
+            turn: { requestId: "request-prefetch-clarify", intent: "goal", text: "Make it better." },
+            intake,
+            scanner: {
+                scan(_request, signal) {
+                    return new Promise((_resolve, reject) => {
+                        signal?.addEventListener("abort", () => {
+                            aborted = true
+                            reject(new Error("aborted"))
+                        })
+                    })
+                },
+            },
+            repositoryTimeoutMs: 60_000,
+            turnTimeoutMs: 120_000,
+        })
+        assert.equal(response.kind, "clarify")
+        assert.equal(aborted, true)
+        assert.ok(Date.now() - started < 5_000, "the turn must not wait out the scan")
+    })
+
+    it("surfaces a prefetched scan failure only when the model needs the context", async () => {
+        const intake = new ConversationIntake({
+            sessionId: "session-prefetch-fail",
+            responder: readyResponder(() => undefined),
+        })
+        await assert.rejects(
+            runFrontDoorConversationTurn({
+                sessionId: "session-prefetch-fail",
+                turn: { requestId: "request-prefetch-fail", intent: "goal", text: "Add GET /notes/:id." },
+                intake,
+                scanner: {
+                    async scan() {
+                        throw new Error("scanner exploded")
+                    },
+                },
+                repositoryTimeoutMs: 1_000,
+            }),
+            /repository context scan_failed/,
+        )
+
+        const clarifying = new ConversationIntake({
+            sessionId: "session-prefetch-fail-clarify",
+            responder: {
+                backend: "codex",
+                async respond(input) {
+                    return JSON.stringify(clarifyWire(input.sessionId, input.requestId))
+                },
+            },
+        })
+        const response = await runFrontDoorConversationTurn({
+            sessionId: "session-prefetch-fail-clarify",
+            turn: { requestId: "request-prefetch-fail-clarify", intent: "goal", text: "Make it better." },
+            intake: clarifying,
+            scanner: {
+                async scan() {
+                    throw new Error("scanner exploded")
+                },
+            },
+            repositoryTimeoutMs: 1_000,
+        })
+        assert.equal(response.kind, "clarify")
+    })
+
     it("scans chat before accepting a ready implementation follow-up", async () => {
         let scans = 0
         const intake = new ConversationIntake({
@@ -384,6 +505,22 @@ function readyWire(sessionId: string, requestId: string) {
             nonGoals: [],
             assumptions: [],
         },
+    }
+}
+
+function clarifyWire(sessionId: string, requestId: string) {
+    return {
+        schemaVersion: 1 as const,
+        sessionId,
+        requestId,
+        kind: "clarify" as const,
+        message: "I need one decision before I can hand this off.",
+        questions: [{
+            id: "q-scope",
+            text: "Which part should improve?",
+            reason: "The goal names no behavior.",
+        }],
+        goalEnvelope: null,
     }
 }
 

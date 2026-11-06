@@ -218,6 +218,8 @@ interface ConversationLaneTurn {
     fingerprint: string
     phase: ConversationLanePhase
     contextRequestId?: string
+    /** RepoScout's result when it arrived while the model was still answering. */
+    prefetched?: { brief: RepositoryBriefV1 } | { failure: string }
     terminal?: SemanticEvent<string, unknown>
 }
 
@@ -307,8 +309,12 @@ export class ConversationIntakeParticipant extends SerializedObserver {
             phase: "answering",
         }
         this.turns.set(request.requestId, turn)
-        // Conversation-first: answer without repository context. RepoScout
-        // runs lazily, only when the model wants a ready handoff.
+        // Conversation-first: answer without repository context. A goal can
+        // only be handed off with a repository brief, and the scan query
+        // depends on the request alone, so RepoScout starts alongside the
+        // first answer instead of after it. Other intents scan lazily, only
+        // when the model wants a ready handoff.
+        if (request.intent === "goal") this.publishContextRequest(turn, context)
         context.spawnTask(
             { label: `conversation ${turn.request.requestId}`, key: "conversation" },
             () => this.answer(turn, undefined, context),
@@ -319,12 +325,32 @@ export class ConversationIntakeParticipant extends SerializedObserver {
         turn: ConversationLaneTurn,
         context: SerializedEventContext,
     ): void {
+        const prefetched = turn.prefetched
+        if (prefetched && "brief" in prefetched) {
+            context.spawnTask(
+                { label: `conversation ${turn.request.requestId}`, key: "conversation" },
+                () => this.answer(turn, prefetched.brief, context),
+            )
+            return
+        }
+        if (prefetched) {
+            this.fail(turn, prefetched.failure, context)
+            return
+        }
+        const inFlight = turn.contextRequestId !== undefined
+        turn.phase = "awaiting-context"
+        if (!inFlight) this.publishContextRequest(turn, context)
+    }
+
+    private publishContextRequest(
+        turn: ConversationLaneTurn,
+        context: Pick<SerializedEventContext, "publish">,
+    ): void {
         const request = turn.request
         const contextRequestId = repositoryContextRequestId(
             request.sessionId,
             request.requestId,
         )
-        turn.phase = "awaiting-context"
         turn.contextRequestId = contextRequestId
         context.publish(RepositoryContextRequested.create({
             schemaVersion: 1,
@@ -395,15 +421,24 @@ export class ConversationIntakeParticipant extends SerializedObserver {
         const turn = this.turns.get(value.requestId)
         if (
             !turn ||
-            turn.phase !== "awaiting-context" ||
-            turn.contextRequestId !== value.contextRequestId
+            turn.phase === "terminal" ||
+            turn.contextRequestId !== value.contextRequestId ||
+            turn.prefetched
         ) return
 
         let brief: RepositoryBriefV1
         try {
             brief = validateRepositoryBriefV1(value.brief)
         } catch {
+            if (turn.phase === "answering") {
+                turn.prefetched = { failure: "repository context was invalid" }
+                return
+            }
             this.fail(turn, "repository context was invalid", context)
+            return
+        }
+        if (turn.phase === "answering") {
+            turn.prefetched = { brief }
             return
         }
         turn.phase = "answering"
@@ -427,14 +462,16 @@ export class ConversationIntakeParticipant extends SerializedObserver {
         const turn = this.turns.get(failure.requestId)
         if (
             !turn ||
-            turn.phase !== "awaiting-context" ||
-            turn.contextRequestId !== failure.contextRequestId
+            turn.phase === "terminal" ||
+            turn.contextRequestId !== failure.contextRequestId ||
+            turn.prefetched
         ) return
-        this.fail(
-            turn,
-            `repository context ${failure.code}: ${failure.error}`,
-            context,
-        )
+        const reason = `repository context ${failure.code}: ${failure.error}`
+        if (turn.phase === "answering") {
+            turn.prefetched = { failure: reason }
+            return
+        }
+        this.fail(turn, reason, context)
     }
 
     private async answer(
