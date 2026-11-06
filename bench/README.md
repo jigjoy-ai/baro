@@ -14,6 +14,9 @@ node bench/run.mjs --label local --baro ~/.baro/local-v4/baro
 # One case only
 node bench/run.mjs --label local --baro ~/.baro/local-v4/baro --only bugfix
 
+# Baro's own model choice per role (what users get), instead of Sonnet everywhere
+node bench/run.mjs --label local-default --baro ~/.baro/local-v4/baro --model default
+
 # Multi-story cases vary run to run: repeat and compare medians
 node bench/run.mjs --label local --baro ~/.baro/local-v4/baro --only shared-file --repeat 3
 

@@ -50,7 +50,10 @@ function prepareRepo(fixture, dir) {
 
 function runCase(opts, testCase, dir, streamPath, errPath, tracePath) {
     const [bin, ...pre] = opts.baro.split(" ").filter(Boolean)
-    const roles = ["architect", "planner", "story", "surgeon", "critic"].flatMap((r) => [`--${r}-model`, opts.model])
+    // "default" leaves every role on Baro's own choice, as a user's run would be.
+    const roles = opts.model === "default"
+        ? []
+        : ["architect", "planner", "story", "surgeon", "critic"].flatMap((r) => [`--${r}-model`, opts.model])
     const args = [...pre, "--headless", "--local-only", "--llm", "claude", ...roles, "--cwd", dir, testCase.goal]
     return new Promise((done) => {
         const startedAt = Date.now()

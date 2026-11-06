@@ -252,6 +252,12 @@ Make obligations atomic rather than restating a broad goal:
   writes those files. When different stories would write those files, author
   one obligation per file group; never fold several writers' content rules
   into one obligation that only a story allowed to edit all of them could meet.
+- Do not author obligations about the plan's own mechanics: which story owns
+  which files, that stories stay out of each other's files, that each story's
+  tests pass on their own, or that the whole suite passes at the end. Baro
+  enforces file ownership at merge and runs the repository's verification
+  after integration; such obligations only turn whichever story receives them
+  into an auditor of its siblings' work.
 
 Even the exact trivial ADR requires this appendix in pre-acceptance outcome
 mode: the provider's own "trivial" label is not authority to bypass the
