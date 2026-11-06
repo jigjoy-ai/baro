@@ -183,6 +183,17 @@ Verified against Claude Code 2.1.318: a commit succeeds; a script writing the
 shared `.git/config` or a sibling story's worktree gets `Operation not
 permitted`; `~/.ssh` is unreadable; github.com is unreachable; the broker is.
 
+Under that sandbox the story hook no longer judges each shell command: the
+kernel already holds every process the command starts, and the command judge
+refused harmless reads, heredocs, inline code and peer messages whose text held
+a slash (test run 4). The hook still refuses publishing and shared git state
+(`publish-guard.ts`), and Write/Edit stay inside the worktree. With
+`BARO_UNSAFE_NO_SANDBOX=1` the command judge is the only guard and runs as
+before; the hook's self-check probes it either way. Verified against the live
+CLI: inline python and a commit inside the worktree work; a write to the main
+checkout or another repo, from the shell or from python, fails with `Operation
+not permitted`; `git push` is refused by the hook.
+
 Package managers write to a Baro-owned cache (`~/.baro/cache/packages`,
 `BARO_PACKAGE_CACHE` overrides it), set through `npm_config_cache`,
 `PIP_CACHE_DIR`, `XDG_CACHE_HOME`, `CARGO_HOME` and their peers; the user's own

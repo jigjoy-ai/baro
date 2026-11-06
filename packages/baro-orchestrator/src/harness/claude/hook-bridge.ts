@@ -18,6 +18,7 @@ import {
     existsSync,
     mkdirSync,
     mkdtempSync,
+    readFileSync,
     renameSync,
     rmSync,
     writeFileSync,
@@ -149,6 +150,11 @@ if (mode === "pre-bash") {
               ? input.cwd
               : ""
     if (!worktreeRoot) refuse("shell containment has no worktree to judge against; the command was refused")
+    // Under Claude Code's OS sandbox (failIfUnavailable, no unsandboxed
+    // escape) the kernel holds writes, reads and network for every process
+    // the command starts, so the command-level judge would only refuse
+    // harmless reads, heredocs and inline code. The publish guard above stays.
+    if (containment.osSandbox === true) process.exit(0)
     let contained = null
     try {
         contained = shellContainmentRefusal(
@@ -332,12 +338,17 @@ export function assertHookContainsShell(hookPath: string): void {
         })
     let escaping = ""
     let inside = "unread"
+    let publishing = ""
     try {
         const dir = dirname(hookPath)
         copyFileSync(hookPath, join(probe, "hook.mjs"))
-        copyFileSync(join(dir, "containment.json"), join(probe, "containment.json"))
+        const settings = JSON.parse(readFileSync(join(dir, "containment.json"), "utf8")) as Record<string, unknown>
+        // The command judge is what a sandbox opt-out falls back to.
+        writeFileSync(join(probe, "containment.json"), JSON.stringify({ ...settings, osSandbox: false }))
         escaping = run("cd .. && ls")
         inside = run("ls")
+        writeFileSync(join(probe, "containment.json"), JSON.stringify(settings))
+        publishing = run("git push origin HEAD")
     } finally {
         rmSync(probe, { recursive: true, force: true })
     }
@@ -350,9 +361,15 @@ export function assertHookContainsShell(hookPath: string): void {
     } catch {
         refused = false
     }
-    if (!refused || inside !== "") {
+    let publishRefused = false
+    try {
+        publishRefused = JSON.parse(publishing).decision === "block"
+    } catch {
+        publishRefused = false
+    }
+    if (!refused || inside !== "" || !publishRefused) {
         throw new Error(
-            `the story hook at ${hookPath} does not judge shell commands (it must refuse one that leaves the worktree and allow one inside it); refusing to start a story behind it`,
+            `the story hook at ${hookPath} does not judge shell commands (it must refuse one that leaves the worktree or publishes, and allow one inside it); refusing to start a story behind it`,
         )
     }
 }
@@ -362,11 +379,14 @@ export function materializePublishGuardHooks(
     dir: string,
     worktreeRoot?: string,
     brokerEndpoint?: string,
+    collab?: { command: string; capability: string },
 ): string {
     mkdirSync(dir, { recursive: true })
     return writeHookSettings(dir, {
         ...(worktreeRoot === undefined ? {} : { worktreeRoot }),
         ...(brokerEndpoint ? { brokerEndpoint } : {}),
+        // Without it the judge reads a peer message as paths and refuses it.
+        ...(collab ? { collabCommand: collab.command, collabCapability: collab.capability } : {}),
     })
 }
 
@@ -466,6 +486,9 @@ function writeHookSettings(
 ): string {
     const hookPath = join(dir, "hook.mjs")
     writeFileSync(hookPath, HOOK_SCRIPT, { mode: 0o755 })
+    const sandbox = containment.worktreeRoot
+        ? claudeStorySandbox(containment.worktreeRoot, containment.brokerEndpoint)
+        : null
     writeFileSync(
         join(dir, "containment.json"),
         JSON.stringify(
@@ -474,15 +497,13 @@ function writeHookSettings(
                 collabCommand: containment.collabCommand ?? null,
                 collabCapability: containment.collabCapability ?? null,
                 scratchDir: SHELL_SCRATCH_DIRNAME,
+                osSandbox: sandbox !== null,
             },
             null,
             2,
         ),
     )
     assertHookContainsShell(hookPath)
-    const sandbox = containment.worktreeRoot
-        ? claudeStorySandbox(containment.worktreeRoot, containment.brokerEndpoint)
-        : null
     const settingsPath = join(dir, "settings.json")
     const hook = (mode: string) => ({
         hooks: [

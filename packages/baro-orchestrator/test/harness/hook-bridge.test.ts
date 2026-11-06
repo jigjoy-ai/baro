@@ -170,3 +170,63 @@ describe("a Claude story's OS sandbox", () => {
         }
     })
 })
+
+describe("a Claude story's shell hook under the OS sandbox", () => {
+    // Run 4: with the kernel already holding writes, reads and network, the
+    // command judge refused dozens of harmless reads, heredocs and inline
+    // python, and every peer message whose text held a slash.
+    it("leaves the shell to the sandbox but still refuses publishing, and knows the collaboration helper", async () => {
+        const { materializePublishGuardHooks } = await import("../../src/harness/claude/hook-bridge.js")
+        const repo = realpathSync(mkdtempSync(join(tmpdir(), "baro-sandboxed-hook-")))
+        const optOut = process.env.BARO_UNSAFE_NO_SANDBOX
+        const cache = process.env.BARO_PACKAGE_CACHE
+        try {
+            execFileSync("git", ["init", "-q", "-b", "main", join(repo, "wt")])
+            const helper = join(repo, "agent-collab.mjs")
+            execFileSync("touch", [helper])
+            delete process.env.BARO_UNSAFE_NO_SANDBOX
+            process.env.BARO_PACKAGE_CACHE = join(repo, "cache")
+            const hooks = join(repo, "hooks")
+            materializePublishGuardHooks(hooks, join(repo, "wt"), "http://127.0.0.1:43123", {
+                command: helper,
+                capability: "note",
+            })
+            const containment = JSON.parse(readFileSync(join(hooks, "containment.json"), "utf8"))
+            assert.equal(containment.osSandbox, true)
+            assert.equal(containment.collabCommand, helper)
+            const bash = (command: string) =>
+                execFileSync("node", [join(hooks, "hook.mjs"), "pre-bash"], {
+                    input: JSON.stringify({ tool_input: { command }, cwd: join(repo, "wt") }),
+                    encoding: "utf8",
+                })
+            assert.equal(bash("python3 -c 'print(1)'"), "")
+            assert.equal(bash("cat > .baro-scratch/a.py <<'X'\nprint(1)\nX"), "")
+            assert.equal(bash(`sed -n 1,5p ${join(repo, "agent-collab.mjs")}`), "")
+            assert.match(bash("git push origin HEAD"), /"decision":"block"/)
+        } finally {
+            if (optOut === undefined) delete process.env.BARO_UNSAFE_NO_SANDBOX
+            else process.env.BARO_UNSAFE_NO_SANDBOX = optOut
+            if (cache === undefined) delete process.env.BARO_PACKAGE_CACHE
+            else process.env.BARO_PACKAGE_CACHE = cache
+            rmSync(repo, { recursive: true, force: true })
+        }
+    })
+
+    it("judges every command itself when the sandbox is opted out", async () => {
+        const { materializePublishGuardHooks } = await import("../../src/harness/claude/hook-bridge.js")
+        const repo = realpathSync(mkdtempSync(join(tmpdir(), "baro-unsandboxed-hook-")))
+        try {
+            execFileSync("git", ["init", "-q", "-b", "main", join(repo, "wt")])
+            const hooks = join(repo, "hooks")
+            materializePublishGuardHooks(hooks, join(repo, "wt"))
+            assert.equal(JSON.parse(readFileSync(join(hooks, "containment.json"), "utf8")).osSandbox, false)
+            const verdict = execFileSync("node", [join(hooks, "hook.mjs"), "pre-bash"], {
+                input: JSON.stringify({ tool_input: { command: "cd .. && ls" }, cwd: join(repo, "wt") }),
+                encoding: "utf8",
+            })
+            assert.match(verdict, /"decision":"block"/)
+        } finally {
+            rmSync(repo, { recursive: true, force: true })
+        }
+    })
+})

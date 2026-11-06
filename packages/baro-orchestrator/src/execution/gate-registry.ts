@@ -154,15 +154,20 @@ const SHELL_CONTAINMENT: GateDisclosure = {
     id: "shell-containment",
     enforcedBy: "src/execution/shell-containment.ts",
     summary:
-        "Shell commands must stay inside your worktree; scratch checkouts go under .baro-scratch/.",
+        "Shell writes stay inside your worktree (the OS sandbox or a command judge enforces it); scratch checkouts go under .baro-scratch/.",
     announce: () =>
         [
-            "SHELL CONTAINMENT (enforced at the command, in every lane) [gate:shell-containment]:",
-            "- A shell command that leaves your worktree is refused before it runs.",
-            "  The refused shapes are: `cd` to a directory outside the worktree,",
-            "  absolute paths outside it, parent (`..`) or home (`~`) traversal,",
-            "  nested shell evaluation (`sh -c`, `eval`, command substitution), and",
+            "SHELL CONTAINMENT [gate:shell-containment]:",
+            "- Your shell may write only inside your worktree (and package caches).",
+            "  Under an OS sandbox the kernel enforces this: a write outside fails",
+            "  with `Operation not permitted`, reads work everywhere except",
+            "  credential stores, and the network reaches only package registries.",
+            "- Without one, each command is judged before it runs, and these shapes",
+            "  are refused: `cd` outside the worktree, absolute paths outside it,",
+            "  parent (`..`) or home (`~`) traversal, nested shell evaluation",
+            "  (`sh -c`, `eval`, command substitution), and",
             "  redirection through a symlink that escapes the worktree.",
+            "- Publishing (`git push`, `gh pr`, remote or shared git config) is refused in every lane.",
             `- ${shellContainmentRemedyLine(SHELL_SCRATCH_DIRNAME)}`,
         ].join("\n"),
 }

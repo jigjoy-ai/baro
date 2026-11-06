@@ -295,7 +295,7 @@ export class LocalStoryExecutor implements StoryExecutor {
                           // OS sandbox, with or without a declared surface.
                           const settings =
                               materializeStoryHooks(hookDir, req.surface, hookCollab, cwd) ??
-                              materializePublishGuardHooks(hookDir, cwd, hookCollab.endpoint)
+                              materializePublishGuardHooks(hookDir, cwd, hookCollab.endpoint, hookCollab)
                           return settings ? { cliSettingsPath: settings } : {}
                       })(),
                       // undefined → StoryAgent applies its own default.
