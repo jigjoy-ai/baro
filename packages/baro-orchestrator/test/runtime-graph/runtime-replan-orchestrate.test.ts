@@ -136,7 +136,6 @@ describe("runtime DAG adaptation orchestration", () => {
             const result = await orchestrate({
                 prdPath,
                 cwd: dir,
-                coordinationMode: "collective",
                 publishRemote: false,
                 withGit: false,
                 emitTuiEvents: false,

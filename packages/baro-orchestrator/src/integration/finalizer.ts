@@ -7,10 +7,9 @@
  * stories table with per-story durations and commit SHAs, DAG plan,
  * diff stats, run summary.
  *
- * Bus-only. Knows nothing about the TUI, doesn't touch prd.json
- * directly (Conductor already loaded the canonical PRD into memory and
- * we read a fresh copy at PR-creation time so any Surgeon replans are
- * reflected), doesn't import Conductor internals. Reacts to:
+ * Bus-only. Knows nothing about the TUI and never writes prd.json; it
+ * reads a fresh copy at PR-creation time so any replans are reflected.
+ * Reacts to:
  *
  *   - RunStartedItem        → capture start time + base SHA + branch
  *   - LevelStartedItem      → record DAG level membership
@@ -117,7 +116,7 @@ export class Finalizer extends BusMember {
     /**
      * DAG levels keyed by their ordinal as emitted in
      * LevelStartedItem. We use a Map rather than an array because
-     * Conductor's ordinals are 1-based and would otherwise leave a
+     * the Board's ordinals are 1-based and would otherwise leave a
      * `levels[0] = undefined` hole that crashes any `for...of`
      * iteration (it walks holes too).
      */
@@ -196,8 +195,7 @@ export class Finalizer extends BusMember {
             if (!this.matchesAuthority(source, this.coordinationAuthority)) return
             this.startedAtMs = Date.now()
             // Capture base SHA at run start so we can later list commits
-            // produced by the run regardless of how many branches Conductor
-            // ends up on.
+            // produced by the run regardless of how many branches it ends up on.
             if (this.baseSha == null) {
                 this.baseSha = await getHeadSha(this.opts.integrationRoot)
             }
@@ -277,7 +275,7 @@ export class Finalizer extends BusMember {
             if (
                 (this.verifierAuthority === null && this.runId !== null) ||
                 !this.matchesAuthority(source, this.verifierAuthority) ||
-                !this.matchesRun(event.payload.runId, true)
+                !this.matchesRun(event.payload.runId)
             ) return
             this.objectiveVerification = {
                 runId: event.payload.runId,
@@ -313,13 +311,8 @@ export class Finalizer extends BusMember {
         return authority === null ? this.runId === null : source === authority
     }
 
-    private matchesRun(eventRunId: string | undefined, required = false): boolean {
+    private matchesRun(eventRunId: string | undefined): boolean {
         if (this.runId === null) return true
-        if (eventRunId === undefined) {
-            // Collective events are fully correlated; legacy lifecycle/merge
-            // events intentionally omit runId and remain source-bound.
-            return !required && this.outcomeAuthority === null
-        }
         return eventRunId === this.runId
     }
 
@@ -454,8 +447,8 @@ export class Finalizer extends BusMember {
             )
         }
 
-        // Hydrate story titles from the canonical PRD that Conductor was
-        // working from at the moment the run ended. This is important
+        // Hydrate story titles from the canonical PRD as it stood at the
+        // moment the run ended. This is important
         // when Surgeon replans midway through — we want the user to see
         // the *final* titles, not the original ones.
         const prd = this.safeLoadPrd()

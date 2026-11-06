@@ -48,16 +48,12 @@ carry no compat constraint beyond "don't rename once shipped"):
 - `story_merged` / `story_merge_failed` — emitted by the GitCoordinator when a
   passed story's work lands on the run branch (worktree merge-back or
   shared-tree reconcile) or the merge-back fails and the worktree is preserved.
-- `recovery_started` — emitted by the Conductor when `tryStartRecoveryLevel`
-  actually starts a recovery level (`attempt` is a 1-based run-level counter).
-  Visibility only: the recovery flow itself stays hook-driven.
+- `recovery_started` — emitted by the Board when it actually starts a
+  recovery level (`attempt` is a 1-based run-level counter). Visibility only.
 - `story_routed` — emitted by StoryFactory right after `resolveStoryRoute`;
   the machine-readable twin of the `[story-factory] S1 → backend:model`
   stderr line (which stays). See docs/tui-protocol-v2.md for the structured
   BaroEvents these feed.
-- `replan_applied` — the legacy Conductor accepted a buffered Surgeon
-  `Replan`, applied it at a level boundary, and persisted the PRD. Raw
-  `replan` remains a proposal and is never projected as committed state.
 - `runtime_replan_proposed` — a collective worker proposes a closed,
   correlated mutation of the not-yet-started DAG. Its run/story/lease/
   generation identify the active authority and `baseGraphVersion` is the
@@ -104,9 +100,9 @@ PRD's `runtimeGraph` metadata and can be restored by a host that resumes the
 same `runId`. The current public CLI starts a new identity after a process
 restart, so it keeps the graph/version baseline but does not yet expose
 end-to-end replay of an old decision. This runtime contract is distinct from
-the older `Replan` event, which remains the Surgeon/Conductor recovery
-proposal contract; in collective mode only the Board's persisted Applied
-decision reaches stateful projections.
+the older `Replan` event, which remains the Surgeon recovery proposal
+contract; only the Board's persisted Applied decision reaches stateful
+projections.
 
 ## Why type discriminators, not `instanceof`
 

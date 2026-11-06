@@ -21,13 +21,10 @@ import {
 } from "./telemetry/billing/index.js"
 import {
     GitGate,
-    createOrCheckoutBranch,
-    excludeBaroArtifacts,
     getCommitCount,
     getCurrentBranch,
     getDiff,
     getGitFileStats,
-    getHeadSha,
     hasRemoteOrigin,
     ensureGreenfieldRepo,
     isInsideGitRepo,
@@ -54,10 +51,7 @@ import { AgentTurnProjector } from "./acceptance/agent-turn-projector.js"
 import { CollaborationBridge } from "./execution/collaboration-bridge.js"
 import { CollectiveBoard } from "./execution/collective-board.js"
 import { GoalGuardian } from "./goal/goal-guardian.js"
-import {
-    Conductor,
-    ConductorRunSummary,
-} from "./execution/conductor.js"
+import type { RunSummary } from "./execution/run-summary.js"
 import { Critic } from "./harness/claude/critic.js"
 import {
     CriticCommandEvidenceCollector,
@@ -142,7 +136,6 @@ import { formatDeclaredBudgetEvidence } from "./verification/declared-test-budge
 import {
     ModelInvocationMeasured,
     RunStartRequest,
-    type CoordinationMode,
     type WorkBidEstimateData,
 } from "./semantic-events.js"
 import { criticCallTimeoutMs } from "./harness/one-shot/critic.js"
@@ -224,8 +217,6 @@ export interface OrchestrateConfig {
     runId?: string
     parallel?: number
     timeoutSecs?: number
-    /** Coordination engine. `legacy` remains the default. */
-    coordinationMode?: CoordinationMode
     /** Allow push and PR creation. False keeps the complete git lifecycle local. */
     publishRemote?: boolean
     /** Optional collective execution-lease watchdog; disabled by default. */
@@ -253,7 +244,7 @@ export interface OrchestrateConfig {
     collectiveGoalReviewMaxAttempts?: number
     /** Test/embedding seam for the read-only merged-run evaluator. */
     goalReviewResponder?: DialogueResponder
-    /** Optional communication-only conversational participant. Collective only. */
+    /** Optional communication-only conversational participant. */
     withDialogue?: boolean
     /** Text-only backing model for DialogueAgent. Defaults to a compatible run backend. */
     dialogueLlm?: DialogueBackend
@@ -323,7 +314,7 @@ export interface OrchestrateConfig {
     criticModel?: string
     /**
      * Wire the Surgeon (adaptive DAG mutation): terminal story failures
-     * trigger ReplanItems that Conductor applies at the next level boundary.
+     * trigger recovery decisions the Board applies.
      * Default: false.
      */
     withSurgeon?: boolean
@@ -347,8 +338,8 @@ export interface OrchestrateConfig {
      */
     intraLevelDelaySecs?: number
     /**
-     * Run each story in its own git worktree. Default: true when git
-     * lifecycle is on; false keeps the shared-tree behaviour.
+     * Run each story in its own git worktree. Default: true; a git run
+     * with worktrees disabled is refused.
      */
     withWorktrees?: boolean
     /**
@@ -399,16 +390,6 @@ export interface OrchestrateConfig {
      */
     executor?: import("./execution/story-executor.js").StoryExecutor
     /**
-     * Legacy-only direct callbacks for Operator abort/shutdown commands (Rust
-     * TUI compatibility). Collective mode rejects configured callbacks;
-     * control there must cross a source-bound Mozaik semantic lane.
-     */
-    operatorHooks?: {
-        onAbort?: (storyId: string) => void
-        onAbortAll?: () => void
-        onShutdown?: () => void
-    }
-    /**
      * Called once the Operator has joined the bus — the caller can then
      * dispatch external commands (TUI stdin lane) mid-run instead of
      * waiting for the OrchestrateResult.
@@ -416,13 +397,13 @@ export interface OrchestrateConfig {
     onOperatorReady?: (operator: Operator) => void
     /** Called after the optional DialogueAgent has joined the same bus. */
     onDialogueReady?: (dialogue: DialogueAgent) => void
-    /** Opt-in, collective-only Planner stream identity. Omit to preserve the
+    /** Opt-in Planner stream identity. Omit to preserve the
      * existing full-plan startup barrier exactly. */
     progressivePlanningId?: string
     /** Run the progressive planner INSIDE the orchestrator as a bus
      * participant (BARO_PLANNER_BUS): authoritative tool receipts, execution
      * awareness on its open stdin, no subprocess wire lane. Requires a
-     * PRD with a trusted goal envelope; collective mode only. */
+     * PRD with a trusted goal envelope. */
     busPlanner?: {
         model?: string
         effort?: string
@@ -483,7 +464,7 @@ export function resolveGoalReviewTimeoutMs(
 }
 
 export interface OrchestrateResult {
-    summary: ConductorRunSummary
+    summary: RunSummary
     operator: Operator
     /**
      * @deprecated A completed orchestration has no active workers. Retained for
@@ -525,7 +506,7 @@ export async function orchestrate(
         }
         // Resume never re-plans: the planner lanes never open, so intake,
         // architect and planning are all skipped and the persisted plan runs
-        // as-is. Conductor/Board already leave passed stories alone.
+        // as-is. The Board already leaves passed stories alone.
         if (config.progressivePlanningId || config.busPlanner) {
             config = {
                 ...config,
@@ -554,19 +535,6 @@ export async function orchestrate(
     }
     const env = new CoordinationBus()
     const emitTui = config.emitTuiEvents ?? true
-    const coordinationMode = config.coordinationMode ?? "legacy"
-    if (
-        coordinationMode === "collective" &&
-        config.operatorHooks &&
-        Object.values(config.operatorHooks).some(
-            (hook) => typeof hook === "function",
-        )
-    ) {
-        throw new Error(
-            "collective coordination rejects direct Operator control hooks; " +
-                "control must cross a source-bound Mozaik semantic lane",
-        )
-    }
     const publishRemote = config.publishRemote ?? true
     const llm: "claude" | "openai" | "codex" | "opencode" | "pi" | "devin" = config.llm ?? "claude"
     // Downstream factories branch on these per-phase values, never on the
@@ -575,14 +543,9 @@ export async function orchestrate(
     const criticLlm = config.criticLlm ?? llm
     const surgeonLlm = config.surgeonLlm ?? llm
     const collectiveWorkers = [...(config.collectiveWorkers ?? [])]
-    validateCollectiveWorkers(
-        collectiveWorkers,
-        coordinationMode,
-        config.storyModel,
-    )
+    validateCollectiveWorkers(collectiveWorkers, config.storyModel)
     validateCollectiveMarketOptions(
         collectiveWorkers.length,
-        coordinationMode,
         config.collectiveBidWindowMs,
         config.collectiveBidPolicy,
     )
@@ -591,14 +554,6 @@ export async function orchestrate(
         tierMap: config.tierMap,
         collectiveWorkerCount: collectiveWorkers.length,
     })
-    if (config.withDialogue && coordinationMode !== "collective") {
-        throw new Error("DialogueAgent requires coordinationMode='collective'")
-    }
-    if (config.progressivePlanningId && coordinationMode !== "collective") {
-        throw new Error(
-            "progressive planning requires coordinationMode='collective'",
-        )
-    }
     if (conversationContext && !config.withDialogue) {
         throw new Error("conversationContext requires DialogueAgent")
     }
@@ -613,15 +568,11 @@ export async function orchestrate(
     // entry point that legitimately inherits the id passes it in.
     const runId = resolveOrchestrationRunId(config.runId, undefined)
     const repoRoot = config.cwd
-    const outcomeAuthority = coordinationMode === "collective"
-        ? new StoryOutcomeAuthority(runId)
-        : undefined
+    const outcomeAuthority = new StoryOutcomeAuthority(runId)
 
-    process.stderr.write(
-        `[orchestrate] coordination=${coordinationMode}` +
-            (publishRemote ? "" : " (local-only; push/PR disabled)") +
-            "\n",
-    )
+    if (!publishRemote) {
+        process.stderr.write("[orchestrate] local-only; push/PR disabled\n")
+    }
 
     // Routing banner for stderr / audit log. Architect + Planner run as
     // separate Rust-TUI subprocesses and log their own banners.
@@ -686,16 +637,9 @@ export async function orchestrate(
         for (const p of config.extraParticipants) p.join(env)
     }
 
-    const dagForwarder = emitTui
-        ? joinBaroEventForwarders(env, {
-              collective: coordinationMode === "collective",
-          })
-        : null
+    const dagForwarder = emitTui ? joinBaroEventForwarders(env) : null
 
-    const operator = new Operator(
-        config.operatorHooks ?? {},
-        { runId },
-    )
+    const operator = new Operator({ runId })
     operator.setEnvironment(env)
     operator.join(env)
 
@@ -822,7 +766,7 @@ export async function orchestrate(
     // Critic depend on semantics rather than a provider-specific stream shape.
     const agentTurnProjector = new AgentTurnProjector({
         outcomeAuthority,
-        requireQuiescenceBarrier: coordinationMode === "collective",
+        requireQuiescenceBarrier: true,
     })
     agentTurnProjector.join(env)
     const hasOrigin = useGit ? await hasRemoteOrigin(repoRoot) : false
@@ -832,9 +776,9 @@ export async function orchestrate(
     // disables worktrees (no Rust CLI flag plumbing needed).
     const worktreesEnabled =
         config.withWorktrees ?? !("BARO_NO_WORKTREES" in process.env)
-    if (coordinationMode === "collective" && useGit && !worktreesEnabled) {
+    if (useGit && !worktreesEnabled) {
         throw new Error(
-            "collective coordination requires isolated git worktrees; unset BARO_NO_WORKTREES or use legacy coordination",
+            "collective coordination requires isolated git worktrees; unset BARO_NO_WORKTREES",
         )
     }
     // Git refuses one branch in two worktrees: only --continue on the goal branch integrates in place.
@@ -889,19 +833,13 @@ export async function orchestrate(
             ? new WorktreeManager(repoRoot, gitGate, runId, {
                   integrationRoot,
                   linkDepDirs: config.worktreeLinkDepDirs ?? true,
-                  allowSharedFallback:
-                      coordinationMode === "legacy" && integrationWorktree === null,
-                  resolveConflictsWithTheirs: coordinationMode === "legacy",
                   onLog: (line) =>
                       emitTui && emit({ type: "story_log", id: "_git", line }),
               })
             : null
     shutdownWorktrees = worktrees
     // Owns merge-back/push/cleanup and reports StoryMerged/StoryMergeFailed
-    // on the bus. Non-worktree pushes run off the Conductor's critical path;
-    // worktree merge-backs stay LOCAL and push once in finish() — a per-story
-    // push would re-stall the Conductor, since it shares gitGate with the
-    // merge-back.
+    // on the bus.
     const gitCoordinator = useGit
         ? new GitCoordinator({
               repoRoot,
@@ -910,17 +848,15 @@ export async function orchestrate(
               gitGate,
               worktrees,
               emitTui,
-              eventDriven: coordinationMode === "collective",
               runId,
               prdPath: config.prdPath,
               push: pushRemote,
           })
         : null
     if (gitCoordinator) gitCoordinator.join(env)
-    const localRepositoryAgent =
-        !gitCoordinator && coordinationMode === "collective"
-            ? new LocalRepositoryAgent(runId)
-            : null
+    const localRepositoryAgent = gitCoordinator
+        ? null
+        : new LocalRepositoryAgent(runId)
     localRepositoryAgent?.join(env)
     const repositoryAuthority = gitCoordinator ?? localRepositoryAgent
     if (repositoryAuthority) {
@@ -929,9 +865,6 @@ export async function orchestrate(
     // prd.json learns each story's outcome as it settles, not at run end, so
     // an interrupted run can be resumed from disk.
     const prdStatusWriter = createPrdStatusWriter({ prdPath: config.prdPath })
-    // Joined in every run shape: a legacy non-git run has no repository
-    // authority, and gating the observer on one is what kept merge status off
-    // disk there.
     const prdStatusObserver = new PrdStatusObserver(prdStatusWriter)
     if (repositoryAuthority) {
         prdStatusObserver.setRepositoryAuthority(repositoryAuthority)
@@ -942,13 +875,7 @@ export async function orchestrate(
     const useSentry = config.withSentry ?? true
     const useMemory = config.withMemory ?? true
 
-    // Legacy workers use an explicit run-scoped CLI path. Collective memory
-    // stays manager-private/in-process and never mutates a process-global env
-    // variable that unrelated workers or later orchestrations could inherit.
     const sessionsDir = join(homedir(), ".baro", "sessions")
-    const memorySessionPath = useMemory && coordinationMode === "legacy"
-        ? join(sessionsDir, runId, "memory")
-        : undefined
 
     // Prune stale session dirs (>24h old) to prevent unbounded growth.
     if (useMemory) {
@@ -958,25 +885,20 @@ export async function orchestrate(
         } catch { /* non-critical */ }
     }
 
-    const librarianCollectiveOptions = coordinationMode === "collective"
-        ? { collective: { runId, outcomeAuthority: outcomeAuthority! } }
-        : {}
+    const librarianCollectiveOptions = {
+        collective: { runId, outcomeAuthority },
+    }
     const librarian = useLibrarian
         ? (useMemory
-              ? new MemoryLibrarian({
-                    sessionPath: memorySessionPath,
-                    ...librarianCollectiveOptions,
-                })
+              ? new MemoryLibrarian(librarianCollectiveOptions)
               : new Librarian(librarianCollectiveOptions))
         : null
     const sentry = useSentry ? new Sentry() : null
     if (librarian) librarian.join(env)
     if (sentry) sentry.join(env)
 
-    const workContextProvider = coordinationMode === "collective"
-        ? new WorkContextProvider(runId, librarian)
-        : null
-    workContextProvider?.join(env)
+    const workContextProvider = new WorkContextProvider(runId, librarian)
+    workContextProvider.join(env)
 
     const bundledCollaborationCommand = fileURLToPath(
         new URL("./agent-collab.mjs", import.meta.url),
@@ -987,54 +909,46 @@ export async function orchestrate(
     const collaborationEpoch = randomUUID()
     const collectiveSessionRoot = join(sessionsDir, runId, "collective")
     const collaborationGoalInvariantIds =
-        coordinationMode === "collective"
-            ? deriveGoalContract(loadPrd(config.prdPath).goalEnvelope)
-                  ?.invariants.map((invariant) => invariant.id) ?? []
-            : []
-    const collaborationConfig = coordinationMode === "collective"
-        ? {
-              commandPath: existsSync(bundledCollaborationCommand)
-                  ? bundledCollaborationCommand
-                  : developmentCollaborationCommand,
-              sessionDir: join(
-                  collectiveSessionRoot,
-                  collaborationEpoch,
-              ),
-              challengeInflightDir: join(
-                  collectiveSessionRoot,
-                  "challenge-inflight",
-              ),
-          }
-        : undefined
-    const collaborationBridge = collaborationConfig
-        ? new CollaborationBridge({
-              runId,
-              sessionDir: collaborationConfig.sessionDir,
-              challengeInflightDir:
-                  collaborationConfig.challengeInflightDir,
-              goalInvariantIds: collaborationGoalInvariantIds,
-              // Resolved when asked, not when built: the Board is constructed
-              // later, and the plan it reads keeps growing after that.
-              pathOwner: (path) => collectiveBoard?.ownerOfPath(path) ?? null,
-              prepareCheckpoint: async (storyId) =>
-                  (await worktrees?.checkpointCandidate(storyId)) ?? null,
-              claimPaths: (storyId, paths) =>
-                  collectiveBoard?.claimPaths(storyId, paths) ??
-                  paths.map((path) => ({
-                      path,
-                      outcome: "refused" as const,
-                      reason: "the Board is not running yet",
-                  })),
-          })
-        : null
-    shutdownCollaborationBridge = collaborationBridge
-    if (collaborationBridge) {
-        workContextProvider?.setCollaborationAuthority(collaborationBridge)
+        deriveGoalContract(loadPrd(config.prdPath).goalEnvelope)
+            ?.invariants.map((invariant) => invariant.id) ?? []
+    const collaborationConfig = {
+        commandPath: existsSync(bundledCollaborationCommand)
+            ? bundledCollaborationCommand
+            : developmentCollaborationCommand,
+        sessionDir: join(
+            collectiveSessionRoot,
+            collaborationEpoch,
+        ),
+        challengeInflightDir: join(
+            collectiveSessionRoot,
+            "challenge-inflight",
+        ),
     }
-    collaborationBridge?.join(env)
+    const collaborationBridge = new CollaborationBridge({
+        runId,
+        sessionDir: collaborationConfig.sessionDir,
+        challengeInflightDir:
+            collaborationConfig.challengeInflightDir,
+        goalInvariantIds: collaborationGoalInvariantIds,
+        // Resolved when asked, not when built: the Board is constructed
+        // later, and the plan it reads keeps growing after that.
+        pathOwner: (path) => collectiveBoard?.ownerOfPath(path) ?? null,
+        prepareCheckpoint: async (storyId) =>
+            (await worktrees?.checkpointCandidate(storyId)) ?? null,
+        claimPaths: (storyId, paths) =>
+            collectiveBoard?.claimPaths(storyId, paths) ??
+            paths.map((path) => ({
+                path,
+                outcome: "refused" as const,
+                reason: "the Board is not running yet",
+            })),
+    })
+    shutdownCollaborationBridge = collaborationBridge
+    workContextProvider.setCollaborationAuthority(collaborationBridge)
+    collaborationBridge.join(env)
 
     // Surgeon joins early so it sees StoryResultItems from the moment the
-    // Conductor starts running.
+    // Board starts running.
     let surgeon: Surgeon | SurgeonOpenAI | SurgeonCodex | SurgeonOpenCode | SurgeonPi | SurgeonDevin | null = null
     if (config.withSurgeon) {
         const snapshot = (): PrdSnapshot => {
@@ -1098,7 +1012,7 @@ export async function orchestrate(
                 escalationRoute,
                 model: config.surgeonModel ?? "gpt-5.5",
                 runId,
-                emitRecoveryDecisions: coordinationMode === "collective",
+                emitRecoveryDecisions: true,
                 outcomeAuthority,
                 billingCoordinator: gatewayBillingCoordinator ?? undefined,
             })
@@ -1110,7 +1024,7 @@ export async function orchestrate(
                 useLlm: config.surgeonUseLlm ?? true,
                 model: config.surgeonModel,
                 runId,
-                emitRecoveryDecisions: coordinationMode === "collective",
+                emitRecoveryDecisions: true,
                 outcomeAuthority,
             })
         } else if (surgeonLlm === "opencode") {
@@ -1121,7 +1035,7 @@ export async function orchestrate(
                 useLlm: config.surgeonUseLlm ?? true,
                 model: config.surgeonModel,
                 runId,
-                emitRecoveryDecisions: coordinationMode === "collective",
+                emitRecoveryDecisions: true,
                 outcomeAuthority,
             })
         } else if (surgeonLlm === "devin") {
@@ -1132,7 +1046,7 @@ export async function orchestrate(
                 useLlm: config.surgeonUseLlm ?? true,
                 model: config.surgeonModel,
                 runId,
-                emitRecoveryDecisions: coordinationMode === "collective",
+                emitRecoveryDecisions: true,
                 outcomeAuthority,
             })
         } else if (surgeonLlm === "pi") {
@@ -1143,7 +1057,7 @@ export async function orchestrate(
                 useLlm: config.surgeonUseLlm ?? true,
                 model: config.surgeonModel,
                 runId,
-                emitRecoveryDecisions: coordinationMode === "collective",
+                emitRecoveryDecisions: true,
                 outcomeAuthority,
             })
         } else {
@@ -1154,7 +1068,7 @@ export async function orchestrate(
                 useLlm: config.surgeonUseLlm ?? false,
                 model: config.surgeonModel ?? "opus",
                 runId,
-                emitRecoveryDecisions: coordinationMode === "collective",
+                emitRecoveryDecisions: true,
                 outcomeAuthority,
             })
         }
@@ -1213,7 +1127,7 @@ export async function orchestrate(
             publishedNotes: (storyId) => publishedNotes.notesFor(storyId),
             // Same predicate the spawn gate and story shell use, so the judge
             // is bound by the perimeter rule the worker was bound by.
-            hostRunsWholeTreeVerification: coordinationMode === "collective",
+            hostRunsWholeTreeVerification: true,
             // Read at evaluation time: a progressive run receives its
             // Architect document after this observer wiring completes.
             decisionDocument: () => {
@@ -1225,22 +1139,8 @@ export async function orchestrate(
             },
         }
         const prd = loadPrd(config.prdPath)
-        const legacyGoalInvariantText = new Map(
-            coordinationMode === "legacy"
-                ? deriveGoalContract(prd.goalEnvelope)?.invariants.map((invariant) => [
-                      invariant.id,
-                      `[${invariant.id}] ${invariant.text}`,
-                  ] as const) ?? []
-                : [],
-        )
-        criticTargets = buildCriticTargets(
-            prd.userStories,
-            legacyGoalInvariantText,
-        )
-        criticTargetRegistry = new CriticTargetRegistry(
-            criticTargets,
-            legacyGoalInvariantText,
-        )
+        criticTargets = buildCriticTargets(prd.userStories)
+        criticTargetRegistry = new CriticTargetRegistry(criticTargets)
         criticTargetRegistry.join(env)
         // Bus contract is identical across providers, so observers never
         // notice the swap.
@@ -1351,7 +1251,7 @@ export async function orchestrate(
         )
     }
 
-    let coordinationDone: Promise<ConductorRunSummary>
+    let coordinationDone: Promise<RunSummary>
     let runVerifier: RunVerifier | null = null
     let leaseBroker: LeaseBroker | null = null
     let acceptanceGate: AcceptanceGate | null = null
@@ -1363,387 +1263,307 @@ export async function orchestrate(
         config.timeoutSecs,
         config.effort,
     )
-    if (coordinationMode === "legacy") {
-        const conductor = new Conductor({
-            prdPath: config.prdPath,
-            cwd: repoRoot,
-            parallel: effectiveParallel,
-            timeoutSecs: effectiveStoryTimeoutSecs,
-            overrideModel: config.overrideModel ?? undefined,
-            defaultModel: defaultStorySelector,
-            intraLevelDelaySecs: config.intraLevelDelaySecs,
-            onRunStart: useGit
-                ? async (prd) => {
-                      await excludeBaroArtifacts(repoRoot)
-                      if (integrationWorktree) {
-                          await integrationWorktree.prepare()
-                      } else if (prd.branchName) {
-                          await createOrCheckoutBranch(
-                              integrationRoot,
-                              prd.branchName,
-                              (line) => emitTui && emit({ type: "story_log", id: "_git", line }),
-                              pushRemote,
-                          )
-                      }
-                      baseSha = await getHeadSha(integrationRoot)
-                      await worktrees?.cleanupStaleOnStart()
-                  }
-                : undefined,
-            onBeforeStoryLaunch: librarian
-                ? (storyId, story) => {
-                      const hints: string[] = [
-                          ...tokenizeForHints(story.title),
-                          ...tokenizeForHints(story.description).slice(0, 8),
-                      ]
-                      return librarian.gatherContext(storyId, hints)
-                  }
-                : undefined,
-            onStoryPassed: gitCoordinator
-                ? (storyId) =>
-                      withCriticEvidenceBarrier(critic, () =>
-                          gitCoordinator.onStoryPassed(storyId),
-                      )
-                : undefined,
-            onStoryFailed: (storyId) => {
-                // Terminal: the Conductor calls this only once a story has
-                // exhausted its retries.
-                prdStatusWriter.onStoryFailed(storyId)
-                if (!(worktrees && gitCoordinator)) return
-                return withCriticEvidenceBarrier(critic, () =>
-                    gitCoordinator.onStoryFailed(storyId),
+    if (config.progressivePlanningId || config.busPlanner) {
+        planningFeed = new PlanningFeed()
+    }
+    const collectiveParallel = useGit ? effectiveParallel : 1
+    if (!repositoryAuthority) {
+        throw new Error("collective coordination requires a repository authority")
+    }
+    if (!useGit && effectiveParallel !== 1) {
+        process.stderr.write(
+            "[orchestrate] collective non-git run is serialized because isolated worktrees are unavailable\n",
+        )
+    }
+    const verifyPlan = createVerifyPlan(integrationRoot)
+    runVerifier = new RunVerifier({
+        runId,
+        cwd: integrationRoot,
+        hostRepoRoot: repoRoot,
+        plan: verifyPlan,
+        createFinalPlan: (cwd) => {
+            // Full PRD validation remains authoritative for graph state;
+            // raw inspection prevents its legacy normalization from
+            // erasing malformed `tests` fields at the objective gate.
+            loadPrd(config.prdPath)
+            const verifyOptions = readAuthoritativeVerifyPlanOptions(config.prdPath)
+            if (verifyOptions.notStartedStoryIds.length > 0) {
+                process.stderr.write(
+                    `[orchestrate] declared tests of ${verifyOptions.notStartedStoryIds.join(", ")} are not requirements: the run never started those stories\n`,
                 )
-            },
-        })
-        conductor.setEnvironment(env)
-        conductor.join(env)
-        // ReplanApplied is committed graph state, not an ambient bus claim.
-        // Only this concrete Conductor may update legacy TUI/critic projections.
-        criticTargetRegistry?.setLegacyReplanAuthority(conductor)
-        dagForwarder?.setLegacyReplanAuthority(conductor)
-        finalizer?.setCoordinationAuthority(conductor)
-        coordinationDone = conductor.done
-    } else {
-        if (config.progressivePlanningId || config.busPlanner) {
-            planningFeed = new PlanningFeed()
-        }
-        const collectiveParallel = useGit ? effectiveParallel : 1
-        if (!repositoryAuthority) {
-            throw new Error("collective coordination requires a repository authority")
-        }
-        if (!useGit && effectiveParallel !== 1) {
-            process.stderr.write(
-                "[orchestrate] collective non-git run is serialized because isolated worktrees are unavailable\n",
-            )
-        }
-        const verifyPlan = createVerifyPlan(integrationRoot)
-        runVerifier = new RunVerifier({
+            }
+            const plan = createVerifyPlan(cwd, verifyOptions)
+            if (plan.declaredBudget) {
+                for (const line of formatDeclaredBudgetEvidence(plan.declaredBudget)) {
+                    process.stderr.write(`[orchestrate] ${line}\n`)
+                }
+            }
+            return plan
+        },
+    })
+    finalizer?.setVerifierAuthority(runVerifier)
+    // Run the project's own gates in each story's worktree while its agent
+    // is still working. Measured: 45% of story time goes on the agent
+    // discovering these results a turn at a time, and the host runs the
+    // same commands twice more anyway. Silent when the project declares
+    // no gates — never tell an agent it is green because we had nothing
+    // to run. Opt out with BARO_CONTINUOUS_GATE=0.
+    if (continuousGateEnabled()) {
+        continuousGate = new ContinuousGateRunner({
             runId,
-            cwd: integrationRoot,
             hostRepoRoot: repoRoot,
             plan: verifyPlan,
-            createFinalPlan: (cwd) => {
-                // Full PRD validation remains authoritative for graph state;
-                // raw inspection prevents its legacy normalization from
-                // erasing malformed `tests` fields at the objective gate.
-                loadPrd(config.prdPath)
-                const verifyOptions = readAuthoritativeVerifyPlanOptions(config.prdPath)
-                if (verifyOptions.notStartedStoryIds.length > 0) {
-                    process.stderr.write(
-                        `[orchestrate] declared tests of ${verifyOptions.notStartedStoryIds.join(", ")} are not requirements: the run never started those stories\n`,
-                    )
-                }
-                const plan = createVerifyPlan(cwd, verifyOptions)
-                if (plan.declaredBudget) {
-                    for (const line of formatDeclaredBudgetEvidence(plan.declaredBudget)) {
-                        process.stderr.write(`[orchestrate] ${line}\n`)
-                    }
-                }
-                return plan
-            },
+            resolveTarget: (storyId) =>
+                resolveCriticRepositoryTarget(worktrees, storyId),
         })
-        finalizer?.setVerifierAuthority(runVerifier)
-        // Run the project's own gates in each story's worktree while its agent
-        // is still working. Measured: 45% of story time goes on the agent
-        // discovering these results a turn at a time, and the host runs the
-        // same commands twice more anyway. Silent when the project declares
-        // no gates — never tell an agent it is green because we had nothing
-        // to run. Opt out with BARO_CONTINUOUS_GATE=0.
-        if (continuousGateEnabled()) {
-            continuousGate = new ContinuousGateRunner({
-                runId,
-                hostRepoRoot: repoRoot,
-                plan: verifyPlan,
-                resolveTarget: (storyId) =>
-                    resolveCriticRepositoryTarget(worktrees, storyId),
-            })
-            continuousGate.join(env)
-        }
-        commitGate = (cwd, signal) =>
-            runCommitGate(cwd, { plan: verifyPlan, hostRepoRoot: repoRoot, signal })
-        // Tell still-working agents what a sibling landed. A story once wrote
-        // two files, then died at integration against stories that had merged
-        // while it worked — the bus carried every one of those merges and no
-        // participant turned them into anything an agent could act on.
-        mergeAwareness = new MergeAwarenessRunner({
-            runId,
-            ...(repositoryAuthority ? { integrationAuthority: repositoryAuthority } : {}),
-            resolveRoot: (storyId) =>
-                resolveCriticRepositoryTarget(worktrees, storyId)?.cwd ?? null,
-        })
-        mergeAwareness.join(env)
-        // Sentry has detected overlapping writes all along and emitted a
-        // Coordination notice nobody consumed. Deliver it to the agents that
-        // are in it, while both can still act — the host detects, they decide.
-        if (sentry) {
-            overlapAwareness = new OverlapAwarenessRunner({
-                runId,
-                detectionAuthority: sentry,
-            })
-            overlapAwareness.join(env)
-        }
-        // A killed worker takes its reasoning with it. S2 of one migration was
-        // SIGKILLed twice after proving, by probing the compiler three times,
-        // which zod form keeps a defaulted field optional — and derived it from
-        // nothing on the third attempt. Agents do share findings, but only when
-        // they report, and a killed attempt never reports.
-        attemptRecall = new AttemptRecallRunner({
-            runId,
-            resolveRoot: (storyId) =>
-                resolveCriticRepositoryTarget(worktrees, storyId)?.cwd ?? null,
-        })
-        attemptRecall.join(env)
-        leaseBroker = new LeaseBroker({
-            runId,
-            parallel: collectiveParallel,
-            intraLevelDelaySecs: config.intraLevelDelaySecs ?? 10,
-            leaseTimeoutMs: config.collectiveLeaseTimeoutMs,
-            integrationTimeoutMs: config.collectiveIntegrationTimeoutMs,
-            suspensionTimeoutMs: config.collectiveSuspensionTimeoutMs,
-            outcomeAuthority,
-            ...(collectiveWorkers.length > 0
-                ? {
-                      market: {
-                          bidWindowMs: config.collectiveBidWindowMs ?? 50,
-                          policy: config.collectiveBidPolicy,
-                      },
-                  }
-                : {}),
-        })
-        leaseBroker.setIntegrationAuthority(repositoryAuthority)
-        acceptanceGate = config.withCritic && critic
-            ? new AcceptanceGate({
-                  runId,
-                  targets: criticTargets,
-                  timeoutMs: config.collectiveAcceptanceTimeoutMs,
-                  maxReverificationAttempts:
-                      config.collectiveAcceptanceReverificationAttempts,
-                  leaseAuthority: leaseBroker,
-                  critiqueAuthority: critic,
-                  outcomeAuthority,
-                  terminalProjectorAuthority: agentTurnProjector,
-              })
-            : null
-        agentTurnProjector.setLeaseAuthority(leaseBroker)
-        if (acceptanceGate) {
-            agentTurnProjector.setReverificationAuthority(acceptanceGate)
-        }
-        if (acceptanceGate) leaseBroker.setQualityAuthority(acceptanceGate)
-        const collectivePrd = loadPrd(config.prdPath)
-        const goalReviewTimeoutMs = resolveGoalReviewTimeoutMs(
-            config.collectiveGoalReviewTimeoutMs,
-            effectiveStoryTimeoutSecs,
-        )
-        const goalReviewMaxAttempts =
-            config.collectiveGoalReviewMaxAttempts ?? 2
-        let goalReviewOverallTimeoutMs: number | undefined
-        if (acceptanceGate) {
-            goalReviewOverallTimeoutMs = goalReviewRoundTimeoutMs(
-                goalReviewTimeoutMs,
-                goalReviewMaxAttempts,
-            )
-            let responder = config.goalReviewResponder
-            if (!responder) {
-                goalReviewRuntimeCwd = mkdtempSync(
-                    join(tmpdir(), "baro-goal-review-runtime-"),
-                )
-                responder = createDialogueResponder({
-                    backend: criticLlm,
-                    cwd: goalReviewRuntimeCwd,
-                    model: config.criticModel ?? goalReviewDefaultModel(criticLlm),
-                    // The adapter owns TERM/KILL settlement. Its watchdog must
-                    // win before the outer reviewer watchdog so the latter is
-                    // only a hard safety backstop, never the normal timeout.
-                    timeoutMs: goalReviewProviderTimeoutMs(goalReviewTimeoutMs),
-                    terminationGraceMs:
-                        goalReviewTerminationGraceMs(goalReviewTimeoutMs),
-                    safeReadOnlyEvaluator: true,
-                    codexSkipGitRepoCheck: true,
-                    billingCoordinator: gatewayBillingCoordinator ?? undefined,
-                })
-            }
-            goalInvariantReviewer = new GoalInvariantReviewer({
-                runId,
-                cwd: integrationRoot,
-                responder,
-                modelUsed: goalReviewModelName(criticLlm, config.criticModel),
-                timeoutMs: goalReviewTimeoutMs,
-                maxAttempts: goalReviewMaxAttempts,
-                overallTimeoutMs: goalReviewOverallTimeoutMs,
-            })
-            goalInvariantReviewer.setVerificationAuthority(runVerifier)
-            goalInvariantReviewer.setRepositoryAuthority(repositoryAuthority)
-        }
-        goalGuardian = new GoalGuardian({
-            runId,
-            goalEnvelope: collectivePrd.goalEnvelope,
-            storyMappings: collectivePrd.userStories.map((story) => ({
-                storyId: story.id,
-                invariantIds: [...(story.goalInvariantIds ?? [])],
-            })),
-            integratedStoryIds: collectivePrd.userStories
-                .filter((story) => story.passes)
-                .map((story) => story.id),
-            projection: collectivePrd.runtimeGraph?.protocol?.goal,
-            deferCoverageUntilPlanningClosed:
-                config.progressivePlanningId !== undefined &&
-                collectivePrd.runtimeGraph?.planning?.status !== "completed",
-            // With a Critic configured, restart semantics stay strict: only
-            // persisted independent evidence can satisfy the contract. A
-            // pre-protocol passed story must be re-run/reviewed, never guessed.
-            requireIndependentQuality: acceptanceGate !== null,
-            requireAggregateReview: goalInvariantReviewer !== null,
-        })
-        goalGuardian.setIntegrationAuthority(repositoryAuthority)
-        if (acceptanceGate) goalGuardian.setQualityAuthority(acceptanceGate)
-        if (goalInvariantReviewer) {
-            goalInvariantReviewer.setRequestAuthority(goalGuardian)
-            goalGuardian.setAggregateReviewAuthority(goalInvariantReviewer)
-        }
-        if (collaborationBridge) {
-            goalGuardian.setChallengeAuthority(collaborationBridge)
-        }
-        const board = collectiveBoard = new CollectiveBoard({
-            runId,
-            prdPath: config.prdPath,
-            cwd: repoRoot,
-            timeoutSecs: effectiveStoryTimeoutSecs ?? 0,
-            overrideModel: config.overrideModel ?? undefined,
-            defaultModel: defaultStorySelector,
-            expectRecoveryDecisions: config.withSurgeon ?? false,
-            marketRouteIds: collectiveWorkers.map((worker) => worker.routeId),
-            expectQualityDecisions: acceptanceGate !== null,
-            leaseAuthority: leaseBroker,
-            startAuthority: operator,
-            qualityAuthority: acceptanceGate ?? undefined,
-            integrationAuthority: repositoryAuthority,
-            verifierAuthority: runVerifier,
-            goalCompletionAuthority: goalGuardian,
-            recoveryAuthority: surgeon ?? undefined,
-            discoveryAuthority: collaborationBridge ?? undefined,
-            dependencyAuthority: collaborationBridge ?? undefined,
-            // Partial work may be checkpointed only when every story owns an
-            // isolated worktree. Shared-tree/non-git runs reject suspension.
-            dependencySuspensionEnabled: worktrees !== null,
-            runtimeReplanAuthority: collaborationBridge ?? undefined,
-            progressivePlanningId: config.progressivePlanningId,
-            planningAuthority: planningFeed ?? undefined,
-            contextAuthority: workContextProvider ?? undefined,
-            outcomeAuthority,
-            verifyBeforePush: true,
-            verificationTimeoutMs:
-                config.collectiveVerificationTimeoutMs ??
-                recommendedMergedVerifyTimeoutMs(
-                    verifyPlan,
-                    MAX_NEGOTIATED_DECLARED_VERIFY_COMMANDS,
-                    { cwd: integrationRoot, hostRepoRoot: repoRoot },
-                ),
-            goalCompletionTimeoutMs:
-                goalInvariantReviewer &&
-                goalReviewOverallTimeoutMs !== undefined
-                ? aggregateReviewBudgetMs(
-                      goalReviewOverallTimeoutMs,
-                  )
-                : undefined,
-        })
-        runVerifier.setRequestAuthority(board)
-        // Bind before join so even an asynchronously firing extra participant
-        // cannot pre-seed a predictable verification id during setup.
-        runVerifier.join(env)
-        if (goalInvariantReviewer) {
-            goalInvariantReviewer.setCompletionAuthority(board)
-            goalInvariantReviewer.join(env)
-        }
-        goalGuardian.setRequestAuthority(board)
-        acceptanceGate?.setCompletionAuthority(board)
-        finalizer?.setCoordinationAuthority(board)
-        leaseBroker.setOfferAuthority(board)
-        leaseBroker.setBlockAuthority(board)
-        gitCoordinator?.setEventAuthority(board)
-        gitCoordinator?.setLeaseAuthority(leaseBroker)
-        localRepositoryAgent?.setRequestAuthority(board)
-        workContextProvider?.setRequestAuthority(board)
-        collaborationBridge?.setLeaseAuthority(leaseBroker)
-        collaborationBridge?.setDecisionAuthority(board)
-        librarian?.setLeaseAuthority(leaseBroker)
-        criticTargetRegistry?.setRuntimeReplanAuthority(board)
-        dagForwarder?.setRuntimeReplanAuthority(board)
-        surgeon?.setLeaseAuthority(leaseBroker)
-        surgeon?.setBlockAuthority(board)
-        if (critic) surgeon?.setCriticAuthority(critic)
-        if (acceptanceGate) surgeon?.setQualityAuthority(acceptanceGate)
-        leaseBroker.join(env)
-        goalGuardian.join(env)
-        board.join(env)
-        planningFeed?.join(env)
-        acceptanceGate?.join(env)
-        coordinationDone = board.done
+        continuousGate.join(env)
     }
+    commitGate = (cwd, signal) =>
+        runCommitGate(cwd, { plan: verifyPlan, hostRepoRoot: repoRoot, signal })
+    // Tell still-working agents what a sibling landed. A story once wrote
+    // two files, then died at integration against stories that had merged
+    // while it worked — the bus carried every one of those merges and no
+    // participant turned them into anything an agent could act on.
+    mergeAwareness = new MergeAwarenessRunner({
+        runId,
+        ...(repositoryAuthority ? { integrationAuthority: repositoryAuthority } : {}),
+        resolveRoot: (storyId) =>
+            resolveCriticRepositoryTarget(worktrees, storyId)?.cwd ?? null,
+    })
+    mergeAwareness.join(env)
+    // Sentry has detected overlapping writes all along and emitted a
+    // Coordination notice nobody consumed. Deliver it to the agents that
+    // are in it, while both can still act — the host detects, they decide.
+    if (sentry) {
+        overlapAwareness = new OverlapAwarenessRunner({
+            runId,
+            detectionAuthority: sentry,
+        })
+        overlapAwareness.join(env)
+    }
+    // A killed worker takes its reasoning with it. S2 of one migration was
+    // SIGKILLed twice after proving, by probing the compiler three times,
+    // which zod form keeps a defaulted field optional — and derived it from
+    // nothing on the third attempt. Agents do share findings, but only when
+    // they report, and a killed attempt never reports.
+    attemptRecall = new AttemptRecallRunner({
+        runId,
+        resolveRoot: (storyId) =>
+            resolveCriticRepositoryTarget(worktrees, storyId)?.cwd ?? null,
+    })
+    attemptRecall.join(env)
+    leaseBroker = new LeaseBroker({
+        runId,
+        parallel: collectiveParallel,
+        intraLevelDelaySecs: config.intraLevelDelaySecs ?? 10,
+        leaseTimeoutMs: config.collectiveLeaseTimeoutMs,
+        integrationTimeoutMs: config.collectiveIntegrationTimeoutMs,
+        suspensionTimeoutMs: config.collectiveSuspensionTimeoutMs,
+        outcomeAuthority,
+        ...(collectiveWorkers.length > 0
+            ? {
+                  market: {
+                      bidWindowMs: config.collectiveBidWindowMs ?? 50,
+                      policy: config.collectiveBidPolicy,
+                  },
+              }
+            : {}),
+    })
+    leaseBroker.setIntegrationAuthority(repositoryAuthority)
+    acceptanceGate = config.withCritic && critic
+        ? new AcceptanceGate({
+              runId,
+              targets: criticTargets,
+              timeoutMs: config.collectiveAcceptanceTimeoutMs,
+              maxReverificationAttempts:
+                  config.collectiveAcceptanceReverificationAttempts,
+              leaseAuthority: leaseBroker,
+              critiqueAuthority: critic,
+              outcomeAuthority,
+              terminalProjectorAuthority: agentTurnProjector,
+          })
+        : null
+    agentTurnProjector.setLeaseAuthority(leaseBroker)
+    if (acceptanceGate) {
+        agentTurnProjector.setReverificationAuthority(acceptanceGate)
+    }
+    if (acceptanceGate) leaseBroker.setQualityAuthority(acceptanceGate)
+    const collectivePrd = loadPrd(config.prdPath)
+    const goalReviewTimeoutMs = resolveGoalReviewTimeoutMs(
+        config.collectiveGoalReviewTimeoutMs,
+        effectiveStoryTimeoutSecs,
+    )
+    const goalReviewMaxAttempts =
+        config.collectiveGoalReviewMaxAttempts ?? 2
+    let goalReviewOverallTimeoutMs: number | undefined
+    if (acceptanceGate) {
+        goalReviewOverallTimeoutMs = goalReviewRoundTimeoutMs(
+            goalReviewTimeoutMs,
+            goalReviewMaxAttempts,
+        )
+        let responder = config.goalReviewResponder
+        if (!responder) {
+            goalReviewRuntimeCwd = mkdtempSync(
+                join(tmpdir(), "baro-goal-review-runtime-"),
+            )
+            responder = createDialogueResponder({
+                backend: criticLlm,
+                cwd: goalReviewRuntimeCwd,
+                model: config.criticModel ?? goalReviewDefaultModel(criticLlm),
+                // The adapter owns TERM/KILL settlement. Its watchdog must
+                // win before the outer reviewer watchdog so the latter is
+                // only a hard safety backstop, never the normal timeout.
+                timeoutMs: goalReviewProviderTimeoutMs(goalReviewTimeoutMs),
+                terminationGraceMs:
+                    goalReviewTerminationGraceMs(goalReviewTimeoutMs),
+                safeReadOnlyEvaluator: true,
+                codexSkipGitRepoCheck: true,
+                billingCoordinator: gatewayBillingCoordinator ?? undefined,
+            })
+        }
+        goalInvariantReviewer = new GoalInvariantReviewer({
+            runId,
+            cwd: integrationRoot,
+            responder,
+            modelUsed: goalReviewModelName(criticLlm, config.criticModel),
+            timeoutMs: goalReviewTimeoutMs,
+            maxAttempts: goalReviewMaxAttempts,
+            overallTimeoutMs: goalReviewOverallTimeoutMs,
+        })
+        goalInvariantReviewer.setVerificationAuthority(runVerifier)
+        goalInvariantReviewer.setRepositoryAuthority(repositoryAuthority)
+    }
+    goalGuardian = new GoalGuardian({
+        runId,
+        goalEnvelope: collectivePrd.goalEnvelope,
+        storyMappings: collectivePrd.userStories.map((story) => ({
+            storyId: story.id,
+            invariantIds: [...(story.goalInvariantIds ?? [])],
+        })),
+        integratedStoryIds: collectivePrd.userStories
+            .filter((story) => story.passes)
+            .map((story) => story.id),
+        projection: collectivePrd.runtimeGraph?.protocol?.goal,
+        deferCoverageUntilPlanningClosed:
+            config.progressivePlanningId !== undefined &&
+            collectivePrd.runtimeGraph?.planning?.status !== "completed",
+        // With a Critic configured, restart semantics stay strict: only
+        // persisted independent evidence can satisfy the contract. A
+        // pre-protocol passed story must be re-run/reviewed, never guessed.
+        requireIndependentQuality: acceptanceGate !== null,
+        requireAggregateReview: goalInvariantReviewer !== null,
+    })
+    goalGuardian.setIntegrationAuthority(repositoryAuthority)
+    if (acceptanceGate) goalGuardian.setQualityAuthority(acceptanceGate)
+    if (goalInvariantReviewer) {
+        goalInvariantReviewer.setRequestAuthority(goalGuardian)
+        goalGuardian.setAggregateReviewAuthority(goalInvariantReviewer)
+    }
+    goalGuardian.setChallengeAuthority(collaborationBridge)
+    const board = collectiveBoard = new CollectiveBoard({
+        runId,
+        prdPath: config.prdPath,
+        cwd: repoRoot,
+        timeoutSecs: effectiveStoryTimeoutSecs ?? 0,
+        overrideModel: config.overrideModel ?? undefined,
+        defaultModel: defaultStorySelector,
+        expectRecoveryDecisions: config.withSurgeon ?? false,
+        marketRouteIds: collectiveWorkers.map((worker) => worker.routeId),
+        expectQualityDecisions: acceptanceGate !== null,
+        leaseAuthority: leaseBroker,
+        startAuthority: operator,
+        qualityAuthority: acceptanceGate ?? undefined,
+        integrationAuthority: repositoryAuthority,
+        verifierAuthority: runVerifier,
+        goalCompletionAuthority: goalGuardian,
+        recoveryAuthority: surgeon ?? undefined,
+        discoveryAuthority: collaborationBridge,
+        dependencyAuthority: collaborationBridge,
+        // Partial work may be checkpointed only when every story owns an
+        // isolated worktree. Non-git runs reject suspension.
+        dependencySuspensionEnabled: worktrees !== null,
+        runtimeReplanAuthority: collaborationBridge,
+        progressivePlanningId: config.progressivePlanningId,
+        planningAuthority: planningFeed ?? undefined,
+        contextAuthority: workContextProvider ?? undefined,
+        outcomeAuthority,
+        verifyBeforePush: true,
+        verificationTimeoutMs:
+            config.collectiveVerificationTimeoutMs ??
+            recommendedMergedVerifyTimeoutMs(
+                verifyPlan,
+                MAX_NEGOTIATED_DECLARED_VERIFY_COMMANDS,
+                { cwd: integrationRoot, hostRepoRoot: repoRoot },
+            ),
+        goalCompletionTimeoutMs:
+            goalInvariantReviewer &&
+            goalReviewOverallTimeoutMs !== undefined
+            ? aggregateReviewBudgetMs(
+                  goalReviewOverallTimeoutMs,
+              )
+            : undefined,
+    })
+    runVerifier.setRequestAuthority(board)
+    // Bind before join so even an asynchronously firing extra participant
+    // cannot pre-seed a predictable verification id during setup.
+    runVerifier.join(env)
+    if (goalInvariantReviewer) {
+        goalInvariantReviewer.setCompletionAuthority(board)
+        goalInvariantReviewer.join(env)
+    }
+    goalGuardian.setRequestAuthority(board)
+    acceptanceGate?.setCompletionAuthority(board)
+    finalizer?.setCoordinationAuthority(board)
+    leaseBroker.setOfferAuthority(board)
+    leaseBroker.setBlockAuthority(board)
+    gitCoordinator?.setEventAuthority(board)
+    gitCoordinator?.setLeaseAuthority(leaseBroker)
+    localRepositoryAgent?.setRequestAuthority(board)
+    workContextProvider?.setRequestAuthority(board)
+    collaborationBridge.setLeaseAuthority(leaseBroker)
+    collaborationBridge.setDecisionAuthority(board)
+    librarian?.setLeaseAuthority(leaseBroker)
+    criticTargetRegistry?.setRuntimeReplanAuthority(board)
+    dagForwarder?.setRuntimeReplanAuthority(board)
+    surgeon?.setLeaseAuthority(leaseBroker)
+    surgeon?.setBlockAuthority(board)
+    if (critic) surgeon?.setCriticAuthority(critic)
+    if (acceptanceGate) surgeon?.setQualityAuthority(acceptanceGate)
+    leaseBroker.join(env)
+    goalGuardian.join(env)
+    board.join(env)
+    planningFeed?.join(env)
+    acceptanceGate?.join(env)
+    coordinationDone = board.done
 
     // Supervision is an independent, lease-scoped participant. It may detect
     // non-convergence, but only the exact active worker capability can feed it
     // evidence and only this concrete Supervisor can request an abort.
     const supervisor = config.withSupervisor
-        ? new Supervisor(
-              coordinationMode === "collective"
-                  ? {
-                        collective: {
-                            runId,
-                            leaseAuthority: leaseBroker!,
-                            outcomeAuthority: outcomeAuthority!,
-                        },
-                    }
-                  : {},
-          )
+        ? new Supervisor({
+              collective: {
+                  runId,
+                  leaseAuthority: leaseBroker!,
+                  outcomeAuthority,
+              },
+          })
         : null
     supervisor?.join(env)
-    if (supervisor && coordinationMode === "legacy") {
-        dagForwarder?.setInterventionAuthority(supervisor)
-    }
 
     // Join workers after the coordinator/projector so nested executor events
     // are ordered behind the lease that authorized them.
     const factoryBase = {
         cwd: repoRoot,
-        coordinationMode,
         runId,
         worktrees: worktrees ?? undefined,
-        requireWorktree:
-            worktrees !== null &&
-            (coordinationMode === "collective" || integrationWorktree !== null),
         commitGate,
-        collaboration:
-            collaborationConfig && collaborationBridge
-                ? {
-                      commandPath: collaborationConfig.commandPath,
-                      capabilityBroker: collaborationBridge,
-                  }
-                : undefined,
+        collaboration: {
+            commandPath: collaborationConfig.commandPath,
+            capabilityBroker: collaborationBridge,
+        },
         leaseAuthority: leaseBroker ?? undefined,
         offerAuthority: collectiveBoard ?? undefined,
-        targetedMessageAuthority:
-            coordinationMode === "collective"
-                ? collaborationBridge ?? undefined
-                : undefined,
+        targetedMessageAuthority: collaborationBridge,
         interventionAuthority: supervisor ?? undefined,
         llm: storyLlm,
         openaiModel: config.storyModel ?? "gpt-5.5",
@@ -1755,16 +1575,9 @@ export async function orchestrate(
         executor: config.executor,
         outcomeAuthority,
         runtimeReplanDecisionAuthority: collectiveBoard ?? undefined,
-        turnReviewAuthority:
-            coordinationMode === "collective" ? critic ?? undefined : undefined,
-        terminalTurnAuthority:
-            coordinationMode === "collective"
-                ? agentTurnProjector
-                : undefined,
-        acceptanceGateAuthority:
-            coordinationMode === "collective"
-                ? acceptanceGate ?? undefined
-                : undefined,
+        turnReviewAuthority: critic ?? undefined,
+        terminalTurnAuthority: agentTurnProjector,
+        acceptanceGateAuthority: acceptanceGate ?? undefined,
         turnReviewTimeoutMs: config.collectiveAcceptanceTimeoutMs,
         telemetryAuthority: modelTelemetryCollector,
         billingCoordinator: gatewayBillingCoordinator ?? undefined,
@@ -1842,7 +1655,7 @@ export async function orchestrate(
                 qualityAuthority: acceptanceGate ?? undefined,
                 repositoryAuthority: repositoryAuthority ?? undefined,
                 verificationAuthority: runVerifier ?? undefined,
-                collaborationAuthority: collaborationBridge ?? undefined,
+                collaborationAuthority: collaborationBridge,
             },
             conversationContext,
             timeoutMs: config.dialogueTimeoutMs,
@@ -1861,43 +1674,34 @@ export async function orchestrate(
     // them to the recipient's current run/lease/generation. Workers use their
     // lease-bound loopback capability, while Critic compatibility messages and
     // arbitrary extra participants deliberately remain outside this set.
-    collaborationBridge?.setMessageIntentAuthorities([
+    collaborationBridge.setMessageIntentAuthorities([
         operator,
         ...(librarian instanceof Librarian ? [librarian] : []),
         ...(dialogueAgent ? [dialogueAgent] : []),
     ])
 
-    if (coordinationMode === "collective") {
-        if (
-            !collectiveBoard ||
-            !leaseBroker ||
-            !runVerifier ||
-            !collaborationBridge ||
-            !repositoryAuthority ||
-            !outcomeAuthority
-        ) {
-            throw new Error(
-                "collective presentation requires Board, Broker, Repository, Verifier, Bridge, and outcome authorities",
-            )
-        }
-        dagForwarder?.sealCollectivePresentationAuthorities({
-            runId,
-            board: collectiveBoard,
-            broker: leaseBroker,
-            repository: repositoryAuthority,
-            verifier: runVerifier,
-            bridge: collaborationBridge,
-            outcomeAuthority,
-            modelTelemetryCollector,
-            coordination: sentry ?? undefined,
-            critique: critic ?? undefined,
-            quality: acceptanceGate ?? undefined,
-            surgeon: surgeon ?? undefined,
-            dialogue: dialogueAgent ?? undefined,
-            finalizer: finalizer ?? undefined,
-            intervention: supervisor ?? undefined,
-        })
+    if (!collectiveBoard || !leaseBroker || !runVerifier) {
+        throw new Error(
+            "collective presentation requires Board, Broker, and Verifier authorities",
+        )
     }
+    dagForwarder?.sealCollectivePresentationAuthorities({
+        runId,
+        board: collectiveBoard,
+        broker: leaseBroker,
+        repository: repositoryAuthority,
+        verifier: runVerifier,
+        bridge: collaborationBridge,
+        outcomeAuthority,
+        modelTelemetryCollector,
+        coordination: sentry ?? undefined,
+        critique: critic ?? undefined,
+        quality: acceptanceGate ?? undefined,
+        surgeon: surgeon ?? undefined,
+        dialogue: dialogueAgent ?? undefined,
+        finalizer: finalizer ?? undefined,
+        intervention: supervisor ?? undefined,
+    })
     if (dialogueAgent) config.onDialogueReady?.(dialogueAgent)
 
     // Do not expose the Operator until every consumer of its commands has
@@ -1944,7 +1748,7 @@ export async function orchestrate(
 
     // Joining starts the loopback listener eagerly, but this explicit barrier
     // makes a usable capability broker a precondition of collective RunStart.
-    await collaborationBridge?.ready()
+    await collaborationBridge.ready()
     env.publish(
         operator,
         RunStartRequest.create({ reason: "orchestrate" }),
@@ -2050,7 +1854,7 @@ export async function orchestrate(
     }
     const summary = await coordinationDone
     if (busPlannerDone) await busPlannerDone
-    if (coordinationMode === "collective" && useGit) {
+    if (useGit) {
         baseSha = gitCoordinator?.runBaseSha() ?? null
     }
     // A conversation request must never become a liveness dependency. Leaving
@@ -2068,13 +1872,6 @@ export async function orchestrate(
                 "aggregate goal reviewer could not certify provider settlement",
             )
         }
-    }
-
-    // Drain detached pushes + the single worktree merge-back push: after
-    // conductor.done so the network can't stall the run, before the
-    // Finalizer so its PR sees every commit.
-    if (coordinationMode === "legacy" && gitCoordinator) {
-        await gitCoordinator.finish()
     }
 
     // A fail-closed coordinator stop can leave an execution whose process tree
@@ -2121,7 +1918,7 @@ export async function orchestrate(
     // audit log before this function returns.
     if (acceptanceGate) await acceptanceGate.idle()
     if (surgeon) await surgeon.idle()
-    if (collaborationBridge) await collaborationBridge.idle()
+    await collaborationBridge.idle()
     if (workContextProvider) await workContextProvider.idle()
     await reconcileGatewayBilling()
     for (const storyFactory of storyFactories) {
@@ -2153,8 +1950,7 @@ export async function orchestrate(
         filesModified = stats.modified
         totalCommits = commitCount
 
-        // Full run diff as a safety net for the Changes view (per-story diffs
-        // can be missed on the shared-tree fallback). The TUI dedupes files
+        // Full run diff as a safety net for the Changes view. The TUI dedupes files
         // by path, so this is harmless when they already landed.
         if (emitTui) {
             const runDiff = await getDiff(integrationRoot, baseSha, "HEAD")
@@ -2336,13 +2132,9 @@ export function resolveSurgeonEscalationRoute(args: {
 
 export function validateCollectiveWorkers(
     workers: readonly CollectiveWorkerCandidateConfig[],
-    mode: CoordinationMode,
     storyModel: string | undefined,
 ): void {
     if (workers.length === 0) return
-    if (mode !== "collective") {
-        throw new Error("collectiveWorkers requires coordinationMode='collective'")
-    }
     if (storyModel) {
         throw new Error(
             "collectiveWorkers cannot be combined with storyModel; candidates bid concrete routes",
@@ -2444,15 +2236,11 @@ function tierMapHasDefaultRoute(map: TierMap): boolean {
 
 function validateCollectiveMarketOptions(
     workerCount: number,
-    mode: CoordinationMode,
     bidWindowMs: number | undefined,
     policy: WorkBidPolicy | undefined,
 ): void {
     if (workerCount === 0 && (bidWindowMs !== undefined || policy !== undefined)) {
         throw new Error("collective bid window/policy requires at least one worker candidate")
-    }
-    if (workerCount > 0 && mode !== "collective") {
-        throw new Error("collective market requires coordinationMode='collective'")
     }
     if (
         bidWindowMs !== undefined &&
@@ -2461,17 +2249,4 @@ function validateCollectiveMarketOptions(
         throw new Error("collectiveBidWindowMs must be finite and non-negative")
     }
     if (policy) selectWorkBid([], policy)
-}
-
-/** Keyword-shaped tokens for Librarian relevance hints. */
-function tokenizeForHints(text: string): string[] {
-    const seen = new Set<string>()
-    const out: string[] = []
-    for (const match of text.toLowerCase().matchAll(/[a-z0-9_./-]{3,}/g)) {
-        const tok = match[0]
-        if (seen.has(tok)) continue
-        seen.add(tok)
-        out.push(tok)
-    }
-    return out
 }

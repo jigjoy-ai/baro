@@ -20,10 +20,8 @@ import { TokenUsageForwarder } from "./token-usage.js"
 export interface BaroEventForwarders {
     readonly dag: DagForwarder
     readonly progress: ProgressForwarder
-    setLegacyReplanAuthority(authority: BusMember): void
     setRuntimeReplanAuthority(authority: BusMember): void
     setRepositoryAuthority(authority: BusMember): void
-    setInterventionAuthority(authority: BusMember): void
     sealCollectivePresentationAuthorities(
         authorities: CollectivePresentationAuthorities,
     ): void
@@ -54,18 +52,14 @@ const ALL_MODEL_PHASES: readonly ModelInvocationPhase[] = [
 
 export function joinBaroEventForwarders(
     env: CoordinationBus,
-    options: { collective?: boolean } = {},
 ): BaroEventForwarders {
     const dag = new DagForwarder()
-    const collective = options.collective === true
-    const agentStream = new AgentStreamForwarder(collective)
-    const storyLifecycle = new StoryLifecycleForwarder(collective)
-    const tokenUsage = new TokenUsageForwarder(collective)
-    const progress = new ProgressForwarder(collective)
-    const coordination = new CoordinationForwarder(
-        collective,
-    )
-    const finalization = new FinalizationForwarder(collective)
+    const agentStream = new AgentStreamForwarder(true)
+    const storyLifecycle = new StoryLifecycleForwarder(true)
+    const tokenUsage = new TokenUsageForwarder(true)
+    const progress = new ProgressForwarder(true)
+    const coordination = new CoordinationForwarder(true)
+    const finalization = new FinalizationForwarder(true)
     const forwarders = [
         agentStream,
         storyLifecycle,
@@ -79,19 +73,12 @@ export function joinBaroEventForwarders(
     return {
         dag,
         progress,
-        setLegacyReplanAuthority(authority: BusMember): void {
-            dag.setLegacyReplanAuthority(authority)
-            progress.setLegacyReplanAuthority(authority)
-        },
         setRuntimeReplanAuthority(authority: BusMember): void {
             dag.setRuntimeReplanAuthority(authority)
             progress.setRuntimeReplanAuthority(authority)
         },
         setRepositoryAuthority(authority: BusMember): void {
             progress.setRepositoryAuthority(authority)
-        },
-        setInterventionAuthority(authority: BusMember): void {
-            coordination.setInterventionAuthority(authority)
         },
         sealCollectivePresentationAuthorities(
             authorities: CollectivePresentationAuthorities,

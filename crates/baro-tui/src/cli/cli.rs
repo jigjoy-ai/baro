@@ -54,10 +54,6 @@ pub struct Cli {
     #[arg(long)]
     pub parallel: Option<u32>,
 
-    /// Coordination engine: collective event-bus agents (default) or legacy Conductor compatibility.
-    #[arg(long, value_parser=["legacy", "collective"], env = "BARO_COORDINATION", default_value = "collective")]
-    pub coordination: String,
-
     /// Disable Baro-owned pushes and pull requests; use a remote-free clone for hard isolation.
     #[arg(long)]
     pub local_only: bool,
@@ -338,6 +334,10 @@ pub fn parse() -> Result<(Cli, Option<SessionLock>), Error> {
     })
     .map_err(|msg| cmd.error(ErrorKind::ValueValidation, msg))?;
 
+    if !cli.doctor && story_lane_requires_wsl(cfg!(windows), &cli.llm, cli.story_llm.as_deref()) {
+        return Err(cmd.error(ErrorKind::ValueValidation, WSL_REQUIRED));
+    }
+
     let cwd = crate::canonical_path::canonicalize(&cli.cwd)?;
     cli.linked_repositories = crate::linked_repos::resolve(&cwd, &cli.repo)
         .map_err(|msg| cmd.error(ErrorKind::ValueValidation, msg))?;
@@ -364,17 +364,10 @@ pub fn parse() -> Result<(Cli, Option<SessionLock>), Error> {
     Ok((cli, lock))
 }
 
-/// Native Windows cannot prove a CLI lane's process tree is quiet, so the
-/// collective engine refuses every claude/codex/opencode/pi story there (#203).
-/// Unless the user chose an engine, such a run starts on legacy instead.
-pub fn falls_back_to_legacy_coordination(
-    windows: bool,
-    coordination_explicit: bool,
-    coordination: &str,
-    llm: &str,
-    story_llm: Option<&str>,
-) -> bool {
-    if !windows || coordination_explicit || coordination != "collective" {
+/// Native Windows cannot prove a CLI lane's process tree is quiet, so every
+/// claude/codex/opencode/pi/devin story is refused there (#203).
+pub fn story_lane_requires_wsl(windows: bool, llm: &str, story_llm: Option<&str>) -> bool {
+    if !windows {
         return false;
     }
     let story_backend = story_llm.unwrap_or(if llm == "hybrid" { "codex" } else { llm });
@@ -383,6 +376,8 @@ pub fn falls_back_to_legacy_coordination(
         "claude" | "codex" | "opencode" | "pi" | "devin"
     )
 }
+
+const WSL_REQUIRED: &str = "CLI story agents (claude, codex, opencode, pi, devin) cannot run on native Windows; run baro under WSL, or use --llm openai or --llm jigjoy";
 
 #[cfg(test)]
 mod tests {
@@ -531,19 +526,15 @@ mod tests {
     }
 
     #[test]
-    fn windows_cli_story_lanes_start_on_legacy_unless_chosen() {
-        use super::falls_back_to_legacy_coordination as falls_back;
+    fn windows_cli_story_lanes_require_wsl() {
         for llm in ["claude", "codex", "opencode", "pi", "devin", "hybrid"] {
-            assert!(falls_back(true, false, "collective", llm, None), "{llm}");
+            assert!(story_lane_requires_wsl(true, llm, None), "{llm}");
         }
         // Native lanes prove their own quiescence.
-        assert!(!falls_back(true, false, "collective", "openai", None));
-        assert!(!falls_back(true, false, "collective", "jigjoy", None));
-        assert!(falls_back(true, false, "collective", "openai", Some("codex")));
-        assert!(!falls_back(true, false, "collective", "codex", Some("openai")));
-        // An explicit choice and other platforms are left alone.
-        assert!(!falls_back(true, true, "collective", "codex", None));
-        assert!(!falls_back(false, false, "collective", "codex", None));
-        assert!(!falls_back(true, false, "legacy", "codex", None));
+        assert!(!story_lane_requires_wsl(true, "openai", None));
+        assert!(!story_lane_requires_wsl(true, "jigjoy", None));
+        assert!(story_lane_requires_wsl(true, "openai", Some("codex")));
+        assert!(!story_lane_requires_wsl(true, "codex", Some("openai")));
+        assert!(!story_lane_requires_wsl(false, "codex", None));
     }
 }

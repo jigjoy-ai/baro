@@ -55,10 +55,6 @@ export interface WorktreeManagerOptions {
     linkDepDirs?: boolean
     /** Diagnostic logger (defaults to stderr). */
     onLog?: (line: string) => void
-    /** Return null on create failure so callers may use the shared tree. Default true. */
-    allowSharedFallback?: boolean
-    /** Resolve merge conflicts by retrying with `-X theirs`. Default true. */
-    resolveConflictsWithTheirs?: boolean
     /** Tree with the run branch checked out: story bases and merges happen here. Default repoRoot. */
     integrationRoot?: string
 }
@@ -113,7 +109,7 @@ interface PreservedDisposition {
 }
 
 /** Refusal to run a destructive step because recovery material could not be
- * secured first. Never converted into a shared-tree fallback. */
+ * secured first. */
 class RecoveryMaterialError extends Error {}
 
 /**
@@ -135,8 +131,6 @@ export class WorktreeManager {
     private recoverySequence = 0
     private readonly baseDir: string
     private readonly linkDepDirs: boolean
-    private readonly allowSharedFallback: boolean
-    private readonly resolveConflictsWithTheirs: boolean
     private readonly integrationRoot: string
     private readonly log: (line: string) => void
     private readonly excludedPatterns = new Set<string>()
@@ -164,8 +158,6 @@ export class WorktreeManager {
     ) {
         this.baseDir = join(tmpdir(), "baro-worktrees", runId)
         this.linkDepDirs = opts.linkDepDirs ?? true
-        this.allowSharedFallback = opts.allowSharedFallback ?? true
-        this.resolveConflictsWithTheirs = opts.resolveConflictsWithTheirs ?? true
         this.integrationRoot = opts.integrationRoot ?? repoRoot
         this.log =
             opts.onLog ?? ((line) => process.stderr.write(`[worktree] ${line}\n`))
@@ -303,8 +295,7 @@ export class WorktreeManager {
 
     /**
      * Create a story's worktree off the current run-branch HEAD. Returns
-     * its path, or null on any failure so the caller can fall back to the
-     * shared repo cwd instead of failing the story.
+     * its path, or null once shutdown has begun; any failure throws.
      *
      * A story started early on prerequisites' checkpoints gets them merged
      * onto that HEAD here, and the merge becomes its recorded base: its own
@@ -358,8 +349,8 @@ export class WorktreeManager {
             this.log(`created ${branch} at ${path}`)
             return path
         } catch (e) {
-            // Nothing was removed yet, and a shared-tree fallback would drop
-            // the preserved attempt this refusal exists to protect.
+            // Nothing was removed yet; rollback would drop the preserved
+            // attempt this refusal exists to protect.
             if (e instanceof RecoveryMaterialError) throw e
             let rollbackError: unknown = null
             try {
@@ -367,18 +358,13 @@ export class WorktreeManager {
             } catch (cleanupError) {
                 rollbackError = cleanupError
             }
-            const suffix = this.allowSharedFallback
-                ? "; falling back to shared tree"
-                : "; collective mode requires isolation"
             const rollbackSuffix = rollbackError
                 ? `; partial setup cleanup failed (${errMsg(rollbackError)})`
                 : ""
             this.log(
                 `could not create worktree for ${storyId} (${errMsg(e)})` +
-                    `${rollbackSuffix}${suffix}`,
+                    `${rollbackSuffix}; collective mode requires isolation`,
             )
-            // A residual worktree/branch is not a safe shared-tree fallback:
-            // fail closed rather than leave ambiguous story state behind.
             if (rollbackError) {
                 throw new Error(
                     `worktree setup failed for ${storyId}: ${errMsg(e)}; ` +
@@ -393,12 +379,7 @@ export class WorktreeManager {
                     },
                 )
             }
-            // Shared-tree fallback is safe for ordinary setup incompatibility,
-            // but never after a command deadline: the timed-out repository
-            // mutation was killed and this attempt must end terminally.
-            if (isRepositoryCommandTimeout(e)) throw e
-            if (!this.allowSharedFallback) throw e
-            return null
+            throw e
         } finally {
             release()
         }
@@ -892,10 +873,8 @@ export class WorktreeManager {
 
     /**
      * Merge a passed story's branch onto the run branch; false if the story
-     * had no worktree (create() fell back to the shared tree). On merge
-     * failure retries once with `-X theirs` (the merging story wins); throws
-     * — leaving the run branch clean — only when even that fails, so the
-     * caller preserves the branch rather than discarding the work.
+     * has no worktree. A failed merge throws and leaves the run branch clean,
+     * so the caller preserves the branch rather than discarding the work.
      */
     async mergeBack(
         storyId: string,
@@ -950,47 +929,15 @@ export class WorktreeManager {
                     this.markPreserved(storyId)
                     throw error
                 }
-                if (!this.resolveConflictsWithTheirs) {
-                    this.markPreserved(storyId)
-                    // No conflicted path means git refused for another reason;
-                    // calling that a conflict hides the reason git printed.
-                    throw new WorktreeRefusalError(
-                        "merge_conflict",
-                        conflicts.length
-                            ? `story ${storyId} conflicts with already-merged work on [${conflicts.join(", ")}]`
-                            : `story ${storyId} merge-back failed without a conflict: ${gitFailureDetail(error)}`,
-                    )
-                }
-                this.log(
-                    `WARNING: story ${storyId} conflicts with already-merged work` +
-                        (conflicts.length ? ` on [${conflicts.join(", ")}]` : "") +
-                        `; auto-resolving with -X theirs (this story wins)`,
+                this.markPreserved(storyId)
+                // No conflicted path means git refused for another reason;
+                // calling that a conflict hides the reason git printed.
+                throw new WorktreeRefusalError(
+                    "merge_conflict",
+                    conflicts.length
+                        ? `story ${storyId} conflicts with already-merged work on [${conflicts.join(", ")}]`
+                        : `story ${storyId} merge-back failed without a conflict: ${gitFailureDetail(error)}`,
                 )
-                try {
-                    await exec(
-                        "git",
-                        [
-                            "merge",
-                            "--no-ff",
-                            "-X",
-                            "theirs",
-                            "-m",
-                            msg,
-                            mergeTarget,
-                        ],
-                        { cwd: this.integrationRoot },
-                    )
-                    return true
-                } catch (e) {
-                    this.markPreserved(storyId)
-                    await this.abortMerge(storyId)
-                    // Keep the branch out of the cleanup sweep so the
-                    // commits stay recoverable after the run.
-                    if (isRepositoryCommandTimeout(e)) throw e
-                    throw new Error(
-                        `could not merge story ${storyId} even with -X theirs: ${errMsg(e)}`,
-                    )
-                }
             }
         } catch (error) {
             if (isRepositoryCommandTimeout(error)) {
@@ -1724,8 +1671,7 @@ export class WorktreeManager {
     /**
      * Roll back every externally visible part of a failed create(). Maps are
      * cleared first so policy observers fail closed even while git cleanup is
-     * still running. Residual state is treated as an error, never as a valid
-     * shared-tree fallback.
+     * still running. Residual state is treated as an error.
      */
     private async rollbackPartialCreate(
         storyId: string,

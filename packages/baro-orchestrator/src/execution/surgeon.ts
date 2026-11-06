@@ -3,7 +3,7 @@
  *
  * Observes terminal story failures (StoryResultItem with success=false
  * after all retries exhausted) and emits ReplanItem-s that the
- * Conductor applies at the next level boundary.
+ * Board applies as recovery decisions.
  *
  * Two evaluation strategies:
  *
@@ -22,8 +22,7 @@
  *     smaller stories, or insert a missing prerequisite).
  *
  * Library-grade: doesn't import PRD types directly. The Surgeon
- * receives PRD context as a generic `() => PrdSnapshot` callback so
- * the Conductor stays the only PRD-aware piece of code.
+ * receives PRD context as a generic `() => PrdSnapshot` callback.
  */
 
 import { SemanticEvent } from "../runtime/mozaik.js"
@@ -82,7 +81,7 @@ export class CritiqueLog {
 
 /**
  * Lightweight read-only view of the PRD that Surgeon needs to reason.
- * The Conductor (or the orchestrate() wiring) provides this snapshot;
+ * The orchestrate() wiring provides this snapshot;
  * Surgeon doesn't import PrdFile/PrdStory itself.
  */
 export interface PrdSnapshot {

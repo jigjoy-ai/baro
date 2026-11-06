@@ -603,7 +603,7 @@ pub struct App {
     /// Mid-run chat input: (target story id, buffer). Rendered in the
     /// bottom strip; Enter sends an agent or collective dialogue command.
     pub agent_msg_input: Option<(String, String)>,
-    /// The opt-in communication-only collective participant is available.
+    /// False once a resume could not restore the run's conversation.
     pub dialogue_enabled: bool,
     /// Live orchestrator stdin (JSON command lines); refreshed per spawn.
     pub orchestrator_stdin: Option<tokio::sync::mpsc::Sender<String>>,
@@ -788,8 +788,7 @@ impl App {
             diff_scroll_pending: false,
             decisions_scroll: 0,
             agent_msg_input: None,
-            dialogue_enabled: std::env::var("BARO_WITH_DIALOGUE").is_ok_and(|value| value == "1")
-                || std::env::var("BARO_COORDINATION").is_ok_and(|value| value == "collective"),
+            dialogue_enabled: true,
             orchestrator_stdin: None,
             operator: None,
         }

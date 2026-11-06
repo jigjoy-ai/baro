@@ -201,9 +201,9 @@ export class MemoryLibrarian extends BusMember {
         }
     }
 
-    /** Always returns memory guidance when the store is available. Legacy
-     * agents retain the CLI; collective agents receive only authenticated,
-     * automatically indexed findings and capability-bound sharing guidance. */
+    /** Always returns memory guidance when the store is available. Collective
+     * agents receive only authenticated, automatically indexed findings and
+     * capability-bound sharing guidance. */
     async gatherContext(storyId: string, hints: readonly string[] = []): Promise<string | null> {
         const store = await this.ensureStore()
         if (!store) return null
@@ -225,9 +225,6 @@ export class MemoryLibrarian extends BusMember {
         const cachedPaths = this.opts.collective
             ? []
             : await store.getCachedPaths()
-        const legacyCliPath = !this.opts.collective && this.opts.sessionPath
-            ? jsonQuotedShellArgument(this.opts.sessionPath)
-            : null
 
         const parts: string[] = []
 
@@ -240,24 +237,6 @@ export class MemoryLibrarian extends BusMember {
             parts.push("Do not write to shared memory through a separate transport.")
             parts.push("Share explicit findings through the lease-capable `agent-collab note`")
             parts.push("channel described in the main task prompt.")
-            parts.push("")
-        } else if (legacyCliPath) {
-            parts.push("Use these commands via Bash to check what's available:")
-            parts.push("")
-            parts.push("\t# Find relevant context from other agents")
-            parts.push(`\tnode ~/.baro/bin/baro-memory.mjs query "JWT authentication" --path ${legacyCliPath}`)
-            parts.push("")
-            parts.push("\t# List files already read by other agents")
-            parts.push(`\tnode ~/.baro/bin/baro-memory.mjs cache list --path ${legacyCliPath}`)
-            parts.push("")
-            parts.push("\t# Get cached file content (no disk read needed)")
-            parts.push(`\tnode ~/.baro/bin/baro-memory.mjs cache get src/auth.ts --path ${legacyCliPath}`)
-            parts.push("")
-            parts.push("\t# Store a finding for other agents")
-            parts.push(`\tnode ~/.baro/bin/baro-memory.mjs store "found X" --tool Read --file src/foo.ts --path ${legacyCliPath}`)
-            parts.push("")
-            parts.push("IMPORTANT: Check cached files BEFORE reading from disk.")
-            parts.push("If a file is cached, use `baro-memory cache get` instead of Read.")
             parts.push("")
         } else {
             parts.push("Verified exploration-tool evidence is indexed in this process.")
@@ -528,15 +507,4 @@ function sameCorrelation(
         left.leaseId === right.leaseId &&
         left.generation === right.generation
     )
-}
-
-/** Render one JSON-style double-quoted shell argument. JSON escaping handles
- * quotes/backslashes; the extra escapes prevent expansion inside Bash double
- * quotes. Control characters fail closed rather than advertising a command
- * whose argv could not faithfully represent the configured path. */
-function jsonQuotedShellArgument(value: string): string | null {
-    if (/[\u0000-\u001f\u007f]/u.test(value)) return null
-    return JSON.stringify(value)
-        .replace(/\$/g, "\\$")
-        .replace(/`/g, "\\`")
 }

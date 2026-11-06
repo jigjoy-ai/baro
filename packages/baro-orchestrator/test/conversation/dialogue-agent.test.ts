@@ -787,7 +787,6 @@ describe("DialogueAgent", () => {
                 storyCount: 99,
                 storyIds: ["FORGED"],
                 graphVersion: 99,
-                coordinationMode: "collective",
             }),
         )
         env.publish(
@@ -797,7 +796,6 @@ describe("DialogueAgent", () => {
                 storyCount: 2,
                 storyIds: ["S1", "S2"],
                 graphVersion: 7,
-                coordinationMode: "collective",
             }),
         )
         env.publish(
@@ -903,7 +901,6 @@ describe("DialogueAgent", () => {
                 storyCount: 1,
                 storyIds: ["S0"],
                 graphVersion: 3,
-                coordinationMode: "collective",
             }),
         )
         requestConversation(env, operator, "run-closed-delegation", "before")
@@ -918,7 +915,6 @@ describe("DialogueAgent", () => {
                 storyCount: 1,
                 storyIds: ["S0"],
                 graphVersion: 3,
-                coordinationMode: "collective",
             }),
         )
         env.publish(
@@ -964,7 +960,6 @@ describe("DialogueAgent", () => {
                 storyCount: 2,
                 storyIds: ["S1", "S2"],
                 graphVersion: 8,
-                coordinationMode: "collective",
             }),
         )
         env.publish(

@@ -241,7 +241,7 @@ async function testStoryAgent(): Promise<void> {
 
 // `opencode run` exits 0 even when the model just talks and does no work, so
 // the success predicate must reject a zero-tool run — otherwise a refused/no-op
-// story is a false PASS to the Conductor. Guards against exit-code-only regression.
+// story is a false PASS to the Board. Guards against exit-code-only regression.
 async function testNoOpRejected(): Promise<void> {
     process.stderr.write("\n[test] 5. No-op story is rejected (regression guard)\n")
 

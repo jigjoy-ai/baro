@@ -263,28 +263,9 @@ describe("WorktreeManager — isolation (#50)", () => {
 })
 
 describe("WorktreeManager — conflict", () => {
-    it("same-line conflict auto-resolves with -X theirs (merging story wins) and warns", async () => {
-        const p1 = (await mgr.create("S1"))!
-        const p2 = (await mgr.create("S2"))!
-        commitInWorktree(p1, "a.txt", "S1wins\nline2\nline3\n")
-        commitInWorktree(p2, "a.txt", "S2wins\nline2\nline3\n")
-        await mgr.mergeBack("S1")
-        await mgr.mergeBack("S2")
-
-        const merged = readFileSync(join(repo, "a.txt"), "utf8")
-        assert.ok(merged.includes("S2wins"), "the merging story (S2) won")
-        assert.ok(!merged.includes("<<<<<<<"), "no conflict markers left")
-        assert.equal(git(repo, "status", "--porcelain"), "", "run branch clean")
-        assert.ok(
-            logs.some((l) => l.includes("conflict") && l.includes("S2")),
-            "a conflict warning was surfaced",
-        )
-    })
-
-    it("collective policy preserves the branch and fails instead of choosing a winner", async () => {
+    it("preserves the branch and fails instead of choosing a winner", async () => {
         mgr = new WorktreeManager(repo, gate, runId, {
             onLog: (line) => logs.push(line),
-            resolveConflictsWithTheirs: false,
         })
         const p1 = (await mgr.create("S1"))!
         const p2 = (await mgr.create("S2"))!
@@ -305,7 +286,6 @@ describe("WorktreeManager — conflict", () => {
     it("backs up a conflict and retries the same logical story from latest HEAD", async () => {
         mgr = new WorktreeManager(repo, gate, runId, {
             onLog: (line) => logs.push(line),
-            resolveConflictsWithTheirs: false,
         })
         const p1 = (await mgr.create("S1"))!
         const p2 = (await mgr.create("S2"))!
@@ -356,7 +336,6 @@ describe("WorktreeManager — conflict", () => {
     it("refuses retry preparation when the preserved worktree is dirty", async () => {
         mgr = new WorktreeManager(repo, gate, runId, {
             onLog: (line) => logs.push(line),
-            resolveConflictsWithTheirs: false,
         })
         const p1 = (await mgr.create("S1"))!
         const p2 = (await mgr.create("S2"))!
@@ -602,25 +581,12 @@ describe("WorktreeManager — checkpoints", () => {
         writeFileSync(join(repo, "a.txt"), "integrated meanwhile\n")
         git(repo, "commit", "-am", "conflicting integration")
 
-        assert.equal(await mgr.create("S2", { checkpoints: [{ storyId: "S1", sha }] }), null)
+        await assert.rejects(
+            mgr.create("S2", { checkpoints: [{ storyId: "S1", sha }] }),
+            /do not merge onto the run branch/,
+        )
         assert.equal(mgr.activePath("S2"), null)
         assert.ok(logs.some((line) => line.includes("do not merge onto the run branch")))
-
-        const isolatedRunId = uniqueRunId("run-checkpoint-isolated")
-        const isolated = new WorktreeManager(repo, new GitGate(), isolatedRunId, {
-            allowSharedFallback: false,
-            onLog: () => {},
-            integrationRoot: repo,
-        })
-        try {
-            await assert.rejects(
-                isolated.create("S2", { checkpoints: [{ storyId: "S1", sha }] }),
-                /do not merge onto the run branch/,
-            )
-        } finally {
-            await isolated.cleanupAll()
-            await removeWorktreeRun(repo, isolatedRunId)
-        }
     })
 })
 
@@ -671,13 +637,13 @@ describe("WorktreeManager — scratch dir", () => {
     })
 })
 
-describe("WorktreeManager — fallback", () => {
+describe("WorktreeManager — missing worktree", () => {
     it("mergeBack returns false for a story that never got a worktree", async () => {
         const merged = await mgr.mergeBack("never-created")
-        assert.equal(merged, false, "no worktree → no merge, signals shared-tree path")
+        assert.equal(merged, false)
     })
 
-    it("rolls back a partially-created worktree before shared fallback", async () => {
+    it("rolls back a partially-created worktree and fails the create", async () => {
         writeFileSync(join(repo, "package.json"), '{"name":"setup-failure"}\n')
         git(repo, "add", "package.json")
         git(repo, "commit", "-m", "add package manifest")
@@ -691,10 +657,9 @@ describe("WorktreeManager — fallback", () => {
         rmSync(excludePath, { force: true })
         mkdirSync(excludePath)
 
-        const path = await mgr.create("S1")
+        await assert.rejects(mgr.create("S1"))
         const partialPath = join(worktreeRunRoot(runId), "S1")
 
-        assert.equal(path, null)
         assert.equal(mgr.activePath("S1"), null)
         assert.equal(mgr.creationSha("S1"), null)
         assert.equal(existsSync(partialPath), false)
@@ -702,7 +667,7 @@ describe("WorktreeManager — fallback", () => {
         assert.equal(
             git(repo, "branch", "--list", `baro-wt/${runId}/S1`),
             "",
-            "partial story branch was removed before fallback",
+            "partial story branch was removed",
         )
     })
 })

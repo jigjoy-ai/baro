@@ -5,7 +5,6 @@ import {
     Coordination,
     CoordinationModeSelected,
     CollaborationNote,
-    Critique,
     PeerHelpRequested,
     RunVerificationCompleted,
     RunVerificationRequested,
@@ -35,7 +34,6 @@ import { emit } from "../../tui-protocol.js"
  * `story_log` mirrors for one release.
  */
 export class CoordinationForwarder extends BusMember {
-    private interventionAuthority: BusMember | null = null
     private collectiveAuthorities: Readonly<CollectiveCoordinationAuthorities> | null = null
     private readonly leases = new ActiveLeaseRegistry()
     private readonly seenQualityEvaluations = new Set<string>()
@@ -60,16 +58,6 @@ export class CoordinationForwarder extends BusMember {
         this.collectiveAuthorities = Object.freeze({ ...authorities })
     }
 
-    setInterventionAuthority(authority: BusMember): void {
-        if (
-            this.interventionAuthority &&
-            this.interventionAuthority !== authority
-        ) {
-            throw new Error("coordination forwarder intervention authority is already bound")
-        }
-        this.interventionAuthority = authority
-    }
-
     override async onExternalEvent(
         source: BusMember,
         event: SemanticEvent<string, unknown>,
@@ -77,14 +65,6 @@ export class CoordinationForwarder extends BusMember {
         if (Coordination.is(event)) {
             if (!this.matchesCollective(source, "coordination")) return
             this.handleCoordination(event.payload)
-            return
-        }
-        if (Critique.is(event)) {
-            // Raw Critique has no run/lease/generation correlation. It remains
-            // a legacy presentation event, but collective presentation waits
-            // for AcceptanceGate's correlated projection below.
-            if (this.collectiveAuthorities || this.collectiveFailClosed) return
-            this.handleCritique(event.payload)
             return
         }
         if (StoryQualityCompleted.is(event)) {
@@ -117,12 +97,7 @@ export class CoordinationForwarder extends BusMember {
             return
         }
         if (StoryIntervention.is(event)) {
-            if (this.collectiveAuthorities || this.collectiveFailClosed) {
-                if (!this.matchesCollective(source, "intervention")) return
-            } else if (
-                this.interventionAuthority &&
-                source !== this.interventionAuthority
-            ) return
+            if (!this.matchesCollective(source, "intervention")) return
             this.handleIntervention(event.payload)
             return
         }

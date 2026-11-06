@@ -1,12 +1,7 @@
 /**
- * StoryFactory — Mozaik-native participant that spawns StoryAgent
- * instances in response to StorySpawnRequest events on the bus.
- *
- * It removes direct coupling between either coordinator and StoryAgent:
- * coordinators request work, while the factory owns agent lifecycle.
- *
- * Replacing this factory (e.g. with a mock for tests, or with a
- * remote-execution variant) requires no changes to Conductor.
+ * StoryFactory — Mozaik-native participant that claims or bids on offered
+ * work and spawns a story agent for each lease it is granted. The Board
+ * requests work; the factory owns agent lifecycle.
  */
 
 import {
@@ -84,8 +79,7 @@ Baro quarantines the story worktree if cooperative process quiescence cannot be 
 
 export interface StoryFactoryOptions {
     cwd: string
-    coordinationMode?: "legacy" | "collective"
-    runId?: string
+    runId: string
     workerId?: string
     /** Object-identity authority allowed to grant/release collective leases. */
     leaseAuthority?: BusMember
@@ -127,11 +121,9 @@ export interface StoryFactoryOptions {
     }
     /**
      * When set, each story runs in its own isolated git worktree instead of
-     * the shared `cwd` (issue #50). Collective mode requires this isolation.
+     * `cwd` (issue #50); a story whose worktree cannot be created fails.
      */
     worktrees?: WorktreeManager
-    /** Fail the lease when an isolated worktree cannot be created. */
-    requireWorktree?: boolean
     /** The story's gate, run on an unjudged attempt's restored commits; null
      * means inconclusive. Absent disables re-verification. */
     commitGate?(
@@ -149,7 +141,7 @@ export interface StoryFactoryOptions {
      *               subprocess
      *   "pi"      — PiStoryAgent wrapping a `pi --mode json -p` subprocess
      *   "devin"   — DevinStoryAgent driving one `devin acp` turn
-     * Same bus contract for all — Conductor, Critic, Surgeon,
+     * Same bus contract for all — Board, Critic, Surgeon,
      * Sentry, Librarian, Cartographer don't notice the swap.
      */
     llm?: "claude" | "openai" | "codex" | "opencode" | "pi" | "devin"
@@ -273,19 +265,16 @@ export class StoryFactory extends BusMember {
 
     constructor(private readonly opts: StoryFactoryOptions) {
         super()
-        if (opts.coordinationMode === "collective" && !opts.leaseAuthority) {
+        if (!opts.leaseAuthority) {
             throw new Error("collective StoryFactory requires a leaseAuthority")
         }
-        if (opts.coordinationMode === "collective" && !opts.offerAuthority) {
+        if (!opts.offerAuthority) {
             throw new Error("collective StoryFactory requires an offerAuthority")
         }
-        if (opts.coordinationMode === "collective" && !opts.outcomeAuthority) {
+        if (!opts.outcomeAuthority) {
             throw new Error("collective StoryFactory requires an outcomeAuthority")
         }
-        if (
-            opts.coordinationMode === "collective" &&
-            opts.outcomeAuthority?.runId !== this.runId()
-        ) {
+        if (opts.outcomeAuthority.runId !== this.runId()) {
             throw new Error("collective StoryFactory outcomeAuthority runId mismatch")
         }
         this.executor = opts.executor ?? new LocalStoryExecutor()
@@ -321,12 +310,10 @@ export class StoryFactory extends BusMember {
 
     setEnvironment(env: CoordinationBus): void {
         this.envRef = env
-        if (this.opts.coordinationMode === "collective") {
-            // Advertise as soon as the worker joins. Board preparation can
-            // synchronously emit offers before the outer RunStart event reaches
-            // later participants, so waiting only for RunStart loses early bids.
-            this.advertiseCapabilities()
-        }
+        // Advertise as soon as the worker joins. Board preparation can
+        // synchronously emit offers before the outer RunStart event reaches
+        // later participants, so waiting only for RunStart loses early bids.
+        this.advertiseCapabilities()
     }
 
     override async onExternalEvent(
@@ -346,7 +333,6 @@ export class StoryFactory extends BusMember {
         internal: boolean,
     ): Promise<void> {
         if (
-            this.opts.coordinationMode === "collective" &&
             this.bidOptions &&
             source === this.opts.telemetryAuthority &&
             ModelInvocationMeasured.is(event)
@@ -371,7 +357,6 @@ export class StoryFactory extends BusMember {
             return
         }
         if (
-            this.opts.coordinationMode === "collective" &&
             RunStartRequest.is(event)
         ) {
             this.advertiseCapabilities()
@@ -379,7 +364,6 @@ export class StoryFactory extends BusMember {
         }
 
         if (
-            this.opts.coordinationMode === "collective" &&
             WorkOffered.is(event) &&
             event.payload.runId === this.runId() &&
             source === this.opts.offerAuthority
@@ -390,7 +374,6 @@ export class StoryFactory extends BusMember {
         }
 
         if (
-            this.opts.coordinationMode === "collective" &&
             WorkOfferRetractionResolved.is(event) &&
             event.payload.runId === this.runId() &&
             event.payload.disposition === "retracted" &&
@@ -405,7 +388,6 @@ export class StoryFactory extends BusMember {
         }
 
         if (
-            this.opts.coordinationMode === "collective" &&
             WorkLeaseGranted.is(event) &&
             event.payload.runId === this.runId() &&
             source === this.opts.leaseAuthority
@@ -477,25 +459,22 @@ export class StoryFactory extends BusMember {
         }
 
         if (StorySpawnRequest.is(event)) {
-            if (this.opts.coordinationMode === "collective") {
-                // Collective spawn requests are projected by this worker only
-                // after an authorized lease. Never trust an external replay.
-                if (!internal) return
-                const lease = this.leases.get(event.payload.storyId)
-                if (
-                    !lease ||
-                    event.payload.runId !== this.runId() ||
-                    event.payload.workerId !== this.workerId() ||
-                    event.payload.leaseId !== lease.leaseId ||
-                    event.payload.generation !== lease.generation
-                ) return
-            }
+            // Spawn requests are projected by this worker only after an
+            // authorized lease. Never trust an external replay.
+            if (!internal) return
+            const lease = this.leases.get(event.payload.storyId)
+            if (
+                !lease ||
+                event.payload.runId !== this.runId() ||
+                event.payload.workerId !== this.workerId() ||
+                event.payload.leaseId !== lease.leaseId ||
+                event.payload.generation !== lease.generation
+            ) return
             await this.spawn(event.payload)
             return
         }
 
         if (
-            this.opts.coordinationMode === "collective" &&
             WorkBlockAccepted.is(event) &&
             event.payload.runId === this.runId() &&
             source === this.opts.runtimeReplanDecisionAuthority
@@ -511,7 +490,6 @@ export class StoryFactory extends BusMember {
         }
 
         if (
-            this.opts.coordinationMode === "collective" &&
             WorkLeaseReleased.is(event) &&
             event.payload.runId === this.runId() &&
             source === this.opts.leaseAuthority
@@ -547,9 +525,8 @@ export class StoryFactory extends BusMember {
 
         if (
             RunCompleted.is(event) &&
-            (this.opts.coordinationMode !== "collective" ||
-                (event.payload.runId === this.runId() &&
-                    source === this.opts.runtimeReplanDecisionAuthority))
+            event.payload.runId === this.runId() &&
+            source === this.opts.runtimeReplanDecisionAuthority
         ) {
             this.bidRoutes.clear()
             this.leasedRoutes.clear()
@@ -557,16 +534,14 @@ export class StoryFactory extends BusMember {
         }
 
         if (StoryIntervention.is(event) && event.payload.action === "abort") {
-            if (this.opts.coordinationMode === "collective") {
-                const lease = this.leases.get(event.payload.storyId)
-                if (
-                    source !== this.opts.interventionAuthority ||
-                    !lease ||
-                    event.payload.runId !== this.runId() ||
-                    event.payload.leaseId !== lease.leaseId ||
-                    event.payload.generation !== lease.generation
-                ) return
-            }
+            const lease = this.leases.get(event.payload.storyId)
+            if (
+                source !== this.opts.interventionAuthority ||
+                !lease ||
+                event.payload.runId !== this.runId() ||
+                event.payload.leaseId !== lease.leaseId ||
+                event.payload.generation !== lease.generation
+            ) return
             const aborted = this.abort(event.payload.storyId)
             if (aborted) {
                 process.stderr.write(
@@ -579,19 +554,17 @@ export class StoryFactory extends BusMember {
         // When a story finishes (passes or fails), dispose its execution so we
         // can clean up its bus membership / executor resources.
         if (StoryResult.is(event)) {
-            if (this.opts.coordinationMode === "collective") {
-                if (
-                    !source ||
-                    !this.opts.outcomeAuthority!.matchesResult(source, event.payload)
-                ) return
-                const lease = this.leases.get(event.payload.storyId)
-                if (
-                    !lease ||
-                    event.payload.runId !== this.runId() ||
-                    event.payload.leaseId !== lease.leaseId ||
-                    event.payload.generation !== lease.generation
-                ) return
-            }
+            if (
+                !source ||
+                !this.opts.outcomeAuthority!.matchesResult(source, event.payload)
+            ) return
+            const lease = this.leases.get(event.payload.storyId)
+            if (
+                !lease ||
+                event.payload.runId !== this.runId() ||
+                event.payload.leaseId !== lease.leaseId ||
+                event.payload.generation !== lease.generation
+            ) return
             if (
                 event.payload.failure?.kind === "infrastructure" &&
                 event.payload.failure.code ===
@@ -603,9 +576,7 @@ export class StoryFactory extends BusMember {
             if (exec && this.envRef) {
                 exec.dispose(this.envRef)
                 this.active.delete(event.payload.storyId)
-                if (this.opts.coordinationMode === "collective") {
-                    this.settledExecutions.set(event.payload.storyId, exec)
-                }
+                this.settledExecutions.set(event.payload.storyId, exec)
             } else if (this.spawning.has(event.payload.storyId)) {
                 this.settledWhileSpawning.add(event.payload.storyId)
             }
@@ -691,8 +662,8 @@ export class StoryFactory extends BusMember {
     }
 
     /**
-     * Abort a running story mid-flight (StoryIntervention from the bus, or the
-     * Operator's external abort). The agent settles with a failed StoryResult,
+     * Abort a running story mid-flight (StoryIntervention from the bus).
+     * The agent settles with a failed StoryResult,
      * which the Surgeon then reacts to (split/escalate). Returns false if the
      * story isn't active or its executor doesn't support abort.
      */
@@ -907,25 +878,6 @@ export class StoryFactory extends BusMember {
                     failure,
                 }),
             )
-            if (this.opts.coordinationMode !== "collective") {
-                this.emitBus(
-                    StoryResult.create({
-                        storyId: req.storyId,
-                        success: false,
-                        attempts: 0,
-                        durationSecs: 0,
-                        error: `spawn failed: ${message}`,
-                        failure,
-                        ...(req.runId && req.leaseId && req.generation != null
-                            ? {
-                                  runId: req.runId,
-                                  leaseId: req.leaseId,
-                                  generation: req.generation,
-                              }
-                            : {}),
-                    }),
-                )
-            }
         } finally {
             this.spawning.delete(req.storyId)
             if (this.spawnDrains.get(req.storyId) === spawnDrain) {
@@ -958,8 +910,7 @@ export class StoryFactory extends BusMember {
                 storyId: req.storyId,
                 backend: route.backend,
                 model: route.model ?? "default",
-                ...(this.opts.coordinationMode === "collective" &&
-                req.runId &&
+                ...(req.runId &&
                 req.leaseId &&
                 req.generation != null
                     ? {
@@ -971,7 +922,6 @@ export class StoryFactory extends BusMember {
             }),
         )
 
-        // Legacy may fall back to cwd; collective treats missing isolation as failure.
         const worktrees = this.opts.worktrees
         let createdWorktree: string | null = null
         let reverified: ReverifiedSpawn | null = null
@@ -1012,7 +962,7 @@ export class StoryFactory extends BusMember {
         // Leave any already-created path registered for cleanup, but never
         // launch a provider process across the shutdown boundary.
         if (this.shuttingDown) return
-        if (this.opts.worktrees && !createdWorktree && this.opts.requireWorktree) {
+        if (this.opts.worktrees && !createdWorktree) {
             throw new Error(`isolated worktree unavailable for ${req.storyId}`)
         }
         const storyCwd = createdWorktree ?? this.opts.cwd
@@ -1045,7 +995,6 @@ export class StoryFactory extends BusMember {
               } as const
             : undefined
         const processContract =
-            this.opts.coordinationMode === "collective" &&
             route.backend !== "openai"
                 ? COLLECTIVE_CLI_PROCESS_CONTRACT
                 : ""
@@ -1081,32 +1030,21 @@ export class StoryFactory extends BusMember {
 
         // Run the story — in-process by default, or via an injected executor
         // that runs it elsewhere. Either way the StoryResult lands on the bus
-        // when it settles, and Conductor reacts.
+        // when it settles, and the Board reacts.
         let resultAuthorityRegistered = false
-        const collectiveCorrelation = this.opts.coordinationMode === "collective"
-            ? this.resultCorrelation(req)
-            : null
+        const collectiveCorrelation = this.resultCorrelation(req)
         const executor = reverified
             ? new ReverifiedCommitExecutor(reverified.head, reverified.gate)
             : this.executor
         const exec = executor.start(executionRequest, route, storyCwd, this.envRef, {
             openaiModel: this.opts.openaiModel,
             effort: this.opts.effort,
-            ...(this.opts.coordinationMode === "collective"
-                ? { requireProcessQuiescenceCertification: true }
-                : {}),
-            ...(this.opts.coordinationMode === "collective"
-                ? { scopedVerification: true }
-                : {}),
-            ...(this.opts.coordinationMode === "collective"
-                ? {
-                      // Missing wiring fails closed: no external participant
-                      // can have this exact factory identity. Production
-                      // orchestration supplies the CollaborationBridge.
-                      targetedMessageAuthority:
-                          this.opts.targetedMessageAuthority ?? this,
-                  }
-                : {}),
+            requireProcessQuiescenceCertification: true,
+            scopedVerification: true,
+            // Missing wiring fails closed: no external participant can have
+            // this exact factory identity. Production orchestration supplies
+            // the CollaborationBridge.
+            targetedMessageAuthority: this.opts.targetedMessageAuthority ?? this,
             ...(route.backend === "openai" &&
             this.opts.runtimeReplanDecisionAuthority
                 ? {
@@ -1127,7 +1065,6 @@ export class StoryFactory extends BusMember {
                       turnReviewAuthority: this.opts.turnReviewAuthority,
                       turnReviewTimeoutMs: this.opts.turnReviewTimeoutMs,
                       handoffInconclusiveToAcceptanceGate:
-                          this.opts.coordinationMode === "collective" &&
                           req.requiresQualityReview === true &&
                           this.opts.acceptanceGateAuthority !== undefined,
                   }
@@ -1136,25 +1073,21 @@ export class StoryFactory extends BusMember {
             ...(route.backend === "openai" && this.opts.billingCoordinator
                 ? { billingCoordinator: this.opts.billingCoordinator }
                 : {}),
-            ...(collectiveCorrelation
-                ? {
-                      registerResultAuthority: (source: BusMember) => {
-                          this.opts.outcomeAuthority!.registerResultAuthority(
-                              collectiveCorrelation,
-                              source,
-                          )
-                          resultAuthorityRegistered = true
-                      },
-                      registerTerminalAuthority: (source: BusMember) => {
-                          this.opts.outcomeAuthority!.registerTerminalAuthority(
-                              collectiveCorrelation,
-                              source,
-                          )
-                      },
-                  }
-                : {}),
+            registerResultAuthority: (source: BusMember) => {
+                this.opts.outcomeAuthority!.registerResultAuthority(
+                    collectiveCorrelation,
+                    source,
+                )
+                resultAuthorityRegistered = true
+            },
+            registerTerminalAuthority: (source: BusMember) => {
+                this.opts.outcomeAuthority!.registerTerminalAuthority(
+                    collectiveCorrelation,
+                    source,
+                )
+            },
         })
-        if (collectiveCorrelation && !resultAuthorityRegistered) {
+        if (!resultAuthorityRegistered) {
             try {
                 exec.abort?.()
             } catch (error) {
@@ -1176,16 +1109,12 @@ export class StoryFactory extends BusMember {
 
         if (this.settledWhileSpawning.delete(req.storyId)) {
             exec.dispose(this.envRef)
-            if (this.opts.coordinationMode === "collective") {
-                this.settledExecutions.set(req.storyId, exec)
-            }
+            this.settledExecutions.set(req.storyId, exec)
         } else {
             this.active.set(req.storyId, exec)
         }
 
-        // Emit the "yes, agent spawned" notification so observers can
-        // see the lifecycle. Conductor doesn't actually need this, but
-        // it makes audit logs/replays much clearer.
+        // The Board does not need this, but it makes audit logs/replays clearer.
         this.envRef.publish(
             this,
             StorySpawned.create({ storyId: req.storyId }),
@@ -1337,7 +1266,7 @@ export class StoryFactory extends BusMember {
     }
 
     private runId(): string {
-        return this.opts.runId ?? "legacy"
+        return this.opts.runId
     }
 
     private initialCollaborationMessages(messages: readonly string[]): string {
@@ -1373,10 +1302,9 @@ export class StoryFactory extends BusMember {
             ...(surface ? { surface } : {}),
             collabCommand: command,
             collabCapability: capability,
-            // Collective runs end with the objective RunVerifier pass on the
-            // fully-merged branch, so a story owes only its own perimeter.
-            hostRunsWholeTreeVerification:
-                this.opts.coordinationMode === "collective",
+            // Runs end with the objective RunVerifier pass on the fully-merged
+            // branch, so a story owes only its own perimeter.
+            hostRunsWholeTreeVerification: true,
         }).join("\n\n")
     }
 

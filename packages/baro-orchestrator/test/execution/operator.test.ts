@@ -39,20 +39,4 @@ describe("Operator", () => {
             metadata: { source: "operator" },
         })
     })
-
-    it("routes abort and shutdown commands to hooks", () => {
-        const calls: string[] = []
-        const operator = new Operator({
-            onAbort: (storyId) => calls.push(`abort:${storyId}`),
-            onAbortAll: () => calls.push("abort_all"),
-            onShutdown: () => calls.push("shutdown"),
-        })
-        joinWithCapture(operator)
-
-        operator.dispatch({ kind: "abort", storyId: "S3" })
-        operator.dispatch({ kind: "abort_all" })
-        operator.dispatch({ kind: "shutdown" })
-
-        assert.deepEqual(calls, ["abort:S3", "abort_all", "shutdown"])
-    })
 })

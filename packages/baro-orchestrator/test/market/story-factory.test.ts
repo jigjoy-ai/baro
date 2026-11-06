@@ -44,6 +44,7 @@ import type {
     CollaborationLeaseCapabilityRequest,
 } from "../../src/execution/collaboration-bridge.js"
 import { joinWithCapture, source, withTempDir } from "../execution/helpers.js"
+import { leasedFactory } from "./lease-fixture.js"
 
 const TEST_COLLABORATION_TOKEN = "a".repeat(43)
 
@@ -102,37 +103,30 @@ class CapturingExecutor implements StoryExecutor {
 }
 
 describe("StoryFactory", () => {
-    it("starts an executor for spawn requests and emits story_spawned", async () => {
+    it("starts an executor for a granted lease and emits story_spawned", async () => {
         await withTempDir("story-factory-test-", async (dir) => {
             const executor = new CapturingExecutor()
-            const factory = new StoryFactory({
+            const { env, factory, lease, result } = leasedFactory({
                 cwd: dir,
                 executor,
                 llm: "claude",
             })
-            const env = joinWithCapture(factory)
-            const spawn = StorySpawnRequest.create({
-                storyId: "S1",
-                prompt: "Implement S1",
-                model: "sonnet",
-                retries: 1,
-                timeoutSecs: 30,
-            })
-
-            await factory.onExternalEvent(source("conductor"), spawn)
+            const spawn = await lease("S1", { retries: 1 })
+            await flushBus()
 
             assert.equal(executor.calls.length, 1)
-            assert.deepEqual(executor.calls[0].req, spawn.payload)
+            const { prompt, ...request } = executor.calls[0].req
+            const { prompt: _leasedPrompt, ...leased } = spawn.payload
+            assert.deepEqual(request, leased)
+            assert.match(prompt, /^Implement S1\n\nCOLLECTIVE PROCESS-LIFECYCLE CONTRACT:/)
             assert.deepEqual(executor.calls[0].route, {
                 backend: "claude",
                 model: "sonnet",
             })
             assert.equal(executor.calls[0].cwd, dir)
             assert.equal(executor.calls[0].env, env)
-            assert.deepEqual(executor.calls[0].opts, {
-                openaiModel: undefined,
-                effort: undefined,
-            })
+            assert.equal(executor.calls[0].opts.requireProcessQuiescenceCertification, true)
+            assert.equal(executor.calls[0].opts.scopedVerification, true)
 
             const spawned = env.events.find(StorySpawned.is)
             assert.ok(spawned)
@@ -144,18 +138,12 @@ describe("StoryFactory", () => {
                 storyId: "S1",
                 backend: "claude",
                 model: "sonnet",
+                runId: spawn.payload.runId,
+                leaseId: spawn.payload.leaseId,
+                generation: spawn.payload.generation,
             })
 
-            await factory.onExternalEvent(
-                source("S1"),
-                StoryResult.create({
-                    storyId: "S1",
-                    success: true,
-                    attempts: 1,
-                    durationSecs: 4,
-                    error: null,
-                }),
-            )
+            await factory.onExternalEvent(executor.resultSource, result("S1"))
 
             assert.equal(executor.disposedWith, env)
         })
@@ -164,22 +152,19 @@ describe("StoryFactory", () => {
     it("deduplicates active spawns and disposes only the completed story execution", async () => {
         await withTempDir("story-factory-test-", async (dir) => {
             const executor = new CapturingExecutor()
-            const factory = new StoryFactory({
+            const { env, factory, lease, result } = leasedFactory({
                 cwd: dir,
                 executor,
                 llm: "codex",
             })
-            const env = joinWithCapture(factory)
-            const spawn = StorySpawnRequest.create({
-                storyId: "S2",
-                prompt: "Implement S2",
+            const spawn = await lease("S2", {
                 model: "gpt-5.5",
                 retries: 2,
                 timeoutSecs: 60,
             })
-
-            await factory.onExternalEvent(source("conductor"), spawn)
-            await factory.onExternalEvent(source("conductor"), spawn)
+            await factory.onInternalEvent(spawn)
+            await factory.onInternalEvent(spawn)
+            await flushBus()
 
             assert.equal(executor.calls.length, 1)
             assert.deepEqual(executor.calls[0].route, {
@@ -188,44 +173,23 @@ describe("StoryFactory", () => {
             })
             assert.equal(env.events.filter(StorySpawned.is).length, 1)
 
-            await factory.onExternalEvent(
-                source("S3"),
-                StoryResult.create({
-                    storyId: "S3",
-                    success: true,
-                    attempts: 1,
-                    durationSecs: 2,
-                    error: null,
-                }),
-            )
+            await factory.onExternalEvent(executor.resultSource, result("S3"))
             assert.equal(executor.disposeCalls.length, 0)
 
             await factory.onExternalEvent(
-                source("S2"),
-                StoryResult.create({
-                    storyId: "S2",
-                    success: false,
-                    attempts: 2,
-                    durationSecs: 8,
-                    error: "failed",
-                }),
+                executor.resultSource,
+                result("S2", { success: false, attempts: 2, error: "failed" }),
             )
             await factory.onExternalEvent(
-                source("S2"),
-                StoryResult.create({
-                    storyId: "S2",
-                    success: false,
-                    attempts: 2,
-                    durationSecs: 8,
-                    error: "duplicate result",
-                }),
+                executor.resultSource,
+                result("S2", { success: false, attempts: 2, error: "duplicate result" }),
             )
 
             assert.deepEqual(executor.disposeCalls, [env])
         })
     })
 
-    it("enables inconclusive handoff only for a quality-gated collective lease", async () => {
+    it("enables inconclusive handoff for a quality-gated lease", async () => {
         await withTempDir("story-factory-quality-handoff-", async (dir) => {
             const broker = source("broker")
             const board = source("board")
@@ -235,7 +199,6 @@ describe("StoryFactory", () => {
             const collectiveExecutor = new CapturingExecutor()
             const collective = new StoryFactory({
                 cwd: dir,
-                coordinationMode: "collective",
                 runId: "run-quality-handoff",
                 workerId: "worker-a",
                 leaseAuthority: broker,
@@ -277,32 +240,6 @@ describe("StoryFactory", () => {
                 collectiveExecutor.calls[0]?.opts.terminalTurnAuthority,
                 projector,
             )
-
-            const legacyExecutor = new CapturingExecutor()
-            const legacy = new StoryFactory({
-                cwd: dir,
-                coordinationMode: "legacy",
-                executor: legacyExecutor,
-                turnReviewAuthority: critic,
-                acceptanceGateAuthority: gate,
-            })
-            joinWithCapture(legacy)
-            await legacy.onExternalEvent(
-                source("conductor"),
-                StorySpawnRequest.create({
-                    storyId: "S2",
-                    prompt: "Implement S2",
-                    model: "sonnet",
-                    retries: 0,
-                    timeoutSecs: 30,
-                    requiresQualityReview: true,
-                }),
-            )
-            assert.equal(
-                legacyExecutor.calls[0]?.opts
-                    .handoffInconclusiveToAcceptanceGate,
-                false,
-            )
         })
     })
 
@@ -314,7 +251,6 @@ describe("StoryFactory", () => {
             const executor = new CapturingExecutor()
             const factory = new StoryFactory({
                 cwd: dir,
-                coordinationMode: "collective",
                 runId: "run-terminal-only",
                 workerId: "worker-a",
                 leaseAuthority: broker,
@@ -372,53 +308,6 @@ describe("StoryFactory", () => {
         })
     })
 
-    it("aborts a running story on a StoryIntervention(abort) bus event", async () => {
-        await withTempDir("story-factory-test-", async (dir) => {
-            const aborted: string[] = []
-            const executor: StoryExecutor = {
-                start: (req) => ({
-                    dispose: () => {},
-                    abort: () => aborted.push(req.storyId),
-                }),
-            }
-            const factory = new StoryFactory({ cwd: dir, executor, llm: "claude" })
-            joinWithCapture(factory)
-            await factory.onExternalEvent(
-                source("conductor"),
-                StorySpawnRequest.create({
-                    storyId: "S4",
-                    prompt: "Implement S4",
-                    model: "sonnet",
-                    retries: 1,
-                    timeoutSecs: 30,
-                }),
-            )
-
-            await factory.onExternalEvent(
-                source("supervisor"),
-                StoryIntervention.create({
-                    storyId: "S4",
-                    source: "supervisor",
-                    action: "abort",
-                    reason: "stuck in a loop",
-                }),
-            )
-            assert.deepEqual(aborted, ["S4"])
-
-            // Unknown story → no crash, no abort.
-            await factory.onExternalEvent(
-                source("supervisor"),
-                StoryIntervention.create({
-                    storyId: "S99",
-                    source: "supervisor",
-                    action: "abort",
-                    reason: "stall",
-                }),
-            )
-            assert.deepEqual(aborted, ["S4"])
-        })
-    })
-
     it("uses an in-progress marker so duplicate spawn requests share one worktree create", async () => {
         await withTempDir("story-factory-test-", async (dir) => {
             const executor = new CapturingExecutor()
@@ -432,29 +321,24 @@ describe("StoryFactory", () => {
                     })
                 },
             } as unknown as WorktreeManager
-            const factory = new StoryFactory({
+            const { factory, lease } = leasedFactory({
                 cwd: dir,
                 executor,
                 llm: "claude",
                 worktrees,
             })
-            joinWithCapture(factory)
-            const spawn = StorySpawnRequest.create({
-                storyId: "S3",
-                prompt: "Implement S3",
-                model: "sonnet",
-                retries: 1,
-                timeoutSecs: 30,
-            })
+            const spawn = await lease("S3")
 
-            const first = factory.onExternalEvent(source("conductor"), spawn)
-            const second = factory.onExternalEvent(source("conductor"), spawn)
+            const first = factory.onInternalEvent(spawn)
+            const second = factory.onInternalEvent(spawn)
             await Promise.resolve()
 
             assert.deepEqual(createCalls, ["S3"])
             releaseCreate(join(dir, "S3-worktree"))
             await Promise.all([first, second])
+            await flushBus()
 
+            assert.deepEqual(createCalls, ["S3"])
             assert.equal(executor.calls.length, 1)
             assert.equal(executor.calls[0].cwd, join(dir, "S3-worktree"))
         })
@@ -469,21 +353,15 @@ describe("StoryFactory", () => {
                     releaseCreate = resolve
                 }),
             } as unknown as WorktreeManager
-            const factory = new StoryFactory({
+            const { factory, lease } = leasedFactory({
                 cwd: dir,
                 executor,
                 llm: "claude",
                 worktrees,
             })
-            joinWithCapture(factory)
-            const pendingSpawn = factory.onExternalEvent(
-                source("conductor"),
-                StorySpawnRequest.create({
-                    storyId: "S-shutdown",
+            const pendingSpawn = factory.onInternalEvent(
+                await lease("S-shutdown", {
                     prompt: "Never launch after the run ends",
-                    model: "sonnet",
-                    retries: 0,
-                    timeoutSecs: 30,
                 }),
             )
             await Promise.resolve()
@@ -494,6 +372,7 @@ describe("StoryFactory", () => {
             )
             releaseCreate(join(dir, "S-shutdown-worktree"))
             await pendingSpawn
+            await flushBus()
 
             assert.equal(executor.calls.length, 0)
             assert.deepEqual(await factory.quiesceForShutdown(0), [])
@@ -504,34 +383,31 @@ describe("StoryFactory", () => {
         await withTempDir("story-factory-shutdown-result-", async (dir) => {
             const resultSource = source("sync-abort-result")
             const executor: StoryExecutor = {
-                start: (req, _route, _cwd, env) => ({
-                    abort: () => {
-                        env.publish(
-                            resultSource,
-                            StoryResult.create({
-                                storyId: req.storyId,
-                                success: false,
-                                attempts: 1,
-                                durationSecs: 0,
-                                error: "aborted",
-                            }),
-                        )
-                    },
-                    dispose: () => {},
-                }),
+                start: (req, _route, _cwd, env, opts) => {
+                    opts.registerResultAuthority?.(resultSource)
+                    return {
+                        abort: () => {
+                            env.publish(
+                                resultSource,
+                                StoryResult.create({
+                                    storyId: req.storyId,
+                                    success: false,
+                                    attempts: 1,
+                                    durationSecs: 0,
+                                    error: "aborted",
+                                    runId: req.runId,
+                                    leaseId: req.leaseId,
+                                    generation: req.generation,
+                                }),
+                            )
+                        },
+                        dispose: () => {},
+                    }
+                },
             }
-            const factory = new StoryFactory({ cwd: dir, executor })
-            const env = joinWithCapture(factory)
-            await factory.onExternalEvent(
-                source("conductor"),
-                StorySpawnRequest.create({
-                    storyId: "S-sync-abort",
-                    prompt: "Stop safely",
-                    model: "sonnet",
-                    retries: 0,
-                    timeoutSecs: 30,
-                }),
-            )
+            const { env, factory, lease } = leasedFactory({ cwd: dir, executor })
+            await lease("S-sync-abort", { prompt: "Stop safely" })
+            await flushBus()
 
             assert.deepEqual(
                 await factory.quiesceForShutdown(0),
@@ -545,7 +421,8 @@ describe("StoryFactory", () => {
         await withTempDir("story-factory-uncertified-result-", async (dir) => {
             const resultSource = source("uncertified-result")
             const executor: StoryExecutor = {
-                start: (req, _route, _cwd, env) => {
+                start: (req, _route, _cwd, env, opts) => {
+                    opts.registerResultAuthority?.(resultSource)
                     env.publish(
                         resultSource,
                         StoryResult.create({
@@ -558,24 +435,18 @@ describe("StoryFactory", () => {
                                 kind: "infrastructure",
                                 code: "process_quiescence_uncertified",
                             },
+                            runId: req.runId,
+                            leaseId: req.leaseId,
+                            generation: req.generation,
                         }),
                     )
                     return { dispose: () => {} }
                 },
             }
-            const factory = new StoryFactory({ cwd: dir, executor })
-            const env = joinWithCapture(factory)
+            const { env, factory, lease } = leasedFactory({ cwd: dir, executor })
 
-            await factory.onExternalEvent(
-                source("conductor"),
-                StorySpawnRequest.create({
-                    storyId: "S-uncertified",
-                    prompt: "Do not delete this worktree",
-                    model: "sonnet",
-                    retries: 0,
-                    timeoutSecs: 30,
-                }),
-            )
+            await lease("S-uncertified", { prompt: "Do not delete this worktree" })
+            await flushBus()
 
             assert.equal(env.events.filter(StoryResult.is).length, 1)
             assert.deepEqual(
@@ -596,7 +467,6 @@ describe("StoryFactory", () => {
             const outcomeAuthority = new StoryOutcomeAuthority("run-market")
             const factory = new StoryFactory({
                 cwd: dir,
-                coordinationMode: "collective",
                 runId: "run-market",
                 workerId: "worker-cheap",
                 leaseAuthority: broker,
@@ -803,7 +673,6 @@ describe("StoryFactory", () => {
             const executor = new CapturingExecutor()
             const factory = new StoryFactory({
                 cwd: dir,
-                coordinationMode: "collective",
                 runId,
                 workerId: "worker-a",
                 leaseAuthority: broker,
@@ -866,7 +735,6 @@ describe("StoryFactory", () => {
             const board = source("board")
             const factory = new StoryFactory({
                 cwd: dir,
-                coordinationMode: "collective",
                 runId: "run-offer-authority",
                 workerId: "worker-light",
                 leaseAuthority: broker,
@@ -946,7 +814,6 @@ describe("StoryFactory", () => {
             }
             const factory = new StoryFactory({
                 cwd: dir,
-                coordinationMode: "collective",
                 runId: "run-learning",
                 workerId: "worker-learning",
                 leaseAuthority: broker,
@@ -1127,7 +994,6 @@ describe("StoryFactory", () => {
             const initialSuccessProbability = 0.75
             const factory = new StoryFactory({
                 cwd: dir,
-                coordinationMode: "collective",
                 runId: "run-quality-learning",
                 workerId: "worker-quality-learning",
                 leaseAuthority: broker,
@@ -1231,7 +1097,6 @@ describe("StoryFactory", () => {
             const nativeExecutor = new CapturingExecutor()
             const nativeFactory = new StoryFactory({
                 cwd: dir,
-                coordinationMode: "collective",
                 runId: "run-native",
                 workerId: "worker-native",
                 leaseAuthority: broker,
@@ -1303,7 +1168,6 @@ describe("StoryFactory", () => {
             const cliCollaborationBroker = capabilityBroker()
             const cliFactory = new StoryFactory({
                 cwd: dir,
-                coordinationMode: "collective",
                 runId: "run-cli",
                 workerId: "worker-cli",
                 leaseAuthority: broker,
@@ -1395,7 +1259,6 @@ describe("StoryFactory", () => {
                 }
                 const factory = new StoryFactory({
                     cwd: dir,
-                    coordinationMode: "collective",
                     runId,
                     workerId: `worker-${backend}`,
                     leaseAuthority,
@@ -1461,7 +1324,6 @@ describe("StoryFactory", () => {
             const outcomeAuthority = new StoryOutcomeAuthority("run-market")
             const factory = new StoryFactory({
                 cwd: dir,
-                coordinationMode: "collective",
                 runId: "run-market",
                 workerId: "worker-a",
                 leaseAuthority: broker,
@@ -1560,7 +1422,6 @@ describe("StoryFactory", () => {
             }
             const factory = new StoryFactory({
                 cwd: dir,
-                coordinationMode: "collective",
                 runId: "run-authority",
                 workerId: "worker-a",
                 leaseAuthority: broker,
@@ -1634,7 +1495,6 @@ describe("StoryFactory", () => {
             }
             const factory = new StoryFactory({
                 cwd: dir,
-                coordinationMode: "collective",
                 runId: "run-sync",
                 workerId: "worker-a",
                 leaseAuthority: broker,
@@ -1686,7 +1546,6 @@ describe("StoryFactory", () => {
             }
             const factory = new StoryFactory({
                 cwd: dir,
-                coordinationMode: "collective",
                 runId,
                 workerId: "worker",
                 leaseAuthority: broker,
@@ -1765,7 +1624,6 @@ describe("StoryFactory", () => {
             }
             const factory = new StoryFactory({
                 cwd: dir,
-                coordinationMode: "collective",
                 runId,
                 workerId: "worker",
                 leaseAuthority: broker,
@@ -1875,7 +1733,6 @@ describe("StoryFactory", () => {
             }
             const factory = new StoryFactory({
                 cwd: dir,
-                coordinationMode: "collective",
                 runId,
                 workerId: "worker",
                 leaseAuthority: broker,

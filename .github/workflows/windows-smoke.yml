@@ -41,7 +41,7 @@ jobs:
           node packages/baro-app/scripts/postinstall.js
           Copy-Item -Force target/release/baro.exe "$env:USERPROFILE\.baro\bin\baro.exe"
           Get-ChildItem "$env:USERPROFILE\.baro\bin" | Select-Object Name, Length
-      - name: Codex lane (legacy coordination)
+      - name: Codex lane refuses native Windows (needs WSL)
         shell: pwsh
         run: ./.github/smoke/run.ps1 -Llm codex
       - name: Native lane (collective)

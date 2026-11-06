@@ -132,7 +132,7 @@ function prdFileWith(...stories: Partial<PrdStory>[]): string {
 /**
  * The orchestrate notices a run prints before it starts.
  *
- * orchestrate() rejects collective Operator control hooks before any
+ * orchestrate() rejects a bid window without worker candidates before any
  * participant joins the bus, so this reaches the resume decision — which runs
  * first — without starting a run, touching git, or spawning an agent.
  */
@@ -153,11 +153,10 @@ async function orchestrateNotices(resumeRun: boolean, prdPath: string): Promise<
             orchestrate({
                 prdPath,
                 cwd: "/not-read",
-                coordinationMode: "collective",
                 ...(resumeRun ? { resumeRun } : {}),
-                operatorHooks: { onAbort: () => undefined },
+                collectiveBidWindowMs: 1,
             }),
-            /control must cross a source-bound Mozaik semantic lane/,
+            /bid window\/policy requires at least one worker candidate/,
         )
     } finally {
         process.stderr.write = original

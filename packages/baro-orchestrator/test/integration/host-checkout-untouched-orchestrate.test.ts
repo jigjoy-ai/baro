@@ -130,7 +130,6 @@ function runOrchestrate(repo: string, runId: string, prdPath: string, executor: 
         cwd: repo,
         runId,
         continueRun: false,
-        coordinationMode: "legacy",
         publishRemote: false,
         withGit: true,
         withWorktrees: true,

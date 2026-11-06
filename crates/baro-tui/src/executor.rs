@@ -20,7 +20,7 @@ pub struct PrdFile {
     pub description: String,
     #[serde(rename = "userStories")]
     pub user_stories: Vec<PrdStory>,
-    /// Architect's DecisionDocument; the TS Conductor prepends it to
+    /// Architect's DecisionDocument; the TS Board prepends it to
     /// every story prompt as authoritative spec.
     #[serde(
         rename = "decisionDocument",

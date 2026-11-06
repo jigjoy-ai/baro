@@ -1,7 +1,6 @@
 /** Story execution lifecycle: runs, levels, spawns, results, discovery, recovery. Wire `type` strings are frozen (see ../semantic-events.ts). */
 
 import { defineSemanticEvent } from "./define.js"
-import type { CoordinationMode } from "./market.js"
 import type { RunVerificationEvidence, RunVerificationStatus } from "./verification.js"
 
 // Orchestration control events
@@ -141,27 +140,18 @@ export const RecoveryDecision =
 export interface RunStartedData {
     project: string
     storyCount: number
-    /** Current durable runtime-DAG version. Optional for legacy/replay
-     * compatibility; collective control participants should provide it. */
+    /** Current durable runtime-DAG version. Optional for replay
+     * compatibility; control participants should provide it. */
     graphVersion?: number
     /** Full logical run set; optional for replay compatibility. */
     storyIds?: readonly string[]
     /** Stories already passed before this resume/continue run began. */
     completedStoryIds?: readonly string[]
-    /** Determines whether progress requires authoritative repository merge. */
-    coordinationMode?: CoordinationMode
     /** Execution mode from the intake contract ("focused" | "sequential" | "parallel"), when one was decided. */
     mode?: string
 }
 
 export const RunStarted = defineSemanticEvent<RunStartedData>("run_started")
-
-export interface LevelComputeRequestData {
-    reason: string
-}
-
-export const LevelComputeRequest =
-    defineSemanticEvent<LevelComputeRequestData>("level_compute_request")
 
 export interface LevelStartedData {
     ordinal: number
@@ -183,9 +173,8 @@ export const LevelCompleted =
     defineSemanticEvent<LevelCompletedData>("level_completed")
 
 /**
- * Conductor actually started a recovery level (visibility only; the
- * recovery flow itself stays hook-driven). `attempt` counts recovery
- * levels started in this run, 1-based.
+ * The Board actually started a recovery level (visibility only). `attempt`
+ * counts recovery levels started in this run, 1-based.
  */
 export interface RecoveryStartedData {
     attempt: number
@@ -321,7 +310,7 @@ export interface StoryRoutedData {
     storyId: string
     backend: string
     model: string
-    /** Collective-only authority correlation; legacy routing omits it. */
+    /** Lease correlation; absent only when the spawn request carried none. */
     runId?: string
     leaseId?: string
     generation?: number

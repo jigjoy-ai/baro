@@ -1031,38 +1031,6 @@ describe("orchestrate collective mode", () => {
         )
     })
 
-    it("keeps the existing Conductor as the default", async () => {
-        await withTempDir("legacy-default-", async (dir) => {
-            const prdPath = join(dir, "prd.json")
-            const input = testPrd()
-            input.userStories = [input.userStories[0]!]
-            writeFileSync(prdPath, JSON.stringify(input, null, 2) + "\n")
-            const auditPath = join(dir, "audit.jsonl")
-
-            const result = await orchestrate({
-                prdPath,
-                cwd: dir,
-                publishRemote: false,
-                withGit: false,
-                emitTuiEvents: false,
-                withLibrarian: false,
-                withMemory: false,
-                withSentry: false,
-                withCritic: false,
-                withSurgeon: false,
-                withSupervisor: false,
-                intraLevelDelaySecs: 0,
-                executor: new PassingExecutor(),
-                auditLogPath: auditPath,
-            })
-
-            assert.equal(result.summary.success, true)
-            const audit = readFileSync(auditPath, "utf8")
-            assert.match(audit, /"type":"story_spawn_request"/)
-            assert.doesNotMatch(audit, /"type":"work_offered"/)
-        })
-    })
-
     it("checkpoints an unverified local collective run without reporting success", async () => {
         await withTempDir("collective-orchestrate-", async (dir) => {
             const prdPath = join(dir, "prd.json")
@@ -1073,7 +1041,6 @@ describe("orchestrate collective mode", () => {
             const result = await orchestrate({
                 prdPath,
                 cwd: dir,
-                coordinationMode: "collective",
                 publishRemote: false,
                 withGit: false,
                 emitTuiEvents: false,
@@ -1143,7 +1110,6 @@ describe("orchestrate collective mode", () => {
             const result = await orchestrate({
                 prdPath,
                 cwd: dir,
-                coordinationMode: "collective",
                 publishRemote: false,
                 withGit: false,
                 emitTuiEvents: false,
@@ -1192,7 +1158,6 @@ describe("orchestrate collective mode", () => {
             const result = await orchestrate({
                 prdPath,
                 cwd: dir,
-                coordinationMode: "collective",
                 llm: "claude",
                 tierMap: { standard: "openai:deepseek-v4-flash" },
                 publishRemote: false,
@@ -1234,7 +1199,6 @@ describe("orchestrate collective mode", () => {
                     const result = await orchestrate({
                         prdPath,
                         cwd: dir,
-                        coordinationMode: "collective",
                         llm: "claude",
                         tierMap: {
                             [defaultKey]: "openai:deepseek-v4-flash",
@@ -1274,7 +1238,6 @@ describe("orchestrate collective mode", () => {
             const result = await orchestrate({
                 prdPath,
                 cwd: dir,
-                coordinationMode: "collective",
                 publishRemote: false,
                 withGit: false,
                 emitTuiEvents: false,
@@ -1316,7 +1279,6 @@ describe("orchestrate collective mode", () => {
                     runId: `memory-env-${suffix}-${process.pid}`,
                     prdPath,
                     cwd: dir,
-                    coordinationMode: "collective",
                     publishRemote: false,
                     withGit: false,
                     emitTuiEvents: false,
@@ -1378,7 +1340,6 @@ describe("orchestrate collective mode", () => {
                 result = await orchestrate({
                     prdPath,
                     cwd: dir,
-                    coordinationMode: "collective",
                     publishRemote: false,
                     withGit: false,
                     emitTuiEvents: true,
@@ -1424,7 +1385,6 @@ describe("orchestrate collective mode", () => {
             const result = await orchestrate({
                 prdPath,
                 cwd: dir,
-                coordinationMode: "collective",
                 publishRemote: false,
                 withGit: false,
                 emitTuiEvents: false,
@@ -1514,7 +1474,6 @@ describe("orchestrate collective mode", () => {
             const result = await orchestrate({
                 prdPath,
                 cwd: dir,
-                coordinationMode: "collective",
                 publishRemote: false,
                 withGit: false,
                 emitTuiEvents: false,
@@ -1546,7 +1505,6 @@ describe("orchestrate collective mode", () => {
             const result = await orchestrate({
                 prdPath,
                 cwd: dir,
-                coordinationMode: "collective",
                 publishRemote: false,
                 withGit: false,
                 emitTuiEvents: false,
@@ -1583,7 +1541,6 @@ describe("orchestrate collective mode", () => {
             const result = await orchestrate({
                 prdPath,
                 cwd: dir,
-                coordinationMode: "collective",
                 publishRemote: false,
                 withGit: false,
                 emitTuiEvents: false,
@@ -1643,7 +1600,6 @@ describe("orchestrate collective mode", () => {
             const result = await orchestrate({
                 prdPath,
                 cwd: dir,
-                coordinationMode: "collective",
                 publishRemote: false,
                 withGit: false,
                 emitTuiEvents: false,
@@ -1722,7 +1678,6 @@ describe("orchestrate collective mode", () => {
             const result = await orchestrate({
                 prdPath,
                 cwd: dir,
-                coordinationMode: "collective",
                 publishRemote: false,
                 withGit: false,
                 emitTuiEvents: false,
@@ -1815,7 +1770,6 @@ describe("orchestrate collective mode", () => {
                 const result = await orchestrate({
                     prdPath,
                     cwd: dir,
-                    coordinationMode: "collective",
                     publishRemote: false,
                     withGit: true,
                     emitTuiEvents: false,
@@ -1919,7 +1873,6 @@ describe("orchestrate collective mode", () => {
                 const result = await orchestrate({
                     prdPath,
                     cwd: dir,
-                    coordinationMode: "collective",
                     publishRemote: false,
                     withGit: true,
                     emitTuiEvents: false,
@@ -2010,7 +1963,6 @@ describe("orchestrate collective mode", () => {
             const result = await orchestrate({
                 prdPath,
                 cwd: dir,
-                coordinationMode: "collective",
                 publishRemote: false,
                 withGit: false,
                 emitTuiEvents: false,
@@ -2055,7 +2007,6 @@ describe("orchestrate collective mode", () => {
             const result = await orchestrate({
                 prdPath,
                 cwd: dir,
-                coordinationMode: "collective",
                 collectiveBidWindowMs: 5,
                 collectiveWorkers: [
                     {
@@ -2123,7 +2074,6 @@ describe("orchestrate collective mode", () => {
             const result = await orchestrate({
                 prdPath,
                 cwd: dir,
-                coordinationMode: "collective",
                 collectiveBidWindowMs: 5,
                 collectiveWorkers: [
                     {
@@ -2198,7 +2148,6 @@ describe("orchestrate collective mode", () => {
             const result = await orchestrate({
                 prdPath,
                 cwd: dir,
-                coordinationMode: "collective",
                 collectiveBidWindowMs: 5,
                 collectiveWorkers: [
                     {
@@ -2279,7 +2228,6 @@ describe("orchestrate collective mode", () => {
             const result = await orchestrate({
                 prdPath,
                 cwd: dir,
-                coordinationMode: "collective",
                 publishRemote: false,
                 withGit: true,
                 emitTuiEvents: false,
@@ -2316,7 +2264,6 @@ describe("orchestrate collective mode", () => {
                 orchestrate({
                     prdPath,
                     cwd: dir,
-                    coordinationMode: "collective",
                     publishRemote: false,
                     withGit: false,
                     emitTuiEvents: false,
@@ -2357,7 +2304,6 @@ describe("orchestrate collective mode", () => {
             const result = await orchestrate({
                 prdPath,
                 cwd: dir,
-                coordinationMode: "collective",
                 publishRemote: false,
                 withGit: true,
                 emitTuiEvents: false,
@@ -2399,7 +2345,6 @@ describe("orchestrate collective mode", () => {
             const result = await orchestrate({
                 prdPath,
                 cwd: dir,
-                coordinationMode: "collective",
                 publishRemote: false,
                 withGit: true,
                 emitTuiEvents: false,
@@ -2449,7 +2394,6 @@ describe("orchestrate collective mode", () => {
                 orchestrate({
                     prdPath,
                     cwd: dir,
-                    coordinationMode: "collective",
                     publishRemote: false,
                     withGit: false,
                     emitTuiEvents: false,
@@ -2475,52 +2419,49 @@ describe("orchestrate collective mode", () => {
     })
 
     it("does not publish the run branch in local-only mode", async () => {
-        for (const coordinationMode of ["legacy", "collective"] as const) {
-            await withTempDir(`local-only-${coordinationMode}-`, async (dir) => {
-                const origin = mkdtempSync(join(tmpdir(), "baro-local-origin-"))
-                try {
-                    git(origin, ["init", "--bare"])
-                    git(dir, ["init", "-b", "main"])
-                    git(dir, ["config", "user.name", "Local Only Test"])
-                    git(dir, ["config", "user.email", "local@test.invalid"])
-                    writeFileSync(join(dir, "README.md"), "base\n")
-                    writePassingVerifyManifest(dir)
-                    git(dir, ["add", "README.md", "package.json"])
-                    git(dir, ["commit", "-m", "base"])
-                    git(dir, ["remote", "add", "origin", origin])
-                    const prdPath = join(dir, "prd.json")
-                    const input = testPrd()
-                    input.userStories = [input.userStories[0]!]
-                    writeFileSync(prdPath, JSON.stringify(input, null, 2) + "\n")
+        await withTempDir("local-only-", async (dir) => {
+            const origin = mkdtempSync(join(tmpdir(), "baro-local-origin-"))
+            try {
+                git(origin, ["init", "--bare"])
+                git(dir, ["init", "-b", "main"])
+                git(dir, ["config", "user.name", "Local Only Test"])
+                git(dir, ["config", "user.email", "local@test.invalid"])
+                writeFileSync(join(dir, "README.md"), "base\n")
+                writePassingVerifyManifest(dir)
+                git(dir, ["add", "README.md", "package.json"])
+                git(dir, ["commit", "-m", "base"])
+                git(dir, ["remote", "add", "origin", origin])
+                const prdPath = join(dir, "prd.json")
+                const input = testPrd()
+                input.userStories = [input.userStories[0]!]
+                writeFileSync(prdPath, JSON.stringify(input, null, 2) + "\n")
 
-                    const result = await orchestrate({
-                        prdPath,
-                        cwd: dir,
-                        coordinationMode,
-                        publishRemote: false,
-                        withGit: true,
-                        emitTuiEvents: false,
-                        withLibrarian: false,
-                        withMemory: false,
-                        withSentry: false,
-                        withCritic: false,
-                        withSurgeon: false,
-                        withSupervisor: false,
-                        intraLevelDelaySecs: 0,
-                        executor: new WritingExecutor(),
-                    })
+                const result = await orchestrate({
+                    prdPath,
+                    cwd: dir,
+                    publishRemote: false,
+                    withGit: true,
+                    emitTuiEvents: false,
+                    withLibrarian: false,
+                    withMemory: false,
+                    withSentry: false,
+                    withCritic: false,
+                    withSurgeon: false,
+                    withSupervisor: false,
+                    intraLevelDelaySecs: 0,
+                    executor: new WritingExecutor(),
+                })
 
-                    assert.equal(result.summary.success, true)
-                    assert.equal(git(dir, ["branch", "--show-current"]), "main")
-                    assert.doesNotThrow(() =>
-                        git(dir, ["show-ref", "--verify", "--quiet", `refs/heads/${input.branchName}`]),
-                    )
-                    assert.equal(git(origin, ["for-each-ref", "--format=%(refname)"]), "")
-                } finally {
-                    rmSync(origin, { recursive: true, force: true })
-                }
-            })
-        }
+                assert.equal(result.summary.success, true)
+                assert.equal(git(dir, ["branch", "--show-current"]), "main")
+                assert.doesNotThrow(() =>
+                    git(dir, ["show-ref", "--verify", "--quiet", `refs/heads/${input.branchName}`]),
+                )
+                assert.equal(git(origin, ["for-each-ref", "--format=%(refname)"]), "")
+            } finally {
+                rmSync(origin, { recursive: true, force: true })
+            }
+        })
     })
 })
 

@@ -6,7 +6,6 @@ import {
     LevelStarted,
     RecoveryStarted,
     Replan,
-    ReplanApplied,
     RuntimeReplanApplied,
     type LevelCompletedData,
     type LevelStartedData,
@@ -22,22 +21,10 @@ import { emit } from "../../tui-protocol.js"
  * (Their `activity`/`progress` mirrors live in ProgressForwarder.)
  */
 export class DagForwarder extends BusMember {
-    private legacyReplanAuthority: BusMember | null = null
     private runtimeReplanAuthority: BusMember | null = null
     private coordinationAuthority: BusMember | null = null
     private readonly seenRuntimeProposals = new Set<string>()
     private latestRuntimeGraphVersion = 0
-
-    setLegacyReplanAuthority(authority: BusMember): void {
-        if (
-            this.legacyReplanAuthority &&
-            this.legacyReplanAuthority !== authority
-        ) {
-            throw new Error("DAG forwarder legacy replan authority is already bound")
-        }
-        this.legacyReplanAuthority = authority
-        this.bindCoordinationAuthority(authority)
-    }
 
     setRuntimeReplanAuthority(authority: BusMember): void {
         if (
@@ -55,12 +42,7 @@ export class DagForwarder extends BusMember {
         event: SemanticEvent<string, unknown>,
     ): Promise<void> {
         if (Replan.is(event)) {
-            // Raw legacy and collective replans are proposals, not graph state.
-            return
-        }
-        if (ReplanApplied.is(event)) {
-            if (source !== this.legacyReplanAuthority) return
-            this.handleReplan(event.payload)
+            // Raw replans are proposals, not graph state.
             return
         }
         if (RuntimeReplanApplied.is(event)) {
@@ -102,16 +84,6 @@ export class DagForwarder extends BusMember {
             throw new Error("DAG forwarder coordination authority is already bound")
         }
         this.coordinationAuthority = authority
-    }
-
-    private handleReplan(item: ReplanData): void {
-        this.emitReplan(
-            item.source,
-            item.reason,
-            item.addedStories,
-            item.removedStoryIds,
-            item.modifiedDeps,
-        )
     }
 
     private handleRuntimeReplan(item: RuntimeReplanAppliedData): void {

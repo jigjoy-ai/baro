@@ -26,7 +26,6 @@ const SLOW_PATTERNS = [
     "runner-protocol",
     "runner-helpers",
     "agent-collab",
-    "ab-evidence",
 ]
 
 function walk(dir) {

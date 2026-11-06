@@ -37,8 +37,7 @@ Source: [critic.ts](./critic.ts)
 ## Surgeon
 
 An adaptive DAG mutation participant. It watches terminal story failures
-and emits `Replan` events that the Conductor applies at the next level
-boundary. In the default deterministic mode it removes the failing story
+and emits `Replan` proposals that the Board applies as recovery decisions. In the default deterministic mode it removes the failing story
 so dependents either run with one fewer prerequisite or get
 cascade-removed. In LLM mode it shells out to `claude --print` with a
 compact PRD snapshot and the failure reason and asks for a structured
@@ -162,9 +161,9 @@ the BaroEvent.
 
 Source: [forwarders/token-usage.ts](./forwarders/token-usage.ts)
 
-`ProgressForwarder` mirrors Conductor level progress for the Rust TUI,
+`ProgressForwarder` mirrors Board level progress for the Rust TUI,
 which does not consume raw `ConductorState` events directly. It emits
-only while the conductor is running a level and both level ordinals are
+only while the Board is running a level and both level ordinals are
 available.
 
 - Subscribes to: `ConductorState`

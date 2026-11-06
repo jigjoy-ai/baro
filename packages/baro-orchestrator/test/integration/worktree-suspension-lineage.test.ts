@@ -83,7 +83,6 @@ beforeEach(async () => {
     }).prepare())
     mgr = new WorktreeManager(repo, gate, runId, {
         onLog: (l) => logs.push(l),
-        resolveConflictsWithTheirs: false,
         integrationRoot,
     })
 })
