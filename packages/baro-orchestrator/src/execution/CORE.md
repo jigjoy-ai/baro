@@ -6,19 +6,6 @@ canonical wire shapes live in [semantic-events.ts](../semantic-events.ts).
 Detailed authority, retry, runtime-DAG, and cost-learning contracts are in
 [collective-runtime.md](../../../../docs/collective-runtime.md).
 
-## Legacy core
-
-### Conductor
-
-Source: [conductor.ts](./conductor.ts)
-
-The legacy coordinator owns DAG levels, spawn slots, story retries/recovery
-boundaries, PRD persistence, and run completion. It reacts to
-`RunStartRequest`, self-ticks with `LevelComputeRequest`, launches
-`StorySpawnRequest`s, consumes `StoryResult`s, applies buffered `Replan`s at a
-level boundary, and eventually publishes `RunCompleted`. This remains the
-default path unless collective coordination is selected.
-
 ## Shared execution edge
 
 ### StoryFactory
@@ -26,8 +13,7 @@ default path unless collective coordination is selected.
 Source: [story-factory.ts](./story-factory.ts)
 
 StoryFactory resolves each story's tier or explicit backend/model route and
-launches the appropriate adapter in an isolated worktree. In legacy mode it
-consumes direct spawn requests. In collective mode it advertises a
+launches the appropriate adapter in an isolated worktree. It advertises a
 credential-free capability, bids on Board offers, accepts only a Broker lease,
 binds the exact dynamic result/terminal authority, and rejects stale
 run/lease/generation events. It also retains exact lease telemetry correlation
@@ -133,7 +119,7 @@ A platform without POSIX group + identity observation (or a Job Object)
 rejects these collective routes before spawning the provider.
 Those verdicts remain intentionally story-local; the strict collective
 GoalInvariantReviewer is the separate run-level composition check and does not
-change legacy or non-strict Critic behavior.
+change non-strict Critic behavior.
 Missing, stale, sandbox-blocked, or evaluator-unavailable evidence is
 inconclusive. AcceptanceGate first asks AgentTurnProjector for a bounded replay
 of the exact active lease/candidate, without another WorkOffer. Exhaustion
@@ -227,9 +213,8 @@ Source: [operator.ts](./operator.ts)
 
 Operator translates external commands into bus-safe actions. `redirect`
 publishes an `AgentTargetedMessage`; `converse` publishes
-`ConversationRequested`. Direct abort/shutdown callback hooks are a legacy-only
-adapter and orchestration rejects them in collective mode; collective control
-must cross a source-bound Mozaik semantic lane. Operator does not own leases,
+`ConversationRequested`. Abort/shutdown commands have no direct callback;
+control must cross a source-bound Mozaik semantic lane. Operator does not own leases,
 graph mutation, integration, or completion.
 
 ### DialogueAgent

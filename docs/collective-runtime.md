@@ -302,15 +302,14 @@ Progressive planning removes the complete-plan startup barrier for one narrow
 path. Enable it explicitly for a fresh headless Collective run:
 
 ```bash
-BARO_PROGRESSIVE_PLANNING=1 baro --headless --coordination collective --local-only \
+BARO_PROGRESSIVE_PLANNING=1 baro --headless --local-only \
   "Your goal"
 ```
 
-The switch is ignored outside headless `collective` coordination. On that
-path, version 1 rejects an opted-in resume or follow-up instead of silently
-changing its semantics. Without the opt-in, resume/follow-up and interactive
-runs, as well as every `legacy` run, retain the existing behavior of waiting
-for the complete Planner PRD before execution starts. This is an experimental
+The switch is ignored outside headless runs. On that path, version 1 rejects
+an opted-in resume or follow-up instead of silently changing its semantics.
+Without the opt-in, resume/follow-up and interactive runs retain the existing
+behavior of waiting for the complete Planner PRD before execution starts. This is an experimental
 local evaluation surface, not a production-readiness or benchmark claim.
 
 The fresh-run host first persists an empty bootstrap PRD with a correlated,
@@ -353,12 +352,8 @@ progressive host lifecycle they produce the complete PRD, which is admitted at
 `plan_complete`. Their story-execution capabilities are separate from this
 Planner limitation.
 
-In this document, `legacy` means the explicit compatibility engine in which a
-Conductor reacts to bus events and drives the already-complete DAG by levels.
-It remains useful for rollback and old-run comparison; it does not mean that
-its code or protocol is silently selected on a Collective failure. Progressive
-planning is Collective-only because its open-plan latch, durable fragment
-admission and scheduling authority live on the Board.
+Progressive planning's open-plan latch, durable fragment admission and
+scheduling authority live on the Board.
 
 This design sits directly on Mozaik without assigning domain authority to the
 bus. Mozaik provides the shared environment, typed event delivery and exact
@@ -528,9 +523,7 @@ accepted-goal phase, optional summary, and at most 24 complete correlated
 history records into an exact schema-v1 file capped at 128 KiB. The file is
 private and temporary, is bound again to the PRD session ID and `GoalEnvelope`
 before use, is not inherited by worker subprocesses, and is deleted as soon as
-the orchestrator exits. `legacy` coordination still uses the conversation-first
-front door and durable goal metadata, but intentionally omits this run-local
-Dialogue projection because legacy has no Dialogue participant.
+the orchestrator exits.
 
 This intentionally does not turn Dialogue into a central root coordinator. The
 provider process remains text-only and disposable; durable history and a bounded

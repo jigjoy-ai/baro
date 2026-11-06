@@ -12,7 +12,7 @@ does not invent a duplicate log line.
 
 | type | fields | source semantic event | consumer rendering |
 |---|---|---|---|
-| `replan` | `source, reason, added: [{id,title,depends_on}], removed: [id], rewired: [{id, depends_on}]` | authoritative `ReplanApplied` or `RuntimeReplanApplied` projection | DAG updates; "replanned" badge on affected stories; activity entry |
+| `replan` | `source, reason, added: [{id,title,depends_on}], removed: [id], rewired: [{id, depends_on}]` | authoritative `RuntimeReplanApplied` projection | DAG updates; "replanned" badge on affected stories; activity entry |
 | `intervention` | `id, source, action, reason` | `StoryIntervention` | "stalled → aborted" pill on the agent row; activity warn |
 | `story_merged` | `id, mode: "worktree"\|"shared-tree"` | `StoryMerged` | ✓ merged pill on the agent row |
 | `merge_failed` | `id, error` | `StoryMergeFailed` | ✗ merge-failed pill (worktree preserved) |
@@ -25,9 +25,8 @@ does not invent a duplicate log line.
 ## New semantic events (semantic-events.ts)
 
 - `RecoveryStarted { attempt: number, storyIds: string[] }` — wire type
-  `recovery_started`. Emitted by Conductor when `tryStartRecoveryLevel`
-  actually starts a recovery level (visibility; the recovery FLOW stays
-  hook-driven for now — see docs/semantic-events.md deferred list).
+  `recovery_started`. Emitted by the Board when it actually starts a recovery
+  level (visibility only).
 - `StoryRouted { storyId: string, backend: string, model: string }` — wire
   type `story_routed`. Emitted by StoryFactory right after `resolveStoryRoute`
   (replaces the stderr-only `[story-factory] S1 → backend:model` as the
@@ -37,9 +36,7 @@ does not invent a duplicate log line.
   stream. Only an authoritative, first-seen `Applied` decision is projected
   to the existing stdout `replan` shape, after durable graph commit. The
   projection's source is `agent:<storyId>@graph-v<commitVersion>`.
-- `ReplanApplied` has wire type `replan_applied`; the legacy Conductor emits
-  it only after applying and persisting a buffered proposal. Raw `Replan`
-  events never change projected TUI state.
+- Raw `Replan` events never change projected TUI state.
 
 There is deliberately no second runtime-specific TUI event. The Rust client
 applies the projected `replan` and rebuilds its DAG view immediately. Metrics
