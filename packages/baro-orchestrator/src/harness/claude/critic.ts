@@ -39,7 +39,11 @@ import {
     type OneShotCriticEvaluation,
     type OneShotCriticInvocationContext,
 } from "../one-shot/critic.js"
-import { VERDICT_SYSTEM_PROMPT, extractVerdictJson } from "../../acceptance/critic-verdict.js"
+import {
+    VERDICT_SYSTEM_PROMPT,
+    extractVerdictJson,
+    parseContractConflicts,
+} from "../../acceptance/critic-verdict.js"
 
 export { buildEvalPrompt } from "../../acceptance/critic-evidence.js"
 export {
@@ -192,7 +196,9 @@ export class Critic extends OneShotCritic {
                 verdict: "pass" | "fail"
                 reasoning: string
                 violated_criteria: string[]
+                contract_conflicts?: unknown
             }
+            const conflicts = parseContractConflicts(parsed.contract_conflicts)
 
             return {
                 status: "evaluated",
@@ -201,6 +207,7 @@ export class Critic extends OneShotCritic {
                 violatedCriteria: Array.isArray(parsed.violated_criteria)
                     ? parsed.violated_criteria
                     : [],
+                ...(conflicts.length > 0 ? { contractConflicts: conflicts } : {}),
                 telemetry,
             }
         } catch (err) {

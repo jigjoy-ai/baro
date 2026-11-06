@@ -25,6 +25,7 @@ const stream = [
     "not json",
     { ts: at(20), type: "init", stories: [] },
     { ts: at(25), type: "replan", added: [{ id: "S1" }, { id: "S2" }] },
+    { ts: at(26), type: "replan", reason: "contract transfer from S1: 1 criteria it could not meet as written", added: [] },
     { ts: at(30), type: "story_start", id: "S1" },
     { ts: at(31), type: "story_start", id: "S2" },
     { ts: at(40), type: "story_retry", id: "S2", attempt: 2 },
@@ -53,7 +54,8 @@ test("derives phase timings, cost and tokens from the event stream", () => {
     assert.equal(m.finalize_secs, 4)
     assert.equal(m.story_count, 2)
     assert.equal(m.retries, 1)
-    assert.equal(m.replans, 1)
+    assert.equal(m.replans, 2)
+    assert.equal(m.contract_transfers, 1)
     assert.deepEqual(m.critic_reviews, { total: 3, rejected: 1, stale_evidence: 1 })
     assert.equal(m.cost_usd, 1)
     assert.deepEqual(m.tokens, { input: 4000, cached_input: 2400, cache_write: 1600, output: 200 })

@@ -56,6 +56,7 @@ import { Critic } from "./harness/claude/critic.js"
 import {
     CriticCommandEvidenceCollector,
     PublishedNoteCollector,
+    ClaimedPathCollector,
     type CriticRepositoryTarget,
     type CriticEvidenceSource,
 } from "./acceptance/critic-evidence.js"
@@ -130,6 +131,7 @@ import { Supervisor } from "./execution/supervisor.js"
 import { resolveEffectiveParallel } from "./planning/domain/mode-enforcement.js"
 import { ALL_GATES } from "./execution/gate-registry.js"
 import { PrdFile, loadPrd, persistPrdPreserving } from "./prd.js"
+import { writeSurfaceOf } from "./planning/domain/dependency-evidence.js"
 import { PremiseAmendmentAuthority } from "./planning/application/premise-amendments.js"
 import { readAuthoritativeVerifyPlanOptions } from "./verification/prd-declared-tests.js"
 import { formatDeclaredBudgetEvidence } from "./verification/declared-test-budget.js"
@@ -1090,6 +1092,8 @@ export async function orchestrate(
         // over a run artifact stays judgeable instead of unfalsifiable.
         const publishedNotes = new PublishedNoteCollector()
         publishedNotes.join(env)
+        const claimedPaths = new ClaimedPathCollector(collaborationBridge)
+        claimedPaths.join(env)
         // A factual claim the repository refutes is withdrawn on evidence; the
         // decisions above it stand. The Critic reads the document fresh at
         // evaluation time, so an amendment reaches the very next verdict.
@@ -1125,6 +1129,17 @@ export async function orchestrate(
             commandEvidence: (storyId) =>
                 commandEvidence.snapshotForEvaluation(storyId),
             publishedNotes: (storyId) => publishedNotes.notesFor(storyId),
+            // Read fresh: a story's surface grows with every granted claim.
+            writeSurface: (storyId) => {
+                try {
+                    const story = loadPrd(config.prdPath).userStories.find(({ id }) => id === storyId)
+                    if (!story) return null
+                    const paths = [...new Set([...writeSurfaceOf(story), ...claimedPaths.pathsFor(storyId)])]
+                    return paths.length > 0 ? paths : null
+                } catch {
+                    return null
+                }
+            },
             // Same predicate the spawn gate and story shell use, so the judge
             // is bound by the perimeter rule the worker was bound by.
             hostRunsWholeTreeVerification: true,

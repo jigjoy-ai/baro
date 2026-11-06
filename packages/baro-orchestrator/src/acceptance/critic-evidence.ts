@@ -3,7 +3,7 @@ import { constants } from "node:fs"
 import { lstat, open, readlink, realpath } from "node:fs/promises"
 import { isAbsolute, relative, resolve, sep } from "node:path"
 
-import { CollaborationNote } from "../semantic-events.js"
+import { CollaborationNote, PathsClaimed } from "../semantic-events.js"
 import {
     FunctionCallItem,
     FunctionCallOutputItem,
@@ -19,6 +19,7 @@ import {
 import type { StoryOutcomeAuthority } from "../runtime/story-outcome-authority.js"
 import { emit } from "../tui-protocol.js"
 import { collectAltitudeFindings } from "./altitude-probe.js"
+import type { ContractConflict } from "./critic-verdict.js"
 import {
     altitudeActivityText,
     renderAltitudeEvidenceSection,
@@ -86,6 +87,14 @@ export interface CriticEvidenceSource {
      * structurally unable to observe it.
      */
     publishedNotes?(
+        agentId: string,
+    ): readonly string[] | null | Promise<readonly string[] | null>
+    /**
+     * The paths this story may change: its declared writes plus paths it
+     * claimed during the run. Lets the Critic tell a criterion the story
+     * failed from one only another story's files could satisfy.
+     */
+    writeSurface?(
         agentId: string,
     ): readonly string[] | null | Promise<readonly string[] | null>
     /**
@@ -208,6 +217,36 @@ export class PublishedNoteCollector extends BusMember {
             sourceAgentId,
             kept.slice(-this.maxNotesPerStory),
         )
+    }
+}
+
+/** Paths each story was granted at runtime, from the Board's claim decisions. */
+export class ClaimedPathCollector extends BusMember {
+    private readonly granted = new Map<string, Set<string>>()
+
+    constructor(private readonly authority?: BusMember) {
+        super()
+    }
+
+    pathsFor(storyId: string): readonly string[] {
+        return [...(this.granted.get(storyId) ?? [])]
+    }
+
+    override onExternalEvent(
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
+    ): void {
+        if (!PathsClaimed.is(event)) return
+        if (this.authority && source !== this.authority) return
+        const { storyId, decisions } = event.payload
+        if (typeof storyId !== "string" || !Array.isArray(decisions)) return
+        for (const decision of decisions) {
+            if (decision?.outcome !== "granted" && decision?.outcome !== "already_owned") continue
+            if (typeof decision.path !== "string") continue
+            const paths = this.granted.get(storyId) ?? new Set<string>()
+            paths.add(decision.path)
+            this.granted.set(storyId, paths)
+        }
     }
 }
 
@@ -881,13 +920,14 @@ export async function prepareCriticEvaluation(
     const beforeFingerprint = await repositoryFingerprintFor(agentId, source)
     // Read-only and independent, each failing closed on its own; the two
     // fingerprints around them still prove the repository held still.
-    const [commandEvidence, repositoryEvidence, decisionDocument, publishedNotes, altitude] =
+    const [commandEvidence, repositoryEvidence, decisionDocument, publishedNotes, altitude, writeSurface] =
         await Promise.all([
             commandEvidenceFor(agentId, source),
             repositoryEvidenceFor(agentId, source),
             decisionDocumentFor(source),
             publishedNotesFor(agentId, source),
             altitudeEvidenceFor(agentId, source),
+            writeSurfaceFor(agentId, source),
         ])
     const afterFingerprint = await repositoryFingerprintFor(agentId, source)
     const readinessIssues = source
@@ -920,6 +960,7 @@ export async function prepareCriticEvaluation(
             publishedNotes,
             source?.hostRunsWholeTreeVerification === true,
             altitude.section,
+            writeSurface,
         )
         offset += segmentCriteria.length
         return prompt
@@ -950,6 +991,7 @@ export interface SegmentVerdict {
     verdict: "pass" | "fail"
     reasoning: string
     violatedCriteria: string[]
+    contractConflicts?: ContractConflict[]
 }
 
 /**
@@ -975,6 +1017,13 @@ export function mergeSegmentVerdicts<T extends SegmentVerdict>(
     const violated = [
         ...new Set(decisive.flatMap(({ verdict }) => verdict.violatedCriteria)),
     ]
+    const conflicts = [
+        ...new Map(
+            verdicts
+                .flatMap((verdict) => verdict.contractConflicts ?? [])
+                .map((conflict) => [conflict.criterion, conflict] as const),
+        ).values(),
+    ]
     const reasoning = decisive.length > 0
         ? decisive
               .map(({ verdict, pass }) => `[pass ${pass}] ${verdict.reasoning}`)
@@ -986,6 +1035,7 @@ export function mergeSegmentVerdicts<T extends SegmentVerdict>(
         verdict: decisive.length > 0 ? ("fail" as const) : ("pass" as const),
         reasoning,
         violatedCriteria: violated,
+        ...(conflicts.length > 0 ? { contractConflicts: conflicts } : {}),
     }
 }
 
@@ -1020,6 +1070,7 @@ export function buildEvalPrompt(
     publishedNotes: readonly string[] = [],
     hostRunsWholeTreeVerification = false,
     altitudeSection: string | null = null,
+    writeSurface: readonly string[] | null = null,
 ): string {
     const criteriaList = renderCompleteAcceptanceContract(
         criteria,
@@ -1055,6 +1106,18 @@ export function buildEvalPrompt(
                       redactSensitiveText(decisionDocument),
                       MAX_DECISION_DOCUMENT_CHARS,
                   ),
+                  "",
+              ]
+            : []),
+        ...(writeSurface && writeSurface.length > 0
+            ? [
+                  "## Write surface",
+                  "This story may change only these paths (its declared writes plus any it claimed during the run):",
+                  ...writeSurface.slice(0, MAX_WRITE_SURFACE_PATHS).map((path) => `- ${path}`),
+                  ...(writeSurface.length > MAX_WRITE_SURFACE_PATHS
+                      ? [`- … ${writeSurface.length - MAX_WRITE_SURFACE_PATHS} more`]
+                      : []),
+                  "A criterion that can only be met by changing files outside this list is not this story's to meet: report it under contract_conflicts, never as a violation.",
                   "",
               ]
             : []),
@@ -1112,6 +1175,23 @@ export function buildEvalPrompt(
 
 /** Published notes are evidence, never instructions: they are agent-authored
  * text and the evidence policy above already treats them as untrusted. */
+const MAX_WRITE_SURFACE_PATHS = 60
+
+async function writeSurfaceFor(
+    agentId: string,
+    source?: CriticEvidenceSource,
+): Promise<readonly string[] | null> {
+    if (!source?.writeSurface) return null
+    try {
+        const paths = await source.writeSurface(agentId)
+        return Array.isArray(paths)
+            ? [...new Set(paths.filter((path) => typeof path === "string" && path.trim()))]
+            : null
+    } catch {
+        return null
+    }
+}
+
 async function publishedNotesFor(
     agentId: string,
     source?: CriticEvidenceSource,

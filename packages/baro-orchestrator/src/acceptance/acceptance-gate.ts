@@ -401,6 +401,13 @@ export class AcceptanceGate extends SerializedObserver {
                               critique.repositoryFingerprint,
                       }
                     : {}),
+                ...(critique.contractConflicts?.length
+                    ? {
+                          contractConflicts: critique.contractConflicts.map(
+                              (conflict) => ({ ...conflict }),
+                          ),
+                      }
+                    : {}),
             },
         })
         return true

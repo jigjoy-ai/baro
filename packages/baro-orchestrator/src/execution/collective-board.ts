@@ -43,7 +43,11 @@ import {
     VerificationGoalGate,
 } from "../verification/verification-goal-gate.js"
 import { envNonNegativeInt } from "../runtime/env-int.js"
-import { validatePrdArchitectureObligationCoverage } from "../planning/domain/architecture-obligation-contract.js"
+import {
+    architectureObligationsFromDecision,
+    validatePrdArchitectureObligationCoverage,
+} from "../planning/domain/architecture-obligation-contract.js"
+import type { ContractConflictData } from "../events/acceptance.js"
 import {
     defineSemanticEvent,
     ConductorState,
@@ -343,6 +347,8 @@ export class CollectiveBoard extends SerializedObserver {
 
     private readonly settledLeaseResults = new Set<string>()
     private readonly pendingQuality = new Map<string, StoryResultData>()
+    /** Criteria a passed story could not meet as written, moved on merge. */
+    private readonly pendingContractTransfers = new Map<string, readonly ContractConflictData[]>()
     private readonly durations = new Map<string, number>()
     private readonly dependencySuspensionDurationSecs = new Map<
         string,
@@ -1596,6 +1602,9 @@ export class CollectiveBoard extends SerializedObserver {
         ) return
         this.pendingQuality.delete(data.storyId)
         if (data.status === "passed") {
+            const conflicts = data.critique?.contractConflicts ?? []
+            if (conflicts.length > 0) this.pendingContractTransfers.set(data.storyId, conflicts)
+            else this.pendingContractTransfers.delete(data.storyId)
             this.requestIntegration(result, data)
             return
         }
@@ -1637,6 +1646,11 @@ export class CollectiveBoard extends SerializedObserver {
         const duration = this.durations.get(storyId) ?? 0
         this.prd = markStoryPassed(this.prd, storyId, duration)
         persistPrdPreserving(this.opts.prdPath, this.prd)
+        const conflicts = this.pendingContractTransfers.get(storyId)
+        if (conflicts) {
+            this.pendingContractTransfers.delete(storyId)
+            this.transferContractConflicts(storyId, conflicts)
+        }
         this.dependencySuspensionDurationSecs.delete(storyId)
         this.wave.pending.delete(storyId)
         addUnique(this.wave.passed, storyId)
@@ -2359,6 +2373,88 @@ export class CollectiveBoard extends SerializedObserver {
             if (this.wave) this.reconcileReadyStories()
             else this.scheduleNextWave()
         }
+    }
+
+    /**
+     * The Critic passed `sourceId` while reporting criteria it could not meet
+     * as written: they need files outside its write surface, or contradict
+     * another of its criteria. Revising it again cannot help, so once it has
+     * merged those criteria become a story of their own, with no write surface
+     * and the goal invariants their obligations carry. Idempotent per source
+     * and criteria, since a re-verification reports the same conflicts again.
+     */
+    private transferContractConflicts(
+        sourceId: string,
+        conflicts: readonly ContractConflictData[],
+    ): void {
+        if (!this.prd) return
+        const criteria = conflicts.map(({ criterion }) => criterion)
+        const id = `XFER-${createHash("sha256").update(`${sourceId}\n${criteria.join("\n")}`).digest("hex").slice(0, 12)}`
+        if (this.prd.userStories.some((story) => story.id === id)) return
+        const source = this.prd.userStories.find((story) => story.id === sourceId)
+        const obligations = architectureObligationsFromDecision(
+            this.prd.decisionDocument,
+            deriveGoalContract(this.prd.goalEnvelope),
+        )?.obligations ?? []
+        const invariantIds = [
+            ...new Set(
+                criteria.flatMap((criterion) =>
+                    obligations.find(({ id: obligationId }) => criterion.startsWith(`[${obligationId}]`))
+                        ?.invariantIds ?? [],
+                ),
+            ),
+        ]
+        const reasons = conflicts.map(({ criterion, reason }) => `- ${criterion}\n  Why ${sourceId} could not: ${reason}`)
+        const proposal: RuntimeReplanProposedData = {
+            runId: this.opts.runId,
+            proposalId: `${this.opts.runId}:contract-transfer:${id}`,
+            sourceStoryId: sourceId,
+            leaseId: `${this.opts.runId}:contract-transfer`,
+            generation: 0,
+            baseGraphVersion: this.runtimeReplans.graphVersion,
+            reason: `contract transfer from ${sourceId}: ${criteria.length} criteria it could not meet as written`,
+            mutation: {
+                addedStories: [
+                    {
+                        id,
+                        priority: source?.priority ?? 1,
+                        title: `Meet the criteria ${sourceId} could not`,
+                        description: [
+                            `Story ${sourceId} integrated without these acceptance criteria: meeting them needs files outside its write surface, or they contradicted another of its criteria. Meet each one, changing whichever files it needs.`,
+                            "",
+                            ...reasons,
+                        ].join("\n"),
+                        dependsOn: [],
+                        retries: 1,
+                        acceptance: criteria,
+                        tests: [...(source?.tests ?? [])],
+                        ...(invariantIds.length > 0 ? { goalInvariantIds: invariantIds } : {}),
+                    },
+                ],
+                removedStoryIds: [],
+                modifiedDeps: {},
+            },
+        }
+        const outcome = this.runtimeReplans.decide(proposal, {
+            active: true,
+            prd: this.prd,
+            immutableStoryIds: this.runtimeImmutableStoryIds(),
+            activeLease: undefined,
+            adaptationsSinceProgress: this.runtimeAdaptationsSinceProgress,
+            requireActiveLease: false,
+            storyAccounting: "policy",
+            maxAddedStories: 1,
+        })
+        this.emitGraphDecision(outcome.event)
+        if (!outcome.applied || !RuntimeReplanApplied.is(outcome.event)) {
+            process.stderr.write(
+                `[collective] contract transfer from ${sourceId} was not admitted; ` +
+                    `its criteria are left to the goal guardian and final verification\n`,
+            )
+            return
+        }
+        this.prd = outcome.applied.prd
+        this.noteHealingAction(this.wave?.ordinal ?? this.waveOrdinal)
     }
 
     /**

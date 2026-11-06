@@ -29,6 +29,7 @@ export function metrics(events, { startedAt = null } = {}) {
     }
     let retries = 0
     let replans = 0
+    let contractTransfers = 0
     const reviews = { total: 0, rejected: 0, stale_evidence: 0 }
     for (const e of timed) {
         if (e.type === "story_start") {
@@ -41,6 +42,7 @@ export function metrics(events, { startedAt = null } = {}) {
             retries += 1
         } else if (e.type === "replan") {
             replans += 1
+            if (typeof e.reason === "string" && e.reason.startsWith("contract transfer from ")) contractTransfers += 1
         } else if (e.type === "turn_review") {
             reviews.total += 1
             story(e.id).reviews += 1
@@ -87,6 +89,7 @@ export function metrics(events, { startedAt = null } = {}) {
         story_count: list.length,
         retries,
         replans,
+        contract_transfers: contractTransfers,
         // Present only for builds that emit turn_review (after 0.122.1).
         critic_reviews: reviews.total ? reviews : null,
         cost_usd: round(cost),
