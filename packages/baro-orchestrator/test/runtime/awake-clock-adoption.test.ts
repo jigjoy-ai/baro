@@ -23,7 +23,6 @@ const REPO_ROOT = path.resolve(PACKAGE_ROOT, "../..")
 const VERIFICATION_GATE = "src/verification/verification-goal-gate.ts"
 const EXEC_FILE_CLI = "src/harness/exec-file-cli.ts"
 const COLLECTIVE_BOARD = "src/execution/collective-board.ts"
-const CONDUCTOR = "src/execution/conductor.ts"
 const GOAL_REVIEWER = "src/goal/goal-invariant-reviewer.ts"
 const ARCHITECT_OPENAI = "src/planning/adapters/architect-openai.ts"
 
@@ -31,7 +30,6 @@ const ARCHITECT_OPENAI = "src/planning/adapters/architect-openai.ts"
 const ADOPTED_SOURCES = [
     ARCHITECT_OPENAI,
     COLLECTIVE_BOARD,
-    CONDUCTOR,
     VERIFICATION_GATE,
     GOAL_REVIEWER,
     "src/goal/goal-invariant-review-evidence.ts",
@@ -285,7 +283,6 @@ const REAL_TIMERS: ExecFileCliTimers = {
             [EXEC_FILE_CLI, "export interface ExecFileCliOptions", "options"],
             [ARCHITECT_OPENAI, "export interface RunArchitectOpenAIOptions", "opts"],
             [COLLECTIVE_BOARD, "export interface CollectiveBoardOptions", "opts"],
-            [CONDUCTOR, "export interface ConductorOptions", "opts"],
             [VERIFICATION_GATE, "export interface VerificationGoalGateOptions", "opts"],
         ] as const
 
@@ -355,7 +352,6 @@ const REAL_TIMERS: ExecFileCliTimers = {
             const SUITES: ReadonlyArray<readonly string[]> = [
                 ["test/architect-openai.test.ts"],
                 ["test/execution/collective-board.test.ts"],
-                ["test/execution/conductor.test.ts"],
                 ["test/verification/verification-goal-gate.test.ts"],
                 ["test/goal/goal-invariant-reviewer.test.ts"],
                 ["test/harness/exec-file-cli-awake-timeout.test.ts", "test/harness/exec-file-cli.test.ts"],
@@ -377,14 +373,12 @@ const REAL_TIMERS: ExecFileCliTimers = {
 
     describe("no adopted deadline rides a single timer delay", () => {
         it("clamps board re-arms with AWAKE_SPLIT_MAX_DELAY_MS, not the platform ceiling", () => {
-            for (const file of [COLLECTIVE_BOARD, CONDUCTOR]) {
-                const hits = scan(file, /2_147_483_647/u)
-                assert.deepEqual(
-                    hits,
-                    [],
-                    `${file}: the platform timer ceiling is replaced by AWAKE_SPLIT_MAX_DELAY_MS:${report(hits)}`,
-                )
-            }
+            const hits = scan(COLLECTIVE_BOARD, /2_147_483_647/u)
+            assert.deepEqual(
+                hits,
+                [],
+                `${COLLECTIVE_BOARD}: the platform timer ceiling is replaced by AWAKE_SPLIT_MAX_DELAY_MS:${report(hits)}`,
+            )
             const board = stripComments(readPackageFile(COLLECTIVE_BOARD))
             assert.match(
                 blockAfter(board, "private armSoftDeadlineTimer(", COLLECTIVE_BOARD),
