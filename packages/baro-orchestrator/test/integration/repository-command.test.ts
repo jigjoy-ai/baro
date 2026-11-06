@@ -261,14 +261,12 @@ if (args[0] === "rev-parse" && args[1] === "HEAD") {
                 }
                 const factory = new StoryFactory({
                     cwd: repo,
-                    coordinationMode: "collective",
                     runId,
                     workerId: "worker-timeout",
                     leaseAuthority: broker,
                     offerAuthority: board,
                     outcomeAuthority,
                     worktrees: manager,
-                    requireWorktree: true,
                     executor,
                 })
                 const env = joinWithCapture(factory)

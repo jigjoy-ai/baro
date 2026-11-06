@@ -1556,10 +1556,8 @@ export async function orchestrate(
     // are ordered behind the lease that authorized them.
     const factoryBase = {
         cwd: repoRoot,
-        coordinationMode: "collective",
         runId,
         worktrees: worktrees ?? undefined,
-        requireWorktree: worktrees !== null,
         commitGate,
         collaboration: {
             commandPath: collaborationConfig.commandPath,
