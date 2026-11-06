@@ -1,0 +1,62 @@
+{
+  "label": "v0.122.1",
+  "baro": "npx --yes baro-ai@0.122.1",
+  "model": "sonnet",
+  "cases": {
+    "single-route": {
+      "success": true,
+      "verification": "passed",
+      "abort_reason": null,
+      "total_secs": 230.5,
+      "architect_secs": 44.1,
+      "to_first_story_secs": 120.4,
+      "stories_secs": 90.9,
+      "finalize_secs": 19.3,
+      "story_count": 1,
+      "retries": 0,
+      "replans": 1,
+      "cost_usd": 0.6436,
+      "tokens": {
+        "input": 373527,
+        "cached_input": 291667,
+        "cache_write": 81824,
+        "output": 12764
+      },
+      "cache_hit_ratio": 0.7808,
+      "phases": {
+        "architect": {
+          "calls": 3,
+          "cost_usd": 0.0496,
+          "model_secs": 20
+        },
+        "planner": {
+          "calls": 1,
+          "cost_usd": 0.1105,
+          "model_secs": 20
+        },
+        "story": {
+          "calls": 2,
+          "cost_usd": 0.3601,
+          "model_secs": 45
+        },
+        "critic": {
+          "calls": 2,
+          "cost_usd": 0.1234,
+          "model_secs": 22
+        }
+      },
+      "stories": [
+        {
+          "id": "S1",
+          "secs": 90.9,
+          "attempts": 1,
+          "cost_usd": 0.4835
+        }
+      ],
+      "wall_secs": 231.3,
+      "exit_code": 0,
+      "timed_out": false,
+      "ran_at": "2026-11-06T17:16:42.597Z"
+    }
+  }
+}

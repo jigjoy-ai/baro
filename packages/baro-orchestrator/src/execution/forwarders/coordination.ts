@@ -4,6 +4,7 @@ import { BusMember } from "../../runtime/coordination.js"
 import {
     Coordination,
     CoordinationModeSelected,
+    Critique,
     CollaborationNote,
     PeerHelpRequested,
     RunVerificationCompleted,
@@ -65,6 +66,14 @@ export class CoordinationForwarder extends BusMember {
         if (Coordination.is(event)) {
             if (!this.matchesCollective(source, "coordination")) return
             this.handleCoordination(event.payload)
+            return
+        }
+        if (Critique.is(event)) {
+            const critic = this.collectiveAuthorities?.critique
+            if (!critic || source !== critic) return
+            // A verdict outside an active lease is a replay, not this run's turn.
+            if (!this.leases.hasActive(event.payload.agentId, this.collectiveAuthorities?.runId)) return
+            this.handleTurnReview(event.payload)
             return
         }
         if (StoryQualityCompleted.is(event)) {
@@ -348,6 +357,19 @@ export class CoordinationForwarder extends BusMember {
         })
     }
 
+    private handleTurnReview(item: CritiqueData): void {
+        emit({
+            type: "turn_review",
+            id: item.agentId,
+            turn: item.turn,
+            status: item.status ?? "evaluated",
+            verdict: item.verdict,
+            reasoning: item.reasoning,
+            violated: [...item.violatedCriteria],
+            ...(item.staleCommands?.length ? { stale_commands: [...item.staleCommands] } : {}),
+        })
+    }
+
     private handleCritique(item: CritiqueData): void {
         emit({
             type: "critique",
@@ -375,5 +397,7 @@ export interface CollectiveCoordinationAuthorities {
     coordination?: BusMember
     /** AcceptanceGate owns the lease-correlated final critique projection. */
     quality?: BusMember
+    /** The Critic's per-turn verdicts, rejections included, become `turn_review`. */
+    critique?: BusMember
     intervention?: BusMember
 }

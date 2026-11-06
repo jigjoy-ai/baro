@@ -207,6 +207,17 @@ export type BaroEvent =
           reasoning: string
           violated: string[]
       }
+    /** One Critic verdict on one story turn, rejections included; `critique` is the final outcome. */
+    | {
+          type: "turn_review"
+          id: string
+          turn: number
+          status: "evaluated" | "inconclusive"
+          verdict: "pass" | "fail"
+          reasoning: string
+          violated: string[]
+          stale_commands?: string[]
+      }
     | {
           type: "conversation_request"
           message_id: string
