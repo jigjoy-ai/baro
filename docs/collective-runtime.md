@@ -321,6 +321,18 @@ incidents do not consume either counter. Runtime mutation also has an overall
 counters prevent accidental cross-charging; they do not by themselves
 guarantee that one lane cannot consume wall-clock time.
 
+## Architect fast path
+
+In `--mode auto` the intake sizes an accepted goal before the Architect runs.
+When the model (not the heuristic fallback) answers `focused` with
+`maxStories: 1` and confidence of at least 0.85, the goal goes to the Planner
+without an Architect pass, keeping the conversation's repository brief; that
+story owns every goal invariant, and Critic and Surgeon still review it. The
+stream carries `architect_skipped` with the intake's reason. Any other
+contract, a fixed `--mode`, `--confirm-mode`, or
+`BARO_ARCHITECT_FAST_PATH=0` keeps the Architect. In `bench/`, a one-route
+goal went from 231 s and $0.64 to 146 s and $0.18.
+
 ## Progressive planning (experimental opt-in)
 
 Progressive planning removes the complete-plan startup barrier for one narrow
