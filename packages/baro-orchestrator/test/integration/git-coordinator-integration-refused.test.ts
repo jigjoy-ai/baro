@@ -26,7 +26,6 @@ function coordinatorFor(dir: string, worktrees: WorktreeManager) {
         gitGate: new GitGate(),
         worktrees,
         emitTui: false,
-        eventDriven: true,
         runId: "run-refused",
         push: false,
     })

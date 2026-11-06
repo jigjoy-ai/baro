@@ -61,7 +61,6 @@ describe("GitCoordinator", () => {
                 gitGate: new GitGate(),
                 worktrees,
                 emitTui: false,
-                eventDriven: true,
                 runId: "run-missing-seal",
                 push: false,
             })
@@ -120,7 +119,6 @@ describe("GitCoordinator", () => {
                 gitGate: new GitGate(),
                 worktrees,
                 emitTui: false,
-                eventDriven: true,
                 runId: "run-unbound",
                 push: false,
             })
@@ -176,7 +174,6 @@ describe("GitCoordinator", () => {
                 gitGate: new GitGate(),
                 worktrees,
                 emitTui: false,
-                eventDriven: true,
                 runId: "run-authority",
                 push: false,
             })
@@ -253,7 +250,6 @@ describe("GitCoordinator", () => {
                 gitGate: new GitGate(),
                 worktrees: null,
                 emitTui: false,
-                eventDriven: true,
                 runId: "run-push-failure",
                 push: true,
             })
@@ -296,7 +292,6 @@ describe("GitCoordinator", () => {
                 gitGate: new GitGate(),
                 worktrees,
                 emitTui: false,
-                eventDriven: true,
                 runId: "run-cleanup",
                 push: false,
             })
@@ -373,7 +368,6 @@ describe("GitCoordinator", () => {
                 gitGate: new GitGate(),
                 worktrees,
                 emitTui: false,
-                eventDriven: true,
                 runId: "run-preserve",
                 push: false,
             })
@@ -449,7 +443,6 @@ describe("GitCoordinator", () => {
                 gitGate: new GitGate(),
                 worktrees,
                 emitTui: false,
-                eventDriven: true,
                 runId: "run-retained",
                 push: false,
             })
@@ -500,7 +493,6 @@ describe("a merge the machine killed, not the repository", () => {
             gitGate: new GitGate(),
             worktrees,
             emitTui: false,
-            eventDriven: true,
             runId: "run-killed-merge",
             push: false,
             mergeRetryDelayMs: 1,
@@ -625,7 +617,6 @@ describe("GitCoordinator prepareRun roots", () => {
             gitGate: new GitGate(),
             worktrees: null,
             emitTui: false,
-            eventDriven: true,
             runId: "run-prepare",
             push: false,
         })

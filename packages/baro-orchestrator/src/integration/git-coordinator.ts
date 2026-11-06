@@ -1,10 +1,7 @@
 /**
  * GitCoordinator — owns the per-story git side effects (worktree merge-back,
  * shared-tree reconcile, pushes, cleanup) and reports them on the bus as
- * StoryMerged / StoryMergeFailed.
- *
- * Legacy mode calls the same operations through hooks. Collective mode
- * performs the lifecycle entirely in response to semantic events.
+ * StoryMerged / StoryMergeFailed, entirely in response to semantic events.
  */
 
 import {
@@ -67,8 +64,6 @@ export interface GitCoordinatorOptions {
     worktrees: WorktreeManager | null
     /** Mirror progress/diffs to the TUI protocol. Default: true. */
     emitTui?: boolean
-    /** Subscribe to collective lifecycle events instead of direct hooks. */
-    eventDriven?: boolean
     runId?: string
     prdPath?: string
     /** Push commits to the configured remote. Default true. */
@@ -142,25 +137,18 @@ export class GitCoordinator extends SerializedObserver {
         return this.preparedBaseSha
     }
 
-    protected override async handleEvent(
-        context: SerializedEventContext,
-    ): Promise<void> {
-        if (!this.opts.eventDriven) return
-        await this.handleDomainEvent(context)
-    }
-
     protected override onManagedFailure(failure: SerializedObserverFailure): void {
         process.stderr.write(`[git-coordinator] ${failure.error.stack ?? failure.error.message}\n`)
     }
 
-    private async handleDomainEvent(context: SerializedEventContext): Promise<void> {
+    protected override async handleEvent(context: SerializedEventContext): Promise<void> {
         const { event, source } = context
         const runId = this.opts.runId
         if (!runId) return
         if (WorkLeaseGranted.is(event) && event.payload.runId === runId) {
-            // Event-driven mode is collective-only. Authorities are bound
-            // after the Board/Broker objects are constructed, so the interval
-            // between join and binding must deny rather than ambiently trust.
+            // Authorities are bound after the Board/Broker objects are
+            // constructed, so the interval between join and binding must deny
+            // rather than ambiently trust.
             if (!this.leaseAuthority || source !== this.leaseAuthority) return
             this.activeLeases.set(event.payload.request.storyId, {
                 leaseId: event.payload.leaseId,
@@ -432,7 +420,7 @@ export class GitCoordinator extends SerializedObserver {
         }
     }
 
-    async onStoryPassed(
+    private async onStoryPassed(
         storyId: string,
         correlation?: LeaseCorrelation,
         requestedSeal?: CandidateSealRequest,
@@ -443,10 +431,6 @@ export class GitCoordinator extends SerializedObserver {
         // Run-branch HEAD before this story merges, so we can diff exactly
         // what the story added once merge-back lands.
         const beforeMerge = emitTui ? await getHeadSha(integrationRoot) : null
-        // Merge-back happens on the critical path (fast, local) so the next
-        // DAG level sees it. mergeBack returns false when the story had no
-        // worktree — that story still needs the shared-tree reconciliation
-        // below.
         if (worktrees) {
             const candidateSeal = this.candidateSealFor(
                 storyId,
@@ -565,28 +549,24 @@ export class GitCoordinator extends SerializedObserver {
                 }
                 return
             }
-            if (this.opts.eventDriven) {
-                this.emitIntegrationRefused({
+            this.emitIntegrationRefused({
+                storyId,
+                runId: correlation?.runId ?? null,
+                leaseId: correlation?.leaseId ?? null,
+                invariant: "worktree_missing",
+                detail: `isolated worktree state missing for ${storyId}`,
+                branch: null,
+                retryable: false,
+                recoveryRef: null,
+            })
+            this.emitBus(
+                StoryMergeFailed.create({
                     storyId,
-                    runId: correlation?.runId ?? null,
-                    leaseId: correlation?.leaseId ?? null,
-                    invariant: "worktree_missing",
-                    detail: `isolated worktree state missing for ${storyId}`,
-                    branch: null,
-                    retryable: false,
-                    recoveryRef: null,
-                })
-                this.emitBus(
-                    StoryMergeFailed.create({
-                        storyId,
-                        error: `isolated worktree state missing for ${storyId}`,
-                        ...correlation,
-                    }),
-                )
-                return
-            }
-            // merged === false → shared-tree fallback; reconcile + push like
-            // the non-worktree path below.
+                    error: `isolated worktree state missing for ${storyId}`,
+                    ...correlation,
+                }),
+            )
+            return
         }
         if (this.opts.push ?? true) {
             await safePullRebase(integrationRoot, log, gitGate)
@@ -617,10 +597,6 @@ export class GitCoordinator extends SerializedObserver {
         )
     }
 
-    async onStoryFailed(storyId: string): Promise<void> {
-        await this.opts.worktrees?.cleanup(storyId)
-    }
-
     private async cleanupFailedStory(
         storyId: string,
         preserveForRecovery: boolean,
@@ -635,10 +611,9 @@ export class GitCoordinator extends SerializedObserver {
 
     /**
      * Drain detached pushes and do the single post-run push for all worktree
-     * merge-backs. Call after conductor.done, before the Finalizer needs the
-     * remote branch complete.
+     * merge-backs, before the Finalizer needs the remote branch complete.
      */
-    async finish(): Promise<void> {
+    private async finish(): Promise<void> {
         await Promise.allSettled(this.storyPushes)
         if (!(this.opts.push ?? true)) return
         if (!this.worktreePushNeeded) return
