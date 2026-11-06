@@ -338,8 +338,8 @@ export interface OrchestrateConfig {
      */
     intraLevelDelaySecs?: number
     /**
-     * Run each story in its own git worktree. Default: true when git
-     * lifecycle is on; false keeps the shared-tree behaviour.
+     * Run each story in its own git worktree. Default: true; a git run
+     * with worktrees disabled is refused.
      */
     withWorktrees?: boolean
     /**
@@ -1459,9 +1459,7 @@ export async function orchestrate(
         goalInvariantReviewer.setRequestAuthority(goalGuardian)
         goalGuardian.setAggregateReviewAuthority(goalInvariantReviewer)
     }
-    if (collaborationBridge) {
-        goalGuardian.setChallengeAuthority(collaborationBridge)
-    }
+    goalGuardian.setChallengeAuthority(collaborationBridge)
     const board = collectiveBoard = new CollectiveBoard({
         runId,
         prdPath: config.prdPath,
@@ -1479,12 +1477,12 @@ export async function orchestrate(
         verifierAuthority: runVerifier,
         goalCompletionAuthority: goalGuardian,
         recoveryAuthority: surgeon ?? undefined,
-        discoveryAuthority: collaborationBridge ?? undefined,
-        dependencyAuthority: collaborationBridge ?? undefined,
+        discoveryAuthority: collaborationBridge,
+        dependencyAuthority: collaborationBridge,
         // Partial work may be checkpointed only when every story owns an
-        // isolated worktree. Shared-tree/non-git runs reject suspension.
+        // isolated worktree. Non-git runs reject suspension.
         dependencySuspensionEnabled: worktrees !== null,
-        runtimeReplanAuthority: collaborationBridge ?? undefined,
+        runtimeReplanAuthority: collaborationBridge,
         progressivePlanningId: config.progressivePlanningId,
         planningAuthority: planningFeed ?? undefined,
         contextAuthority: workContextProvider ?? undefined,
@@ -1522,8 +1520,8 @@ export async function orchestrate(
     gitCoordinator?.setLeaseAuthority(leaseBroker)
     localRepositoryAgent?.setRequestAuthority(board)
     workContextProvider?.setRequestAuthority(board)
-    collaborationBridge?.setLeaseAuthority(leaseBroker)
-    collaborationBridge?.setDecisionAuthority(board)
+    collaborationBridge.setLeaseAuthority(leaseBroker)
+    collaborationBridge.setDecisionAuthority(board)
     librarian?.setLeaseAuthority(leaseBroker)
     criticTargetRegistry?.setRuntimeReplanAuthority(board)
     dagForwarder?.setRuntimeReplanAuthority(board)
@@ -1657,7 +1655,7 @@ export async function orchestrate(
                 qualityAuthority: acceptanceGate ?? undefined,
                 repositoryAuthority: repositoryAuthority ?? undefined,
                 verificationAuthority: runVerifier ?? undefined,
-                collaborationAuthority: collaborationBridge ?? undefined,
+                collaborationAuthority: collaborationBridge,
             },
             conversationContext,
             timeoutMs: config.dialogueTimeoutMs,
@@ -1676,7 +1674,7 @@ export async function orchestrate(
     // them to the recipient's current run/lease/generation. Workers use their
     // lease-bound loopback capability, while Critic compatibility messages and
     // arbitrary extra participants deliberately remain outside this set.
-    collaborationBridge?.setMessageIntentAuthorities([
+    collaborationBridge.setMessageIntentAuthorities([
         operator,
         ...(librarian instanceof Librarian ? [librarian] : []),
         ...(dialogueAgent ? [dialogueAgent] : []),
@@ -1750,7 +1748,7 @@ export async function orchestrate(
 
     // Joining starts the loopback listener eagerly, but this explicit barrier
     // makes a usable capability broker a precondition of collective RunStart.
-    await collaborationBridge?.ready()
+    await collaborationBridge.ready()
     env.publish(
         operator,
         RunStartRequest.create({ reason: "orchestrate" }),
@@ -1920,7 +1918,7 @@ export async function orchestrate(
     // audit log before this function returns.
     if (acceptanceGate) await acceptanceGate.idle()
     if (surgeon) await surgeon.idle()
-    if (collaborationBridge) await collaborationBridge.idle()
+    await collaborationBridge.idle()
     if (workContextProvider) await workContextProvider.idle()
     await reconcileGatewayBilling()
     for (const storyFactory of storyFactories) {
@@ -1952,8 +1950,7 @@ export async function orchestrate(
         filesModified = stats.modified
         totalCommits = commitCount
 
-        // Full run diff as a safety net for the Changes view (per-story diffs
-        // can be missed on the shared-tree fallback). The TUI dedupes files
+        // Full run diff as a safety net for the Changes view. The TUI dedupes files
         // by path, so this is harmless when they already landed.
         if (emitTui) {
             const runDiff = await getDiff(integrationRoot, baseSha, "HEAD")
