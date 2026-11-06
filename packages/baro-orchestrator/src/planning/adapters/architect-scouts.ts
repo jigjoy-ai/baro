@@ -15,6 +15,7 @@ import { execFileCli } from "../../harness/exec-file-cli.js"
 import { harnessChildEnvironment } from "../../harness/environment.js"
 import { llmIdleTimeoutMs } from "../../harness/liveness.js"
 import { ClaudeStreamResultCollector } from "../../harness/claude/stream-result.js"
+import { claudeReadPermissionArgs } from "../../harness/claude/read-only.js"
 import { extractModelJsonObject } from "../../model-json.js"
 import type { GoalEnvelope } from "../../conversation/session/conversation-contract.js"
 
@@ -200,6 +201,7 @@ export async function runResearchQuestionRound(
             JSON.stringify(ARCHITECT_RESEARCH_QUESTIONS_JSON_SCHEMA),
             "--tools",
             "Read,Glob,Grep",
+            ...claudeReadPermissionArgs(),
             "--safe-mode",
             "--disable-slash-commands",
             "--strict-mcp-config",

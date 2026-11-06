@@ -104,6 +104,10 @@ describe("run-architect ArchitectOutcomeV1 mode", () => {
             const argv = readJson<string[]>(capture)
             assert.equal(valueAfter(argv, "--tools"), "Read,Glob,Grep")
             assert.equal(valueAfter(argv, "--permission-mode"), "dontAsk")
+            // dontAsk refuses reads outside the checkout unless they are
+            // approved; the run-4 architect could not read a symlinked SDK.
+            assert.equal(valueAfter(argv, "--allowedTools"), "Read,Glob,Grep")
+            assert.match(valueAfter(argv, "--disallowedTools"), /Read\(~\/\.ssh\/\*\*\)/u)
             assert.ok(argv.includes("--safe-mode"))
             assert.ok(argv.includes("--no-session-persistence"))
             assert.ok(argv.includes("--json-schema"))

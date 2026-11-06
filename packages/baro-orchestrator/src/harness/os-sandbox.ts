@@ -21,7 +21,8 @@ export type ConfinedSpawn =
     | { binary: string; args: string[]; env: Record<string, string> }
     | { refusal: string }
 
-const CREDENTIAL_READ_DENY = [
+/** Credential stores no story or read-only role may read, relative to home. */
+export const CREDENTIAL_READ_DENY: readonly string[] = [
     ".ssh",
     ".aws",
     ".gnupg",

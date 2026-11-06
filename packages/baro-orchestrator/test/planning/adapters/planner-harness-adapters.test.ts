@@ -163,8 +163,10 @@ describe("subscription planner progressive harness adapters", () => {
                         "--setting-sources",
                         "--disable-slash-commands",
                         "--no-session-persistence",
-                        "--allowed-tools",
+                        "--allowedTools",
+                        "--disallowedTools",
                     ]) assert.ok(argv.includes(flag), `missing Claude flag ${flag}`)
+                    assert.match(argv[argv.indexOf("--allowedTools") + 1]!, /^Read,Glob,Grep,mcp__/u)
                     assert.equal(argv.includes("--safe-mode"), false)
                     const settingSources = argv.indexOf("--setting-sources")
                     assert.equal(argv[settingSources + 1], "")
