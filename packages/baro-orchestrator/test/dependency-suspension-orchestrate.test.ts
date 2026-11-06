@@ -19,6 +19,7 @@ import {
     type StorySpawnRequestData,
 } from "../src/semantic-events.js"
 import { withTempDir } from "./execution/helpers.js"
+import { worktreeLeafName } from "../src/integration/integration-worktree.js"
 import {
     removeWorktreeRun,
     uniqueRunId,
@@ -127,7 +128,7 @@ describe("dependency suspension orchestration", () => {
             git(dir, ["commit", "-m", "base"])
 
             const runId = uniqueRunId("dependency-timeout")
-            const worktreePath = join(worktreeRunRoot(runId), "S1")
+            const worktreePath = join(worktreeRunRoot(runId), "S1", worktreeLeafName(dir))
             const prdPath = join(dir, "prd.json")
             const auditPath = join(dir, "audit.jsonl")
             writeFileSync(prdPath, JSON.stringify(testPrd(), null, 2) + "\n")
@@ -197,7 +198,7 @@ describe("dependency suspension orchestration", () => {
             git(dir, ["commit", "-m", "base"])
 
             const runId = uniqueRunId("terminal-uncertified")
-            const worktreePath = join(worktreeRunRoot(runId), "S1")
+            const worktreePath = join(worktreeRunRoot(runId), "S1", worktreeLeafName(dir))
             const prdPath = join(dir, "prd.json")
             const auditPath = join(dir, "audit.jsonl")
             const prd = testPrd()
