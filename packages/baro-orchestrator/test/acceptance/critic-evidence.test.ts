@@ -1553,6 +1553,38 @@ function git(cwd: string, ...args: string[]): string {
     return execFileSync("git", args, { cwd, encoding: "utf8" })
 }
 
+describe("Critic evidence preparation", () => {
+    it("gathers independent evidence concurrently, not one source after another", async () => {
+        let notesStarted!: () => void
+        const notesRequested = new Promise<void>((resolve) => { notesStarted = resolve })
+        const preparation = await prepareCriticEvaluation(
+            ["criterion"],
+            "output",
+            "agent-a",
+            {
+                resolveRepositoryTarget: () => null,
+                // Run one after another, the document read would finish before
+                // the notes are requested, so this wait would time out.
+                decisionDocument: async () => {
+                    await Promise.race([
+                        notesRequested,
+                        new Promise((_resolve, reject) => setTimeout(
+                            () => reject(new Error("evidence sources ran one after another")),
+                            2_000,
+                        )),
+                    ])
+                    return "Keep the public API additive."
+                },
+                publishedNotes: () => {
+                    notesStarted()
+                    return ["note from a peer"]
+                },
+            },
+        )
+        assert.match(preparation.prompts[0]!, /Keep the public API additive/)
+    })
+})
+
 describe("whitespace findings are evidence, not an incident", () => {
     // A live run lost story S4 to "Repository evidence collection failed
     // closed: git diff --check <base> failed with exit 2: new blank line at

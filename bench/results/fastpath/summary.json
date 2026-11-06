@@ -1,0 +1,194 @@
+{
+  "label": "fastpath",
+  "baro": "/Users/miodrag.todorovic/.baro/local-v4/baro",
+  "model": "sonnet",
+  "cases": {
+    "single-route": {
+      "success": true,
+      "verification": "passed",
+      "abort_reason": null,
+      "total_secs": 145.2,
+      "architect_secs": null,
+      "to_first_story_secs": 68.6,
+      "stories_secs": 58.4,
+      "finalize_secs": 18.2,
+      "story_count": 1,
+      "retries": 0,
+      "replans": 1,
+      "critic_reviews": {
+        "total": 1,
+        "rejected": 0,
+        "stale_evidence": 0
+      },
+      "cost_usd": 0.1764,
+      "tokens": {
+        "input": 183624,
+        "cached_input": 155656,
+        "cache_write": 27946,
+        "output": 4902
+      },
+      "cache_hit_ratio": 0.8477,
+      "phases": {
+        "planner": {
+          "calls": 1,
+          "cost_usd": 0.0515,
+          "model_secs": 32
+        },
+        "story": {
+          "calls": 1,
+          "cost_usd": 0.0981,
+          "model_secs": 36
+        },
+        "critic": {
+          "calls": 1,
+          "cost_usd": 0.0267,
+          "model_secs": 11
+        }
+      },
+      "stories": [
+        {
+          "id": "S1",
+          "secs": 58.4,
+          "attempts": 1,
+          "reviews": 1,
+          "cost_usd": 0.1249
+        }
+      ],
+      "wall_secs": 145.6,
+      "exit_code": 0,
+      "timed_out": false,
+      "ran_at": "2026-11-06T18:11:06.533Z"
+    },
+    "bugfix": {
+      "success": true,
+      "verification": "passed",
+      "abort_reason": null,
+      "total_secs": 164.3,
+      "architect_secs": null,
+      "to_first_story_secs": 71.3,
+      "stories_secs": 67.9,
+      "finalize_secs": 25.1,
+      "story_count": 1,
+      "retries": 0,
+      "replans": 1,
+      "critic_reviews": {
+        "total": 1,
+        "rejected": 0,
+        "stale_evidence": 0
+      },
+      "cost_usd": 0.145,
+      "tokens": {
+        "input": 251528,
+        "cached_input": 228979,
+        "cache_write": 22521,
+        "output": 3196
+      },
+      "cache_hit_ratio": 0.9104,
+      "phases": {
+        "planner": {
+          "calls": 1,
+          "cost_usd": 0.0245,
+          "model_secs": 11
+        },
+        "story": {
+          "calls": 1,
+          "cost_usd": 0.0997,
+          "model_secs": 47
+        },
+        "critic": {
+          "calls": 1,
+          "cost_usd": 0.0208,
+          "model_secs": 6
+        }
+      },
+      "stories": [
+        {
+          "id": "S1",
+          "secs": 67.9,
+          "attempts": 1,
+          "reviews": 1,
+          "cost_usd": 0.1205
+        }
+      ],
+      "wall_secs": 164.8,
+      "exit_code": 0,
+      "timed_out": false,
+      "ran_at": "2026-11-06T18:13:32.744Z"
+    },
+    "shared-file": {
+      "success": true,
+      "verification": "passed",
+      "abort_reason": null,
+      "total_secs": 453.8,
+      "architect_secs": 117.9,
+      "to_first_story_secs": 231.5,
+      "stories_secs": 196.6,
+      "finalize_secs": 25.7,
+      "story_count": 3,
+      "retries": 0,
+      "replans": 2,
+      "critic_reviews": {
+        "total": 5,
+        "rejected": 1,
+        "stale_evidence": 0
+      },
+      "cost_usd": 1.8428,
+      "tokens": {
+        "input": 1022459,
+        "cached_input": 769686,
+        "cache_write": 252701,
+        "output": 38063
+      },
+      "cache_hit_ratio": 0.7528,
+      "phases": {
+        "architect": {
+          "calls": 5,
+          "cost_usd": 0.1672,
+          "model_secs": 63
+        },
+        "planner": {
+          "calls": 1,
+          "cost_usd": 0.2446,
+          "model_secs": 62
+        },
+        "story": {
+          "calls": 5,
+          "cost_usd": 0.9959,
+          "model_secs": 156
+        },
+        "critic": {
+          "calls": 5,
+          "cost_usd": 0.4351,
+          "model_secs": 44
+        }
+      },
+      "stories": [
+        {
+          "id": "S1",
+          "secs": 115.9,
+          "attempts": 1,
+          "reviews": 3,
+          "cost_usd": 0.8381
+        },
+        {
+          "id": "S2",
+          "secs": 80.3,
+          "attempts": 1,
+          "reviews": 1,
+          "cost_usd": 0.284
+        },
+        {
+          "id": "S3",
+          "secs": 104.8,
+          "attempts": 2,
+          "reviews": 1,
+          "cost_usd": 0.3089
+        }
+      ],
+      "wall_secs": 454.4,
+      "exit_code": 0,
+      "timed_out": false,
+      "ran_at": "2026-11-06T18:16:17.959Z"
+    }
+  }
+}
