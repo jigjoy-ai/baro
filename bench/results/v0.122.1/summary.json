@@ -57,6 +57,256 @@
       "exit_code": 0,
       "timed_out": false,
       "ran_at": "2026-11-06T17:16:42.597Z"
+    },
+    "bugfix": {
+      "success": true,
+      "verification": "passed",
+      "abort_reason": null,
+      "total_secs": 298,
+      "architect_secs": 55.5,
+      "to_first_story_secs": 129.7,
+      "stories_secs": 140.4,
+      "finalize_secs": 28,
+      "story_count": 1,
+      "retries": 0,
+      "replans": 1,
+      "cost_usd": 0.5925,
+      "tokens": {
+        "input": 432941,
+        "cached_input": 362796,
+        "cache_write": 70103,
+        "output": 13027
+      },
+      "cache_hit_ratio": 0.838,
+      "phases": {
+        "architect": {
+          "calls": 3,
+          "cost_usd": 0.0502,
+          "model_secs": 25
+        },
+        "planner": {
+          "calls": 1,
+          "cost_usd": 0.0845,
+          "model_secs": 23
+        },
+        "story": {
+          "calls": 2,
+          "cost_usd": 0.3389,
+          "model_secs": 87
+        },
+        "critic": {
+          "calls": 2,
+          "cost_usd": 0.1189,
+          "model_secs": 20
+        }
+      },
+      "stories": [
+        {
+          "id": "S1",
+          "secs": 140.4,
+          "attempts": 1,
+          "cost_usd": 0.4578
+        }
+      ],
+      "wall_secs": 298.7,
+      "exit_code": 0,
+      "timed_out": false,
+      "ran_at": "2026-11-06T17:20:34.153Z"
+    },
+    "parallel-py-js": {
+      "success": true,
+      "verification": "passed",
+      "abort_reason": null,
+      "total_secs": 408.2,
+      "architect_secs": 84.7,
+      "to_first_story_secs": 178,
+      "stories_secs": 201.4,
+      "finalize_secs": 28.8,
+      "story_count": 2,
+      "retries": 0,
+      "replans": 1,
+      "cost_usd": 2.0259,
+      "tokens": {
+        "input": 1225642,
+        "cached_input": 957509,
+        "cache_write": 268045,
+        "output": 33211
+      },
+      "cache_hit_ratio": 0.7812,
+      "phases": {
+        "architect": {
+          "calls": 5,
+          "cost_usd": 0.1785,
+          "model_secs": 65
+        },
+        "planner": {
+          "calls": 1,
+          "cost_usd": 0.2042,
+          "model_secs": 46
+        },
+        "story": {
+          "calls": 6,
+          "cost_usd": 1.1076,
+          "model_secs": 161
+        },
+        "critic": {
+          "calls": 6,
+          "cost_usd": 0.5356,
+          "model_secs": 62
+        }
+      },
+      "stories": [
+        {
+          "id": "S1",
+          "secs": 122.7,
+          "attempts": 1,
+          "cost_usd": 0.5814
+        },
+        {
+          "id": "S2",
+          "secs": 191.7,
+          "attempts": 2,
+          "cost_usd": 1.0619
+        }
+      ],
+      "wall_secs": 408.9,
+      "exit_code": 0,
+      "timed_out": false,
+      "ran_at": "2026-11-06T17:25:33.087Z"
+    },
+    "three-modules": {
+      "success": true,
+      "verification": "passed",
+      "abort_reason": null,
+      "total_secs": 384.7,
+      "architect_secs": 123.9,
+      "to_first_story_secs": 231.7,
+      "stories_secs": 132.6,
+      "finalize_secs": 20.3,
+      "story_count": 4,
+      "retries": 0,
+      "replans": 1,
+      "cost_usd": 1.3609,
+      "tokens": {
+        "input": 885735,
+        "cached_input": 641067,
+        "cache_write": 244602,
+        "output": 31830
+      },
+      "cache_hit_ratio": 0.7238,
+      "phases": {
+        "architect": {
+          "calls": 6,
+          "cost_usd": 0.2366,
+          "model_secs": 84
+        },
+        "planner": {
+          "calls": 1,
+          "cost_usd": 0.2162,
+          "model_secs": 55
+        },
+        "story": {
+          "calls": 4,
+          "cost_usd": 0.6154,
+          "model_secs": 117
+        },
+        "critic": {
+          "calls": 4,
+          "cost_usd": 0.2928,
+          "model_secs": 22
+        }
+      },
+      "stories": [
+        {
+          "id": "S1",
+          "secs": 70.8,
+          "attempts": 1,
+          "cost_usd": 0.2597
+        },
+        {
+          "id": "S3",
+          "secs": 54.9,
+          "attempts": 1,
+          "cost_usd": 0.2061
+        },
+        {
+          "id": "S2",
+          "secs": 56.9,
+          "attempts": 1,
+          "cost_usd": 0.2027
+        },
+        {
+          "id": "S4",
+          "secs": 53.5,
+          "attempts": 1,
+          "cost_usd": 0.2397
+        }
+      ],
+      "wall_secs": 385.4,
+      "exit_code": 0,
+      "timed_out": false,
+      "ran_at": "2026-11-06T17:32:22.192Z"
+    },
+    "shared-file": {
+      "success": true,
+      "verification": "passed",
+      "abort_reason": null,
+      "total_secs": 334.9,
+      "architect_secs": 99.9,
+      "to_first_story_secs": 192.2,
+      "stories_secs": 119.3,
+      "finalize_secs": 23.5,
+      "story_count": 2,
+      "retries": 0,
+      "replans": 1,
+      "cost_usd": 0.9469,
+      "tokens": {
+        "input": 545117,
+        "cached_input": 386622,
+        "cache_write": 158455,
+        "output": 27438
+      },
+      "cache_hit_ratio": 0.7092,
+      "phases": {
+        "architect": {
+          "calls": 5,
+          "cost_usd": 0.1638,
+          "model_secs": 57
+        },
+        "planner": {
+          "calls": 1,
+          "cost_usd": 0.2356,
+          "model_secs": 52
+        },
+        "story": {
+          "calls": 2,
+          "cost_usd": 0.3743,
+          "model_secs": 67
+        },
+        "critic": {
+          "calls": 2,
+          "cost_usd": 0.1733,
+          "model_secs": 18
+        }
+      },
+      "stories": [
+        {
+          "id": "S1",
+          "secs": 47.7,
+          "attempts": 1,
+          "cost_usd": 0.2374
+        },
+        {
+          "id": "S2",
+          "secs": 69.2,
+          "attempts": 1,
+          "cost_usd": 0.3102
+        }
+      ],
+      "wall_secs": 335.6,
+      "exit_code": 0,
+      "timed_out": false,
+      "ran_at": "2026-11-06T17:38:47.850Z"
     }
   }
 }

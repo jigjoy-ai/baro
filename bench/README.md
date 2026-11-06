@@ -14,6 +14,10 @@ node bench/run.mjs --label local --baro ~/.baro/local-v4/baro
 # One case only
 node bench/run.mjs --label local --baro ~/.baro/local-v4/baro --only bugfix
 
+# Record every child process (git, model CLIs, installs, tests) with its duration
+node bench/run.mjs --label local --baro ~/.baro/local-v4/baro --only single-route --trace
+node bench/profile/summarize.mjs bench/results/local/single-route.trace.jsonl
+
 # Exits 1 on a regression (a case that passed now fails, or wall time or cost +15%)
 node bench/compare.mjs bench/results/v0.122.1/summary.json bench/results/local/summary.json
 ```
