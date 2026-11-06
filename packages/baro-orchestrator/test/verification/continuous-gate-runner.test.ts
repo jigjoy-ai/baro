@@ -212,7 +212,9 @@ describe("the gate runs when it is worth running, not constantly", () => {
         }
         const h = harnessWithPlan(plan)
         h.write("S1")
-        await settle(200)
+        // A real verifyBuild run; it takes ~0.6 s on a loaded machine.
+        const deadline = Date.now() + 10_000
+        while (h.delivered.length === 0 && Date.now() < deadline) await settle(25)
         assert.equal(h.delivered.length, 1)
         const text = h.delivered[0]!.text
         assert.match(text, /PASS {2}node noop/u)
