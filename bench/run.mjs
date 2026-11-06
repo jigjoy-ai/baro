@@ -15,7 +15,7 @@ import { metrics, parseStream } from "./metrics.mjs"
 const here = dirname(fileURLToPath(import.meta.url))
 
 function parseArgs(argv) {
-    const opts = { model: "sonnet", timeoutMin: 30, only: null, label: null, baro: null, out: null, trace: false, repeat: 1 }
+    const opts = { model: "sonnet", timeoutMin: 30, only: null, label: null, baro: null, out: null, trace: false, repeat: 1, env: {} }
     for (let i = 0; i < argv.length; i++) {
         const key = argv[i].replace(/^--/, "")
         if (key === "trace") {
@@ -26,19 +26,33 @@ function parseArgs(argv) {
         if (key === "only") opts.only = value.split(",")
         else if (key === "timeout-min") opts.timeoutMin = Number(value)
         else if (key === "repeat") opts.repeat = Math.max(1, Number(value))
+        else if (key === "env") {
+            const at = value.indexOf("=")
+            if (at < 1) throw new Error("--env takes KEY=VALUE")
+            opts.env[value.slice(0, at)] = value.slice(at + 1)
+        }
         else if (key in opts) opts[key] = value
         else throw new Error(`unknown option --${key}`)
     }
     if (!opts.label || !opts.baro) {
-        throw new Error('usage: node bench/run.mjs --label <name> --baro "<command>" [--model sonnet] [--only a,b] [--timeout-min 30] [--out dir] [--trace] [--repeat 3]')
+        throw new Error('usage: node bench/run.mjs --label <name> --baro "<command>" [--model sonnet] [--only a,b] [--timeout-min 30] [--out dir] [--trace] [--repeat 3] [--env KEY=VALUE]')
     }
     opts.out ??= join(here, "results", opts.label)
     return opts
 }
 
-function prepareRepo(fixture, dir) {
+// A case runs on a copied fixture, or on a real repository cloned at a fixed commit.
+function prepareRepo(testCase, dir) {
     rmSync(dir, { recursive: true, force: true })
     mkdirSync(dirname(dir), { recursive: true })
+    if (testCase.repo) {
+        const source = testCase.repo.path.replace(/^~/, process.env.HOME)
+        execFileSync("git", ["clone", "-q", "--no-hardlinks", source, dir], { stdio: "ignore" })
+        execFileSync("git", ["checkout", "-q", "-B", "main", testCase.repo.commit], { cwd: dir, stdio: "ignore" })
+        execFileSync("git", ["remote", "remove", "origin"], { cwd: dir, stdio: "ignore" })
+        return
+    }
+    const fixture = testCase.fixture
     cpSync(join(here, "fixtures", fixture), dir, { recursive: true })
     // Fixtures keep their ignore file unhidden so it cannot apply to this repository.
     if (existsSync(join(dir, "gitignore"))) renameSync(join(dir, "gitignore"), join(dir, ".gitignore"))
@@ -61,10 +75,11 @@ function runCase(opts, testCase, dir, streamPath, errPath, tracePath) {
         const env = opts.trace
             ? {
                   ...process.env,
+                  ...opts.env,
                   BARO_SPAWN_TRACE: tracePath,
                   NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import ${join(here, "profile", "spawn-trace.mjs")}`.trim(),
               }
-            : process.env
+            : { ...process.env, ...opts.env }
         if (opts.trace) rmSync(tracePath, { force: true })
         const child = spawn(bin.replace(/^~/, process.env.HOME), args, { detached: true, stdio: ["ignore", "pipe", "pipe"], env })
         const out = []
@@ -119,13 +134,13 @@ async function main() {
     const summaryPath = join(opts.out, "summary.json")
     const summary = existsSync(summaryPath)
         ? JSON.parse(readFileSync(summaryPath, "utf8"))
-        : { label: opts.label, baro: opts.baro, model: opts.model, cases: {} }
+        : { label: opts.label, baro: opts.baro, model: opts.model, env: opts.env, cases: {} }
     for (const testCase of cases) {
         const runs = []
         for (let rep = 1; rep <= opts.repeat; rep++) {
             const name = opts.repeat > 1 ? `${testCase.id}.r${rep}` : testCase.id
             const dir = join(tmpdir(), "baro-bench", opts.label, name)
-            prepareRepo(testCase.fixture, dir)
+            prepareRepo(testCase, dir)
             process.stdout.write(`${name}: running in ${dir} ... `)
             const r = await runCase(
                 opts,

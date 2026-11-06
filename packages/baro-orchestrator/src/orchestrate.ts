@@ -132,6 +132,7 @@ import { resolveEffectiveParallel } from "./planning/domain/mode-enforcement.js"
 import { ALL_GATES } from "./execution/gate-registry.js"
 import { PrdFile, loadPrd, persistPrdPreserving } from "./prd.js"
 import { writeSurfaceOf } from "./planning/domain/dependency-evidence.js"
+import { CONTRACT_CONFLICTS_ENABLED } from "./acceptance/critic-verdict.js"
 import { PremiseAmendmentAuthority } from "./planning/application/premise-amendments.js"
 import { readAuthoritativeVerifyPlanOptions } from "./verification/prd-declared-tests.js"
 import { formatDeclaredBudgetEvidence } from "./verification/declared-test-budget.js"
@@ -1131,6 +1132,7 @@ export async function orchestrate(
             publishedNotes: (storyId) => publishedNotes.notesFor(storyId),
             // Read fresh: a story's surface grows with every granted claim.
             writeSurface: (storyId) => {
+                if (!CONTRACT_CONFLICTS_ENABLED) return null
                 try {
                     const story = loadPrd(config.prdPath).userStories.find(({ id }) => id === storyId)
                     if (!story) return null

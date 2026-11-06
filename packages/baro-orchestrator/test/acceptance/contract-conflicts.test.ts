@@ -64,6 +64,22 @@ describe("Critic contract conflicts", () => {
         assert.deepEqual(evaluation.violatedCriteria, ["A"])
     })
 
+    it("ignores every conflict when the feature is switched off", () => {
+        const evaluation = applyContractConflicts(
+            {
+                verdict: "fail" as const,
+                reasoning: "r",
+                violatedCriteria: ["B"],
+                contractConflicts: [{ criterion: "B", reason: "outside", kind: "outside_write_surface" as const }],
+            },
+            ["A", "B"],
+            false,
+        )
+        assert.equal(evaluation.verdict, "fail")
+        assert.deepEqual(evaluation.violatedCriteria, ["B"])
+        assert.equal("contractConflicts" in evaluation, false)
+    })
+
     it("drops the field entirely when no conflict names a criterion of the story", () => {
         const evaluation = applyContractConflicts(
             {

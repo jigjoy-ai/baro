@@ -48,8 +48,8 @@ export function parseContractConflicts(value: unknown): ContractConflict[] {
  */
 export function applyContractConflicts<
     T extends { verdict: "pass" | "fail"; violatedCriteria: string[]; contractConflicts?: ContractConflict[] },
->(evaluation: T, criteria: readonly string[]): T {
-    const conflicts = (evaluation.contractConflicts ?? []).filter((conflict) =>
+>(evaluation: T, criteria: readonly string[], enabled = CONTRACT_CONFLICTS_ENABLED): T {
+    const conflicts = (enabled ? evaluation.contractConflicts ?? [] : []).filter((conflict) =>
         criteria.includes(conflict.criterion),
     )
     if (conflicts.length === 0) {
@@ -128,7 +128,10 @@ Rules:
 - Do NOT include any text outside the JSON object.`
 }
 
-export const VERDICT_SYSTEM_PROMPT = verdictSystemPrompt({ contractConflicts: true })
+/** BARO_CONTRACT_CONFLICTS=0 restores plain pass/fail story verdicts (for A/B runs). */
+export const CONTRACT_CONFLICTS_ENABLED = process.env.BARO_CONTRACT_CONFLICTS !== "0"
+
+export const VERDICT_SYSTEM_PROMPT = verdictSystemPrompt({ contractConflicts: CONTRACT_CONFLICTS_ENABLED })
 
 export function buildCorrectiveMessage(
     reasoning: string,
