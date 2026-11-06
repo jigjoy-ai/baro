@@ -29,6 +29,12 @@
       "fixture": "notes-api",
       "shape": "two features that both edit server.mjs",
       "goal": "Add two features to server.mjs, each with node:test tests in its own test file: (1) request logging that writes one line per request (method, path, status, duration in ms) to stderr, tested in test/logging.test.mjs; (2) a per-IP rate limit of 20 requests per 10 seconds that answers 429 with a Retry-After header, tested in test/rate-limit.test.mjs."
+    },
+    {
+      "id": "modules-then-docs",
+      "fixture": "notes-api",
+      "shape": "two modules with test-style rules, then a README story (catches content rules given to the docs story)",
+      "goal": "As separate parallel stories: (1) a lib/export.mjs module that turns a notes array into Markdown, with node:test tests; (2) a lib/validate.mjs module that validates a note body (non-empty text, max 500 chars), with node:test tests. After both, (3) document both modules in README.md."
     }
   ]
 }

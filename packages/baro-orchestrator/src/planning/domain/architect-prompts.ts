@@ -247,6 +247,11 @@ Make obligations atomic rather than restating a broad goal:
   implementation owner. Author it per surface, or phrase its evidence as the
   cross-cutting verification artifact (the spec/coverage work) — never as
   whole-set proof one surface's implementer would have to produce.
+- An obligation that requires particular content in files (what they define,
+  how they are written, what they assert or document) belongs to whoever
+  writes those files. When different stories would write those files, author
+  one obligation per file group; never fold several writers' content rules
+  into one obligation that only a story allowed to edit all of them could meet.
 
 Even the exact trivial ADR requires this appendix in pre-acceptance outcome
 mode: the provider's own "trivial" label is not authority to bypass the
