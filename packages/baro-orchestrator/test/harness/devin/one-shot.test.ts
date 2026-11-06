@@ -74,7 +74,7 @@ describe("DevinCliParticipant", () => {
     it("reports a finished turn with completed tool work", async () => {
         await withTempDir("baro-devin-", async (dir) => {
             const env = captureEnv()
-            env.deliverFunctionCallOutput =
+            env.publishFunctionCallOutput =
                 (() => {}) as typeof env.deliverFunctionCallOutput
             const participant = new DevinCliParticipant("S1", { cwd: dir, prompt: "touch a", devinBin: writeFakeDevin(dir, "story") })
             participant.start(env)
@@ -87,7 +87,7 @@ describe("DevinCliParticipant", () => {
             assert.equal(summary.exitCode, 0)
             assert.equal(participant.getPhase(), "done")
             const turnEnd = env.events.find(DevinTurnEvent.is)
-            assert.deepEqual(turnEnd?.data.raw.usage, { input_tokens: 60, cached_input_tokens: 40, output_tokens: 5 })
+            assert.deepEqual(turnEnd?.payload.raw.usage, { input_tokens: 60, cached_input_tokens: 40, output_tokens: 5 })
         })
     })
 })

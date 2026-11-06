@@ -1,4 +1,5 @@
-import { BaseObserver, type Participant, type SemanticEvent } from "../../runtime/mozaik.js"
+import { type SemanticEvent } from "../../runtime/mozaik.js"
+import { BusMember } from "../../runtime/coordination.js"
 
 import {
     ConversationFailed,
@@ -7,25 +8,25 @@ import {
 import { emit, type BaroEvent } from "../../tui-protocol.js"
 
 /** Source-bound projection of DialogueAgent replies into the existing TUI log. */
-export class DialogueForwarder extends BaseObserver {
+export class DialogueForwarder extends BusMember {
     constructor(
-        private readonly authority: Participant,
+        private readonly authority: BusMember,
         private readonly sink: (event: BaroEvent) => void = emit,
     ) {
         super()
     }
 
     override onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): void {
         if (source !== this.authority) return
         if (ConversationResponded.is(event)) {
             this.sink({
                 type: "conversation_response",
-                message_id: event.data.messageId,
-                text: event.data.text,
-                actions: event.data.actions.map((action) => ({
+                message_id: event.payload.messageId,
+                text: event.payload.text,
+                actions: event.payload.actions.map((action) => ({
                     recipient_id: action.recipientId,
                     text: action.text,
                 })),
@@ -34,14 +35,14 @@ export class DialogueForwarder extends BaseObserver {
                 type: "activity",
                 id: "_dialogue",
                 kind: "agent_msg",
-                text: event.data.text,
+                text: event.payload.text,
             })
             this.sink({
                 type: "story_log",
                 id: "_dialogue",
-                line: `[collective] ${event.data.text}`,
+                line: `[collective] ${event.payload.text}`,
             })
-            for (const action of event.data.actions) {
+            for (const action of event.payload.actions) {
                 this.sink({
                     type: "activity",
                     id: "_dialogue",
@@ -59,20 +60,20 @@ export class DialogueForwarder extends BaseObserver {
         if (ConversationFailed.is(event)) {
             this.sink({
                 type: "conversation_failed",
-                message_id: event.data.messageId,
-                error: event.data.error,
+                message_id: event.payload.messageId,
+                error: event.payload.error,
             })
             this.sink({
                 type: "activity",
                 id: "_dialogue",
                 kind: "error",
-                text: event.data.error,
+                text: event.payload.error,
                 ok: false,
             })
             this.sink({
                 type: "story_log",
                 id: "_dialogue",
-                line: `[collective/unavailable] ${event.data.error}`,
+                line: `[collective/unavailable] ${event.payload.error}`,
             })
         }
     }

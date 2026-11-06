@@ -110,7 +110,7 @@ function resolveCollaborationShellAccess(
     }
 }
 
-function gitSandboxPaths(cwd: string): {
+export function gitSandboxPaths(cwd: string): {
     paths: string[]
     commonWorktreeRoot: string | null
 } {
@@ -1082,6 +1082,26 @@ export function shellContainmentHookSource(): string {
         `import path from "node:path"`,
         `import { execFileSync } from "node:child_process"`,
         `const __name = (fn) => fn`,
+        ...importAliases(),
         ...HOOK_SOURCE_GRAPH.map(hookDeclaration),
     ].join("\n")
+}
+
+/**
+ * The serialized functions name this module's imports the way the running
+ * code spells them, and a bundler renames them (`fs` became `fs4`). A hook
+ * that did not bind those spellings threw on every command and, failing open,
+ * contained nothing. Each probe reads the spelling back from the running code.
+ */
+function importAliases(): string[] {
+    const spelled = (probe: () => unknown): string | undefined =>
+        /=>\s*([\w$]+)/u.exec(probe.toString())?.[1]
+    const imports: Array<[string | undefined, string]> = [
+        [spelled(() => fs), "fs"],
+        [spelled(() => path), "path"],
+        [spelled(() => execFileSync), "execFileSync"],
+    ]
+    return imports
+        .filter(([alias, name]) => alias !== undefined && alias !== name)
+        .map(([alias, name]) => `const ${alias} = ${name}`)
 }

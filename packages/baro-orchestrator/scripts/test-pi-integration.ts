@@ -11,11 +11,11 @@ import { join } from "path"
 import { tmpdir } from "os"
 
 import {
-    AgenticEnvironment,
     FunctionCallItem,
     FunctionCallOutputItem,
     ModelMessageItem,
 } from "../src/runtime/mozaik.js"
+import { CoordinationBus } from "../src/runtime/coordination.js"
 
 import { mapPiEvent } from "../src/harness/pi/stream-mapper.js"
 import { PiCliParticipant } from "../src/harness/pi/cli-participant.js"
@@ -313,7 +313,7 @@ async function testOneShot(): Promise<void> {
 async function testCliParticipant(): Promise<void> {
     process.stderr.write("\n[test] 3. CLI participant (live pi invocation)\n")
 
-    const env = new AgenticEnvironment()
+    const env = new CoordinationBus()
     const participant = new PiCliParticipant("test-agent", {
         cwd: testDir,
         prompt: 'Say exactly: CLI_PARTICIPANT_OK',
@@ -344,7 +344,7 @@ async function testStoryAgent(): Promise<void> {
     // File-mutation prompt (not a prose echo) so the success predicate
     // (requires >=1 tool call) is exercised on a genuine task.
     const targetFile = "STORY_AGENT_OK.txt"
-    const env = new AgenticEnvironment()
+    const env = new CoordinationBus()
     const agent = new PiStoryAgent({
         id: "test-story-1",
         prompt: `Create a file named ${targetFile} in the current directory containing exactly the text DONE. Use your file-writing tools.`,
@@ -371,11 +371,11 @@ async function testStoryAgent(): Promise<void> {
 
 // `pi` exits 0 even when the model just talks and does no work, so the
 // success predicate must reject a zero-tool run — otherwise a refused/no-op
-// story is a false PASS to the Conductor. Guards against exit-code-only regression.
+// story is a false PASS to the Board. Guards against exit-code-only regression.
 async function testNoOpRejected(): Promise<void> {
     process.stderr.write("\n[test] 5. No-op story is rejected (regression guard)\n")
 
-    const env = new AgenticEnvironment()
+    const env = new CoordinationBus()
     const agent = new PiStoryAgent({
         id: "test-story-noop",
         prompt: "Reply with the single word ACKNOWLEDGED and do nothing else. Do not use any tools.",

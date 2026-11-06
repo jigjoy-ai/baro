@@ -9,7 +9,8 @@
  * `surgeon.ts` so every backend shares one source of truth for the contract.
  */
 
-import { BaseObserver, Participant, SemanticEvent } from "../../runtime/mozaik.js"
+import { SemanticEvent } from "../../runtime/mozaik.js"
+import { BusMember } from "../../runtime/coordination.js"
 
 import { runnerMeasurement } from "../../telemetry/runner-measurement.js"
 import type { RunnerInvocationObserver } from "../runner-invocation.js"
@@ -67,7 +68,7 @@ export interface OneShotSurgeonInvocationContext {
     onInvocation: RunnerInvocationObserver
 }
 
-export abstract class OneShotSurgeon extends BaseObserver {
+export abstract class OneShotSurgeon extends BusMember {
     private readonly useLlm: boolean
     private readonly maxReplans: number
     protected readonly timeoutMs: number
@@ -112,25 +113,25 @@ export abstract class OneShotSurgeon extends BaseObserver {
         await Promise.allSettled([...this.pending])
     }
 
-    setLeaseAuthority(authority: Participant): void {
+    setLeaseAuthority(authority: BusMember): void {
         this.sources.setLeaseAuthority(authority)
     }
 
-    setQualityAuthority(authority: Participant): void {
+    setQualityAuthority(authority: BusMember): void {
         this.sources.setQualityAuthority(authority)
     }
 
-    setBlockAuthority(authority: Participant): void {
+    setBlockAuthority(authority: BusMember): void {
         this.sources.setBlockAuthority(authority)
     }
 
-    setCriticAuthority(authority: Participant): void {
+    setCriticAuthority(authority: BusMember): void {
         this.sources.setCriticAuthority(authority)
     }
 
     override async onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): Promise<void> {
         if (this.sources.observeLease(source, event, this.leases, this.runId)) return
         if (!this.sources.accepts(source, event)) return
@@ -159,8 +160,8 @@ export abstract class OneShotSurgeon extends BaseObserver {
                     return
                 }
                 this.replansEmitted += 1
-                for (const env of this.getEnvironments()) {
-                    env.deliverSemanticEvent(
+                for (const env of this.getBuses()) {
+                    env.publish(
                         this,
                         Replan.create(correlateRecoveryReplan(replan, failure)),
                     )
@@ -182,8 +183,8 @@ export abstract class OneShotSurgeon extends BaseObserver {
 
     private emitRecoveryStarted(failure: StoryResultData): void {
         if (!this.emitRecoveryDecisions || !this.runId) return
-        for (const env of this.getEnvironments()) {
-            env.deliverSemanticEvent(this, RecoveryEvaluationStarted.create({
+        for (const env of this.getBuses()) {
+            env.publish(this, RecoveryEvaluationStarted.create({
                 runId: this.runId,
                 storyId: failure.storyId,
                 source: this.backendSpec.sourceTag,
@@ -197,8 +198,8 @@ export abstract class OneShotSurgeon extends BaseObserver {
         reason: string,
     ): void {
         if (!this.emitRecoveryDecisions || !this.runId) return
-        for (const env of this.getEnvironments()) {
-            env.deliverSemanticEvent(this, RecoveryDecision.create({
+        for (const env of this.getBuses()) {
+            env.publish(this, RecoveryDecision.create({
                 runId: this.runId,
                 storyId: failure.storyId,
                 source: this.backendSpec.sourceTag,
@@ -305,8 +306,8 @@ export abstract class OneShotSurgeon extends BaseObserver {
                     observation,
                 ),
             )
-            for (const env of this.getEnvironments()) {
-                env.deliverSemanticEvent(this, event)
+            for (const env of this.getBuses()) {
+                env.publish(this, event)
             }
         }
     }

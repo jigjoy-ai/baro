@@ -9,7 +9,8 @@
  * canonical command shape and how to express it as bus events.
  */
 
-import { AgenticEnvironment, BaseObserver, SemanticEvent } from "../runtime/mozaik.js"
+import { SemanticEvent } from "../runtime/mozaik.js"
+import { BusMember, CoordinationBus } from "../runtime/coordination.js"
 
 import {
     AgentTargetedMessage,
@@ -29,40 +30,28 @@ export type OperatorCommand =
     | { kind: "abort_all" }
     | { kind: "shutdown" }
 
-export interface OperatorHooks {
-    /** Called when an `abort` command arrives. */
-    onAbort?: (storyId: string) => void
-    /** Called when `abort_all` arrives. */
-    onAbortAll?: () => void
-    /** Called when `shutdown` arrives. */
-    onShutdown?: () => void
-}
-
 export interface OperatorOptions {
     /** Enables correlated conversation requests for this run. */
     runId?: string
 }
 
-export class Operator extends BaseObserver {
-    private envRef: AgenticEnvironment | null = null
+export class Operator extends BusMember {
+    private envRef: CoordinationBus | null = null
     private conversationSequence = 0
 
-    constructor(
-        private readonly hooks: OperatorHooks = {},
-        private readonly opts: OperatorOptions = {},
-    ) {
+    constructor(private readonly opts: OperatorOptions = {}) {
         super()
     }
 
-    setEnvironment(env: AgenticEnvironment): void {
+    setEnvironment(env: CoordinationBus): void {
         this.envRef = env
     }
 
     // Operator is push-only: it emits in response to external commands,
-    // never reacts to bus events. Default BaseObserver no-op handlers
+    // never reacts to bus events. Default BusMember no-op handlers
     // cover everything.
 
-    /** Translate an external command into bus action / hook callback. */
+    /** Translate an external command into a bus action. */
     dispatch(cmd: OperatorCommand): void {
         switch (cmd.kind) {
             case "redirect": {
@@ -92,22 +81,15 @@ export class Operator extends BaseObserver {
                 )
                 return
             }
-            case "abort": {
-                this.hooks.onAbort?.(cmd.storyId)
+            // Control commands have no source-bound semantic lane yet.
+            case "abort":
+            case "abort_all":
+            case "shutdown":
                 return
-            }
-            case "abort_all": {
-                this.hooks.onAbortAll?.()
-                return
-            }
-            case "shutdown": {
-                this.hooks.onShutdown?.()
-                return
-            }
         }
     }
 
-    private emit(event: SemanticEvent<unknown>): void {
-        this.envRef?.deliverSemanticEvent(this, event)
+    private emit(event: SemanticEvent<string, unknown>): void {
+        this.envRef?.publish(this, event)
     }
 }

@@ -11,7 +11,6 @@ $work = Join-Path $env:RUNNER_TEMP "smoke-$Llm"
 $out = Join-Path $work "out"
 New-Item -ItemType Directory -Force -Path "$work\repo", "$work\bin", $out | Out-Null
 
-Set-Content "$work\bin\codex.cmd" "@node `"$smoke\fake-codex.mjs`" %*"
 Set-Content "$work\goal.txt" "Add a goodbye.js file that prints goodbye"
 Push-Location "$work\repo"
 git init -q
@@ -25,7 +24,6 @@ Pop-Location
 
 $env:OPENAI_API_KEY = "dummy"
 $env:OPENAI_BASE_URL = "http://127.0.0.1:8787/v1"
-$env:FAKE_CODEX_LOG = "$out\fake-codex.log"
 $env:PATH = "$work\bin;$env:PATH"
 $server = Start-Process node -ArgumentList "$smoke\fake-openai.mjs", "$out\fake-openai.log" -PassThru -NoNewWindow
 Start-Sleep -Seconds 2
@@ -46,7 +44,7 @@ Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
 Copy-Item -Recurse -Force "$env:USERPROFILE\.baro\runs" "$out\runs" -ErrorAction SilentlyContinue
 
 $stderr = Get-Content "$out\stderr.log" -Raw -ErrorAction SilentlyContinue
-$phases = Get-Content "$out\fake-codex.log", "$out\fake-openai.log" -ErrorAction SilentlyContinue |
+$phases = Get-Content "$out\fake-openai.log" -ErrorAction SilentlyContinue |
     Select-String -Pattern 'phase=([a-z]+)' -AllMatches | ForEach-Object { $_.Matches.Groups[1].Value } | Sort-Object -Unique
 "--- stderr tail"; Get-Content "$out\stderr.log" -Tail 40 -ErrorAction SilentlyContinue
 "--- phases reached: $($phases -join ', ')"
@@ -54,12 +52,12 @@ $phases = Get-Content "$out\fake-codex.log", "$out\fake-openai.log" -ErrorAction
 $failures = @()
 if (-not $finished) { $failures += "run hung past ${LimitSeconds}s (process tree in processes.txt)" }
 if ($stderr -match '\] crashed:') { $failures += "a helper process crashed" }
-# The codex stand-in does the story's work, so that lane must finish clean.
-# The openai stand-in cannot drive the native story loop; reaching the plan
-# is what proves every phase before execution ran on Windows.
+# CLI lanes cannot be supervised on native Windows, so they must refuse to
+# start and point at WSL. The openai stand-in cannot drive the native story
+# loop; reaching the plan is what proves every phase before execution ran.
 if ($Llm -eq "codex") {
-    if ($finished -and $p.ExitCode -ne 0) { $failures += "exit code $($p.ExitCode), expected 0" }
-    if ($phases -notcontains "story") { $failures += "story phase was never reached" }
+    if ($finished -and $p.ExitCode -eq 0) { $failures += "codex lane started on native Windows" }
+    if ($stderr -notmatch 'WSL') { $failures += "startup error does not mention WSL" }
 } elseif ($phases -notcontains "planner") {
     $failures += "planner phase was never reached"
 }

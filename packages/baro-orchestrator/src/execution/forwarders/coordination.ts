@@ -1,15 +1,18 @@
-import { BaseObserver, Participant, SemanticEvent } from "../../runtime/mozaik.js"
+import { SemanticEvent } from "../../runtime/mozaik.js"
+import { BusMember } from "../../runtime/coordination.js"
 
 import {
     Coordination,
     CoordinationModeSelected,
     CollaborationNote,
-    Critique,
     PeerHelpRequested,
     RunVerificationCompleted,
     RunVerificationRequested,
     RunVerificationRetryClassified,
     RunVerificationTimedOut,
+    PathsClaimed,
+    StoryCheckpointDecided,
+    StoryCheckpointWithdrawn,
     StoryIntervention,
     StoryQualityCompleted,
     WorkClaimed,
@@ -30,8 +33,7 @@ import { emit } from "../../tui-protocol.js"
  * intervention get structured BaroEvents (protocol v2) plus their legacy
  * `story_log` mirrors for one release.
  */
-export class CoordinationForwarder extends BaseObserver {
-    private interventionAuthority: Participant | null = null
+export class CoordinationForwarder extends BusMember {
     private collectiveAuthorities: Readonly<CollectiveCoordinationAuthorities> | null = null
     private readonly leases = new ActiveLeaseRegistry()
     private readonly seenQualityEvaluations = new Set<string>()
@@ -56,31 +58,13 @@ export class CoordinationForwarder extends BaseObserver {
         this.collectiveAuthorities = Object.freeze({ ...authorities })
     }
 
-    setInterventionAuthority(authority: Participant): void {
-        if (
-            this.interventionAuthority &&
-            this.interventionAuthority !== authority
-        ) {
-            throw new Error("coordination forwarder intervention authority is already bound")
-        }
-        this.interventionAuthority = authority
-    }
-
     override async onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): Promise<void> {
         if (Coordination.is(event)) {
             if (!this.matchesCollective(source, "coordination")) return
-            this.handleCoordination(event.data)
-            return
-        }
-        if (Critique.is(event)) {
-            // Raw Critique has no run/lease/generation correlation. It remains
-            // a legacy presentation event, but collective presentation waits
-            // for AcceptanceGate's correlated projection below.
-            if (this.collectiveAuthorities || this.collectiveFailClosed) return
-            this.handleCritique(event.data)
+            this.handleCoordination(event.payload)
             return
         }
         if (StoryQualityCompleted.is(event)) {
@@ -88,38 +72,81 @@ export class CoordinationForwarder extends BaseObserver {
             if (
                 !authorities?.quality ||
                 source !== authorities.quality ||
-                event.data.runId !== authorities.runId ||
+                event.payload.runId !== authorities.runId ||
                 !this.leases.matchesLeaseGeneration(
-                    event.data.storyId,
+                    event.payload.storyId,
                     authorities.runId,
-                    event.data.leaseId,
-                    event.data.generation,
+                    event.payload.leaseId,
+                    event.payload.generation,
                 ) ||
-                this.seenQualityEvaluations.has(event.data.evaluationId)
+                this.seenQualityEvaluations.has(event.payload.evaluationId)
             ) return
-            this.seenQualityEvaluations.add(event.data.evaluationId)
-            if (event.data.critique) {
+            this.seenQualityEvaluations.add(event.payload.evaluationId)
+            if (event.payload.critique) {
                 this.handleCritique({
-                    agentId: event.data.storyId,
-                    ...event.data.critique,
+                    agentId: event.payload.storyId,
+                    ...event.payload.critique,
                 })
             } else {
                 emit({
                     type: "story_log",
-                    id: event.data.storyId,
-                    line: `[critic/${event.data.status}] ${event.data.reason}`,
+                    id: event.payload.storyId,
+                    line: `[critic/${event.payload.status}] ${event.payload.reason}`,
                 })
             }
             return
         }
         if (StoryIntervention.is(event)) {
-            if (this.collectiveAuthorities || this.collectiveFailClosed) {
-                if (!this.matchesCollective(source, "intervention")) return
-            } else if (
-                this.interventionAuthority &&
-                source !== this.interventionAuthority
-            ) return
-            this.handleIntervention(event.data)
+            if (!this.matchesCollective(source, "intervention")) return
+            this.handleIntervention(event.payload)
+            return
+        }
+        if (StoryCheckpointDecided.is(event)) {
+            if (!this.matchesCollective(source, "board")) return
+            const decision = event.payload
+            const runId = this.collectiveAuthorities?.runId
+            if (runId && decision.runId !== runId) return
+            if (decision.outcome === "published") {
+                emit({
+                    type: "checkpoint",
+                    id: decision.storyId,
+                    sha: decision.sha,
+                    reason: decision.reason,
+                    admitted: decision.admitted,
+                })
+            }
+            emit({
+                type: "story_log",
+                id: decision.storyId,
+                line: decision.outcome === "published"
+                    ? `[checkpoint] ${decision.sha.slice(0, 12)} published${decision.admitted.length ? `; started on it: ${decision.admitted.join(", ")}` : ""}`
+                    : `[checkpoint] refused: ${decision.reason}`,
+            })
+            return
+        }
+        if (StoryCheckpointWithdrawn.is(event)) {
+            if (!this.matchesCollective(source, "board")) return
+            emit({
+                type: "checkpoint_withdrawn",
+                id: event.payload.storyId,
+                sha: event.payload.sha,
+                reason: event.payload.reason,
+                affected: event.payload.affected,
+            })
+            return
+        }
+        if (PathsClaimed.is(event)) {
+            if (!this.matchesCollective(source, "bridge")) return
+            const granted = event.payload.decisions
+                .filter((decision) => decision.outcome === "granted")
+                .map((decision) => decision.path)
+            const held = event.payload.decisions.flatMap((decision) =>
+                decision.outcome === "held"
+                    ? [{ path: decision.path, owner: decision.ownerStoryId }]
+                    : [],
+            )
+            if (granted.length === 0 && held.length === 0) return
+            emit({ type: "paths_claimed", id: event.payload.storyId, granted, held })
             return
         }
         if (CoordinationModeSelected.is(event)) {
@@ -127,7 +154,7 @@ export class CoordinationForwarder extends BaseObserver {
             emit({
                 type: "story_log",
                 id: "_run",
-                line: `[coordination] ${event.data.mode}`,
+                line: `[coordination] ${event.payload.mode}`,
             })
             return
         }
@@ -142,28 +169,28 @@ export class CoordinationForwarder extends BaseObserver {
             emit({
                 type: "story_log",
                 id: "_verify",
-                line: `[verify] started (${event.data.verificationId})`,
+                line: `[verify] started (${event.payload.verificationId})`,
             })
             return
         }
         if (RunVerificationCompleted.is(event)) {
             if (!this.matchesCollective(source, "verifier")) return
-            const commands = event.data.commands
+            const commands = event.payload.commands
                 .map((command) => `${command.command}: ${command.status}`)
                 .join(", ")
             emit({
                 type: "activity",
                 id: "_verify",
                 kind: "test",
-                text: `Run verification ${event.data.status}${commands ? ` — ${commands}` : ""}`,
-                ...(event.data.status === "skipped"
+                text: `Run verification ${event.payload.status}${commands ? ` — ${commands}` : ""}`,
+                ...(event.payload.status === "skipped"
                     ? {}
-                    : { ok: event.data.status === "passed" }),
+                    : { ok: event.payload.status === "passed" }),
             })
             emit({
                 type: "story_log",
                 id: "_verify",
-                line: `[verify/${event.data.status}] ${commands || "no build/test command detected"}`,
+                line: `[verify/${event.payload.status}] ${commands || "no build/test command detected"}`,
             })
             return
         }
@@ -171,14 +198,14 @@ export class CoordinationForwarder extends BaseObserver {
             if (!this.matchesCollective(source, "verifier")) return
             // A refusal is already in the evidence; only an actual retry owes
             // the operator a line explaining why the gate ran twice.
-            if (!event.data.retried) return
+            if (!event.payload.retried) return
             emit({
                 type: "activity",
                 id: "_verify",
                 kind: "warn",
                 text:
-                    `verification retry: ${event.data.command} ` +
-                    `(${event.data.bucket} \u2192 ${event.data.remedy})`,
+                    `verification retry: ${event.payload.command} ` +
+                    `(${event.payload.bucket} \u2192 ${event.payload.remedy})`,
             })
             return
         }
@@ -188,7 +215,7 @@ export class CoordinationForwarder extends BaseObserver {
                 type: "activity",
                 id: "_verify",
                 kind: "test",
-                text: `Run verification timed out after ${Math.ceil(event.data.timeoutMs / 1_000)}s`,
+                text: `Run verification timed out after ${Math.ceil(event.payload.timeoutMs / 1_000)}s`,
                 ok: false,
             })
             return
@@ -197,8 +224,8 @@ export class CoordinationForwarder extends BaseObserver {
             if (!this.matchesCollective(source, "board")) return
             emit({
                 type: "story_log",
-                id: event.data.request.storyId,
-                line: `[collective] work offered (${event.data.offerId})`,
+                id: event.payload.request.storyId,
+                line: `[collective] work offered (${event.payload.offerId})`,
             })
             return
         }
@@ -209,8 +236,8 @@ export class CoordinationForwarder extends BaseObserver {
             if (this.collectiveAuthorities || this.collectiveFailClosed) return
             emit({
                 type: "story_log",
-                id: event.data.storyId,
-                line: `[collective] claimed by ${event.data.workerId} → ${event.data.backend}:${event.data.model}`,
+                id: event.payload.storyId,
+                line: `[collective] claimed by ${event.payload.workerId} → ${event.payload.backend}:${event.payload.model}`,
             })
             return
         }
@@ -218,15 +245,15 @@ export class CoordinationForwarder extends BaseObserver {
             if (!this.matchesCollective(source, "broker")) return
             if (
                 this.collectiveAuthorities &&
-                event.data.runId !== this.collectiveAuthorities.runId
+                event.payload.runId !== this.collectiveAuthorities.runId
             ) return
             this.leases.observe(event, this.collectiveAuthorities?.runId)
-            const route = event.data.route
+            const route = event.payload.route
             emit({
                 type: "story_log",
-                id: event.data.request.storyId,
+                id: event.payload.request.storyId,
                 line:
-                    `[collective] lease granted to ${event.data.workerId}` +
+                    `[collective] lease granted to ${event.payload.workerId}` +
                     (route ? ` → ${route.backend}:${route.model}` : ""),
             })
             return
@@ -236,11 +263,11 @@ export class CoordinationForwarder extends BaseObserver {
             if (
                 !authorities ||
                 source !== authorities.broker ||
-                event.data.runId !== authorities.runId ||
+                event.payload.runId !== authorities.runId ||
                 !this.leases.matchesLease(
-                    event.data.storyId,
+                    event.payload.storyId,
                     authorities.runId,
-                    event.data.leaseId,
+                    event.payload.leaseId,
                 )
             ) return
             this.leases.observe(event, authorities.runId)
@@ -250,8 +277,8 @@ export class CoordinationForwarder extends BaseObserver {
             if (!this.matchesCollective(source, "broker")) return
             emit({
                 type: "story_log",
-                id: event.data.storyId,
-                line: `[collective] lease expired: ${event.data.reason}`,
+                id: event.payload.storyId,
+                line: `[collective] lease expired: ${event.payload.reason}`,
             })
             return
         }
@@ -259,8 +286,8 @@ export class CoordinationForwarder extends BaseObserver {
             if (!this.matchesCollective(source, "bridge")) return
             emit({
                 type: "story_log",
-                id: event.data.sourceAgentId,
-                line: `[peer/help] ${event.data.text}`,
+                id: event.payload.sourceAgentId,
+                line: `[peer/help] ${event.payload.text}`,
             })
             return
         }
@@ -268,8 +295,8 @@ export class CoordinationForwarder extends BaseObserver {
             if (!this.matchesCollective(source, "bridge")) return
             emit({
                 type: "story_log",
-                id: event.data.sourceAgentId,
-                line: `[peer/note] ${event.data.text}`,
+                id: event.payload.sourceAgentId,
+                line: `[peer/note] ${event.payload.text}`,
             })
             return
         }
@@ -277,15 +304,15 @@ export class CoordinationForwarder extends BaseObserver {
             if (!this.matchesCollective(source, "bridge")) return
             emit({
                 type: "story_log",
-                id: event.data.sourceAgentId,
-                line: `[peer/discovered] ${event.data.story.id}: ${event.data.reason}`,
+                id: event.payload.sourceAgentId,
+                line: `[peer/discovered] ${event.payload.story.id}: ${event.payload.reason}`,
             })
             return
         }
     }
 
     private matchesCollective(
-        source: Participant,
+        source: BusMember,
         family: keyof CollectiveCoordinationAuthorities,
     ): boolean {
         if (!this.collectiveAuthorities) return !this.collectiveFailClosed
@@ -340,13 +367,13 @@ export class CoordinationForwarder extends BaseObserver {
 export interface CollectiveCoordinationAuthorities {
     runId: string
     /** Board owns run phase, offers, and verification request/deadline. */
-    board: Participant
+    board: BusMember
     /** Broker owns accepted claims and lease lifecycle. */
-    broker: Participant
-    verifier: Participant
-    bridge: Participant
-    coordination?: Participant
+    broker: BusMember
+    verifier: BusMember
+    bridge: BusMember
+    coordination?: BusMember
     /** AcceptanceGate owns the lease-correlated final critique projection. */
-    quality?: Participant
-    intervention?: Participant
+    quality?: BusMember
+    intervention?: BusMember
 }

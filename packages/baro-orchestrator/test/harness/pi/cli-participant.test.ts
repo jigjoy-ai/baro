@@ -174,7 +174,7 @@ console.log(JSON.stringify({ type: "agent_end", messages: [], willRetry: false }
     it("maps fake JSONL output into lifecycle and tool events", async () => {
         await withTempDir("baro-pi-cli-", async (dir) => {
             const env = captureEnv()
-            env.deliverFunctionCallOutput =
+            env.publishFunctionCallOutput =
                 (() => {}) as typeof env.deliverFunctionCallOutput
             const participant = new PiCliParticipant("pi-agent", {
                 cwd: dir,
@@ -198,22 +198,22 @@ console.log(JSON.stringify({ type: "agent_end", messages: [], willRetry: false }
                 env.events.some(
                     (event) =>
                         AgentState.is(event) &&
-                        event.data.agentId === "pi-agent" &&
-                        event.data.phase === "running",
+                        event.payload.agentId === "pi-agent" &&
+                        event.payload.phase === "running",
                 ),
             )
             assert.ok(
                 env.events.some(
                     (event) =>
                         PiSystem.is(event) &&
-                        event.data.subtype === "agent_end",
+                        event.payload.subtype === "agent_end",
                 ),
             )
             assert.ok(
                 env.events.some(
                     (event) =>
                         PiItemEvent.is(event) &&
-                        event.data.itemType === "tool_result",
+                        event.payload.itemType === "tool_result",
                 ),
             )
         })
@@ -222,7 +222,7 @@ console.log(JSON.stringify({ type: "agent_end", messages: [], willRetry: false }
     it("keeps failed fake Pi tool executions out of the success count", async () => {
         await withTempDir("baro-pi-cli-failed-tool-", async (dir) => {
             const env = captureEnv()
-            env.deliverFunctionCallOutput =
+            env.publishFunctionCallOutput =
                 (() => {}) as typeof env.deliverFunctionCallOutput
             const participant = new PiCliParticipant("pi-agent", {
                 cwd: dir,
@@ -244,8 +244,8 @@ console.log(JSON.stringify({ type: "agent_end", messages: [], willRetry: false }
                 env.events.some(
                     (event) =>
                         PiItemEvent.is(event) &&
-                        event.data.itemType === "tool_result" &&
-                        event.data.raw.isError === true,
+                        event.payload.itemType === "tool_result" &&
+                        event.payload.raw.isError === true,
                 ),
             )
         })
@@ -254,7 +254,7 @@ console.log(JSON.stringify({ type: "agent_end", messages: [], willRetry: false }
     it("waits for inherited stdio to flush final JSON and stderr after process exit", async () => {
         await withTempDir("baro-pi-cli-final-line-", async (dir) => {
             const env = captureEnv()
-            env.deliverFunctionCallOutput =
+            env.publishFunctionCallOutput =
                 (() => {}) as typeof env.deliverFunctionCallOutput
             const participant = new PiCliParticipant("pi-agent", {
                 cwd: dir,

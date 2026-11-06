@@ -1,11 +1,11 @@
 import {
-    BaseObserver,
     FunctionCallItem,
     FunctionCallOutputItem,
     ModelMessageItem,
-    Participant,
     SemanticEvent,
+    toWire,
 } from "../../runtime/mozaik.js"
+import { BusMember } from "../../runtime/coordination.js"
 
 import {
     WorkLeaseGranted,
@@ -20,7 +20,7 @@ import { testVerdict } from "./test-verdict.js"
  * Turns the agent bus stream into the TUI's structured Activity feed:
  * ONE condensed `activity` event per bus item.
  */
-export class AgentStreamForwarder extends BaseObserver {
+export class AgentStreamForwarder extends BusMember {
     private readonly leases = new ActiveLeaseRegistry()
     private collectiveAuthorities: Readonly<CollectiveAgentStreamAuthorities> | null = null
 
@@ -40,38 +40,38 @@ export class AgentStreamForwarder extends BaseObserver {
     }
 
     override async onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): Promise<void> {
         if (!WorkLeaseGranted.is(event) && !WorkLeaseReleased.is(event)) return
         const authorities = this.collectiveAuthorities
         if (
             !authorities ||
             source !== authorities.broker ||
-            event.data.runId !== authorities.runId
+            event.payload.runId !== authorities.runId
         ) return
         if (
             WorkLeaseReleased.is(event) &&
             !this.leases.matchesLease(
-                event.data.storyId,
-                event.data.runId,
-                event.data.leaseId,
+                event.payload.storyId,
+                event.payload.runId,
+                event.payload.leaseId,
             )
         ) return
         this.leases.observe(event, authorities.runId)
     }
 
-    override async onExternalModelMessage(source: Participant, item: ModelMessageItem): Promise<void> {
+    override async onExternalModelMessage(source: BusMember, item: ModelMessageItem): Promise<void> {
         const agentId = this.authorizedAgentId(source)
         if (!agentId) return
-        const json = item.toJSON() as { content?: Array<{ text?: string }> }
+        const json = toWire(item) as { content?: Array<{ text?: string }> }
         const text = json.content?.[0]?.text ?? ""
         const line = firstLine(text)
         if (!line) return
         emit({ type: "activity", id: agentId, kind: "agent_msg", text: truncate(line, 160) })
     }
 
-    override async onExternalFunctionCall(source: Participant, item: FunctionCallItem): Promise<void> {
+    override async onExternalFunctionCall(source: BusMember, item: FunctionCallItem): Promise<void> {
         const agentId = this.authorizedAgentId(source)
         if (!agentId) return
         const args = parseArgs(item.args)
@@ -108,12 +108,12 @@ export class AgentStreamForwarder extends BaseObserver {
     }
 
     override async onExternalFunctionCallOutput(
-        source: Participant,
+        source: BusMember,
         item: FunctionCallOutputItem,
     ): Promise<void> {
         const agentId = this.authorizedAgentId(source)
         if (!agentId) return
-        const json = item.toJSON() as { output?: Array<{ text?: string }> }
+        const json = toWire(item) as { output?: Array<{ text?: string }> }
         const out = json.output?.[0]?.text ?? ""
         if (!out.trim()) return
 
@@ -131,7 +131,7 @@ export class AgentStreamForwarder extends BaseObserver {
         emit({ type: "activity", id: agentId, kind: "tool_result", text: truncate(firstLine(out), 120) })
     }
 
-    private authorizedAgentId(source: Participant): string | null {
+    private authorizedAgentId(source: BusMember): string | null {
         const agentId = agentIdOf(source)
         if (!agentId) return null
         const isCollective =
@@ -165,11 +165,11 @@ export class AgentStreamForwarder extends BaseObserver {
 
 export interface CollectiveAgentStreamAuthorities {
     runId: string
-    broker: Participant
+    broker: BusMember
     outcomeAuthority: StoryOutcomeAuthority
 }
 
-function agentIdOf(source: Participant): string | null {
+function agentIdOf(source: BusMember): string | null {
     const id = (source as unknown as { agentId?: string }).agentId
     return typeof id === "string" ? id : null
 }

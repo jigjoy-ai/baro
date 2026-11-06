@@ -39,6 +39,25 @@ function recordingInstall(): { calls: string[]; runInstall: (dir: string) => Pro
 }
 
 describe("materializeDependencies", () => {
+    // Smoke run 5: `js/package.json` with its own lockfile, no workspaces.
+    // The final gate ran `node --test js/slug.test.mjs` without its deps.
+    it("installs an independent package in a subdirectory that carries a lockfile", async () => {
+        await withTempDir("baro-dep-mat-", async (root) => {
+            const host = join(root, "host")
+            const run = join(root, "run")
+            mkdirSync(host, { recursive: true })
+            writeWorkspace(join(run, "js"), { name: "slug", private: true }, '{"lockfileVersion":3}')
+            writeWorkspace(join(run, "tools", "unlocked"), { name: "unlocked", private: true })
+            mkdirSync(join(run, "node_modules", "dep"), { recursive: true })
+            writeWorkspace(join(run, "node_modules", "dep", "inner"), { name: "x" }, "{}")
+            const { calls, runInstall } = recordingInstall()
+
+            await materializeDependencies({ hostRoot: host, integrationRoot: run, runInstall })
+
+            assert.deepEqual(calls, [join(run, "js")], "only the locked package, never inside node_modules")
+        })
+    })
+
     it("links the host node_modules when the root lockfile matches", async () => {
         await withTempDir("baro-dep-mat-", async (root) => {
             const host = join(root, "host")

@@ -10,11 +10,11 @@ import type {
     FunctionCallItem,
     FunctionCallOutputItem,
     ModelMessageItem,
-    Participant,
     SemanticEvent,
 } from "../runtime/mozaik.js"
+import { toWire } from "../runtime/mozaik.js"
 import { AgentTargetedMessage } from "../events/collaboration.js"
-import { BaseObserver } from "../runtime/mozaik.js"
+import { BusMember } from "../runtime/coordination.js"
 import { StoryResult, WorkLeaseGranted } from "../semantic-events.js"
 import {
     filePathFromToolCall,
@@ -35,12 +35,12 @@ import {
 export interface AttemptRecallRunnerOptions {
     readonly runId: string
     /** Only this participant's lease grants start a new attempt. */
-    readonly leaseAuthority?: Participant
+    readonly leaseAuthority?: BusMember
     /** Repository root per story, so a path means the same thing after restart. */
     resolveRoot?(agentId: string): string | null
 }
 
-export class AttemptRecallRunner extends BaseObserver {
+export class AttemptRecallRunner extends BusMember {
     /** What the attempt currently running for this story has established. */
     private readonly live = new Map<string, AttemptRecord>()
     /** Frozen at the moment an attempt died, waiting for its successor. */
@@ -52,11 +52,11 @@ export class AttemptRecallRunner extends BaseObserver {
         super()
     }
 
-    override onExternalModelMessage(source: Participant, item: ModelMessageItem): void {
+    override onExternalModelMessage(source: BusMember, item: ModelMessageItem): void {
         this.guard(() => {
             const agentId = participantAgentId(source)
             if (!agentId) return
-            const json = item.toJSON() as { content?: Array<{ text?: string }> }
+            const json = toWire(item) as { content?: Array<{ text?: string }> }
             const text = (json.content ?? [])
                 .map((part) => part.text ?? "")
                 .filter(Boolean)
@@ -66,7 +66,7 @@ export class AttemptRecallRunner extends BaseObserver {
         })
     }
 
-    override onExternalFunctionCall(source: Participant, item: FunctionCallItem): void {
+    override onExternalFunctionCall(source: BusMember, item: FunctionCallItem): void {
         this.guard(() => {
             const agentId = participantAgentId(source)
             if (!agentId) return
@@ -87,7 +87,7 @@ export class AttemptRecallRunner extends BaseObserver {
     }
 
     override onExternalFunctionCallOutput(
-        _source: Participant,
+        _source: BusMember,
         item: FunctionCallOutputItem,
     ): void {
         this.guard(() => {
@@ -106,28 +106,28 @@ export class AttemptRecallRunner extends BaseObserver {
         })
     }
 
-    override onExternalEvent(source: Participant, event: SemanticEvent<unknown>): void {
+    override onExternalEvent(source: BusMember, event: SemanticEvent<string, unknown>): void {
         this.guard(() => this.react(source, event))
     }
 
-    private react(source: Participant, event: SemanticEvent<unknown>): void {
-        if (StoryResult.is(event) && event.data.runId === this.opts.runId) {
-            const storyId = event.data.storyId
+    private react(source: BusMember, event: SemanticEvent<string, unknown>): void {
+        if (StoryResult.is(event) && event.payload.runId === this.opts.runId) {
+            const storyId = event.payload.storyId
             const record = this.live.get(storyId)
             this.live.delete(storyId)
             // A story that reported — pass or fail — was judged on its work, and
             // its successor is a different attempt at a re-scoped problem. Only
             // an attempt that never got to report has something unfinished to
             // hand over.
-            if (record && !event.data.success && wasKilled(event.data)) {
+            if (record && !event.payload.success && wasKilled(event.payload)) {
                 this.inherited.set(storyId, record)
             }
             return
         }
         if (!WorkLeaseGranted.is(event)) return
-        if (event.data.runId !== this.opts.runId) return
+        if (event.payload.runId !== this.opts.runId) return
         if (this.opts.leaseAuthority && source !== this.opts.leaseAuthority) return
-        const storyId = event.data.request?.storyId
+        const storyId = event.payload.request?.storyId
         if (!storyId) return
         const record = this.inherited.get(storyId)
         if (!record) return
@@ -150,12 +150,12 @@ export class AttemptRecallRunner extends BaseObserver {
             text,
             metadata: { source: "attempt-recall", runId: this.opts.runId },
         })
-        for (const environment of this.getEnvironments()) {
-            environment.deliverSemanticEvent(this, message as SemanticEvent<unknown>)
+        for (const environment of this.getBuses()) {
+            environment.publish(this, message as SemanticEvent<string, unknown>)
         }
     }
 
-    /** mozaik 3.12 delivers with `void this.react(...)`; a throw here kills the run. */
+    /** The bus does not await hooks; a throw here kills the run. */
     private guard(work: () => void): void {
         try {
             work()

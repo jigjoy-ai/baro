@@ -44,7 +44,7 @@ describe("RecoverySourceAuthority", () => {
             generation: 1,
         })
         policy.observeLease(source("ambient-broker"), grant, leases, runId)
-        assert.equal(leases.matches(result.data, runId), false)
+        assert.equal(leases.matches(result.payload, runId), false)
         assert.equal(
             policy.accepts(
                 source("ambient-gate"),
@@ -131,9 +131,9 @@ describe("RecoverySourceAuthority", () => {
         })
 
         assert.equal(policy.observeLease(attacker, grant, leases, runId), true)
-        assert.equal(leases.matches(result.data, runId), false)
+        assert.equal(leases.matches(result.payload, runId), false)
         assert.equal(policy.observeLease(broker, grant, leases, runId), true)
-        assert.equal(leases.matches(result.data, runId), true)
+        assert.equal(leases.matches(result.payload, runId), true)
 
         const release = WorkLeaseReleased.create({
             runId,
@@ -143,7 +143,7 @@ describe("RecoverySourceAuthority", () => {
             reason: "integrated",
         })
         assert.equal(policy.observeLease(attacker, release, leases, runId), true)
-        assert.equal(leases.matches(result.data, runId), true)
+        assert.equal(leases.matches(result.payload, runId), true)
 
         assert.equal(policy.accepts(attacker, result), false)
         assert.equal(policy.accepts(worker, result), true)
@@ -173,7 +173,7 @@ describe("RecoverySourceAuthority", () => {
         assert.equal(policy.accepts(critic, critique), true)
 
         assert.equal(policy.observeLease(broker, release, leases, runId), true)
-        assert.equal(leases.matches(result.data, runId), false)
+        assert.equal(leases.matches(result.payload, runId), false)
     })
 
     it("does not allow authorities to be rebound", () => {

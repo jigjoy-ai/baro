@@ -11,7 +11,7 @@
  * because that would fragment the auth model — Claude Code runs via OAuth
  * session, not via ANTHROPIC_API_KEY.
  *
- * Library-grade: no imports from prd.ts, story-agent.ts, or conductor.ts.
+ * Library-grade: no imports from prd.ts or story-agent.ts.
  */
 
 import type { SpawnOptions } from "child_process"
@@ -259,8 +259,8 @@ export class Critic extends OneShotCritic {
             },
         }
         const event = ModelInvocationMeasured.create(data)
-        for (const env of this.getEnvironments()) {
-            env.deliverSemanticEvent(this, event)
+        for (const env of this.getBuses()) {
+            env.publish(this, event)
         }
     }
 }

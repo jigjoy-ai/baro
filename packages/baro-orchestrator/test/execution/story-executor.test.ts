@@ -1,18 +1,9 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 
-import type {
-    AgenticEnvironment,
-    Participant,
-    SemanticEvent,
-} from "../../src/runtime/mozaik.js"
+import type { BusMember, CoordinationBus } from "../../src/runtime/coordination.js"
 
-import {
-    StoryResult,
-    StorySpawnRequest,
-    StorySpawned,
-} from "../../src/semantic-events.js"
-import { StoryFactory } from "../../src/market/story-factory.js"
+import { StorySpawned } from "../../src/semantic-events.js"
 import { LocalStoryExecutor } from "../../src/execution/story-executor.js"
 import type {
     StoryExecOpts,
@@ -20,29 +11,10 @@ import type {
     StoryExecutor,
 } from "../../src/execution/story-executor.js"
 import type { StoryRoute } from "../../src/market/routing.js"
+import { flushBus, leasedFactory } from "../market/lease-fixture.js"
 
-function source(id: string): Participant {
-    return { agentId: id } as unknown as Participant
-}
-
-function spawn(storyId: string, model = "sonnet") {
-    return StorySpawnRequest.create({
-        storyId,
-        prompt: "do it",
-        model,
-        retries: 1,
-        timeoutSecs: 60,
-    })
-}
-
-function settle(storyId: string) {
-    return StoryResult.create({
-        storyId,
-        success: true,
-        attempts: 1,
-        durationSecs: 1,
-        error: null,
-    })
+function source(id: string): BusMember {
+    return { agentId: id } as unknown as BusMember
 }
 
 describe("StoryFactory — StoryExecutor seam", () => {
@@ -52,28 +24,26 @@ describe("StoryFactory — StoryExecutor seam", () => {
 
         // An out-of-process-style executor: records the dispatch instead of
         // running an agent in-process. The factory can't tell the difference.
+        const resultSource = source("S1-result")
         const fake: StoryExecutor = {
             start(req, route, cwd, _env, opts): StoryExecution {
                 starts.push({ storyId: req.storyId, route, cwd, opts })
+                opts.registerResultAuthority?.(resultSource)
                 return { dispose: () => disposed.push(req.storyId) }
             },
         }
 
-        const delivered: SemanticEvent<unknown>[] = []
-        const env = {
-            deliverSemanticEvent: (_s: unknown, e: SemanticEvent<unknown>) => {
-                delivered.push(e)
-            },
-        } as unknown as AgenticEnvironment
-
-        const factory = new StoryFactory({ cwd: "/work", executor: fake })
-        factory.setEnvironment(env)
-
-        await factory.onExternalEvent(source("conductor"), spawn("S1"))
+        const { env, factory, lease, result } = leasedFactory({
+            cwd: "/work",
+            executor: fake,
+        })
+        const spawn = await lease("S1")
+        await flushBus()
+        const delivered = env.events
 
         assert.equal(starts.length, 1, "executor.start called once")
         assert.equal(starts[0].storyId, "S1")
-        assert.equal(starts[0].cwd, "/work", "shared cwd passed when no worktrees")
+        assert.equal(starts[0].cwd, "/work", "cwd passed when no worktrees")
         assert.ok(starts[0].route, "resolved route handed to the executor")
         assert.ok(
             delivered.some((e) => StorySpawned.is(e)),
@@ -81,16 +51,16 @@ describe("StoryFactory — StoryExecutor seam", () => {
         )
 
         // A duplicate spawn for the same story is ignored (idempotent).
-        await factory.onExternalEvent(source("conductor"), spawn("S1"))
+        await factory.onInternalEvent(spawn)
         assert.equal(starts.length, 1, "duplicate spawn does not start twice")
 
         // When the story settles, the execution is disposed and forgotten.
-        await factory.onExternalEvent(source("S1"), settle("S1"))
+        await factory.onExternalEvent(resultSource, result("S1"))
         assert.deepEqual(disposed, ["S1"], "execution disposed on StoryResult")
     })
 
     it("defaults to LocalStoryExecutor when none is injected", () => {
-        const factory = new StoryFactory({ cwd: "/work" })
+        const { factory } = leasedFactory({ cwd: "/work" })
         const executor = (factory as unknown as { executor: unknown }).executor
         assert.ok(
             executor instanceof LocalStoryExecutor,
@@ -100,9 +70,9 @@ describe("StoryFactory — StoryExecutor seam", () => {
 
     it("LocalStoryExecutor registers the concrete agent before join/run", () => {
         const executor = new LocalStoryExecutor()
-        const env = {} as AgenticEnvironment
-        let registered: Participant | null = null
-        const registerTerminalAuthority = (_sourceParticipant: Participant) => undefined
+        const env = {} as CoordinationBus
+        let registered: BusMember | null = null
+        const registerTerminalAuthority = (_sourceParticipant: BusMember) => undefined
 
         assert.throws(
             () => executor.start(
@@ -126,7 +96,7 @@ describe("StoryFactory — StoryExecutor seam", () => {
                         assert.equal(sourceParticipant.agentId, "S-local")
                         assert.equal(
                             (sourceParticipant as unknown as {
-                                resultAuthority: Participant
+                                resultAuthority: BusMember
                             }).resultAuthority,
                             sourceParticipant,
                         )
@@ -147,7 +117,7 @@ describe("StoryFactory — StoryExecutor seam", () => {
 
     it("LocalStoryExecutor keeps the Claude review timeout default when Factory wiring passes undefined", () => {
         const executor = new LocalStoryExecutor()
-        const env = {} as AgenticEnvironment
+        const env = {} as CoordinationBus
         const critic = source("critic")
 
         for (const [configured, expected] of [
@@ -190,7 +160,7 @@ describe("StoryFactory — StoryExecutor seam", () => {
 
     it("LocalStoryExecutor wires exact surgical-review authorities into every one-shot backend", () => {
         const executor = new LocalStoryExecutor()
-        const env = {} as AgenticEnvironment
+        const env = {} as CoordinationBus
         const projector = source("terminal-projector")
         const critic = source("critic")
 
@@ -221,8 +191,8 @@ describe("StoryFactory — StoryExecutor seam", () => {
                                 const agent = participant as unknown as {
                                     spec: {
                                         requiresQualityReview: boolean
-                                        terminalTurnAuthority: Participant
-                                        turnReviewAuthority: Participant
+                                        terminalTurnAuthority: BusMember
+                                        turnReviewAuthority: BusMember
                                         turnReviewTimeoutMs: number
                                         handoffInconclusiveToAcceptanceGate: boolean
                                         requireProcessQuiescenceCertification: boolean
@@ -268,7 +238,7 @@ describe("StoryFactory — StoryExecutor seam", () => {
 
     it("LocalStoryExecutor forwards correlated runtime replan context to OpenAI", () => {
         const executor = new LocalStoryExecutor()
-        const env = {} as AgenticEnvironment
+        const env = {} as CoordinationBus
         const board = source("collective-board")
         let inspected = false
 
@@ -301,7 +271,7 @@ describe("StoryFactory — StoryExecutor seam", () => {
                                     graphVersion?: number
                                 }
                                 opts: {
-                                    runtimeReplanDecisionAuthority: Participant
+                                    runtimeReplanDecisionAuthority: BusMember
                                     runtimeReplanDecisionTimeoutMs: number
                                 }
                                 tools: Array<{ name: string; strict?: boolean }>

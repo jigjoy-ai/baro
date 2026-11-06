@@ -31,6 +31,7 @@ import {
 } from "./architect-invocation.js"
 import { llmIdleTimeoutMs } from "../../harness/liveness.js"
 import { ClaudeStreamResultCollector } from "../../harness/claude/stream-result.js"
+import { claudeReadPermissionArgs } from "../../harness/claude/read-only.js"
 import type { ModeContract } from "../domain/planner-prompts.js"
 
 export interface RunArchitectClaudeOptions {
@@ -93,6 +94,7 @@ export async function runArchitectClaude(
                     ? [
                           "--tools",
                           "Read,Glob,Grep",
+                          ...claudeReadPermissionArgs(),
                           "--safe-mode",
                           "--disable-slash-commands",
                           "--strict-mcp-config",

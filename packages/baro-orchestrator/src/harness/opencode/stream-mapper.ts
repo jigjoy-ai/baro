@@ -22,7 +22,7 @@ export type MappedOpenCodeItem =
     | ModelMessageItem
     | FunctionCallItem
     | FunctionCallOutputItem
-    | SemanticEvent<unknown>
+    | SemanticEvent<string, unknown>
 
 export interface OpenCodeMapResult {
     /** Always non-empty. */

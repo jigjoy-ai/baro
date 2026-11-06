@@ -10,12 +10,12 @@
  */
 
 import {
-    BaseObserver,
     FunctionCallItem,
     FunctionCallOutputItem,
-    Participant,
     SemanticEvent,
+    toWire,
 } from "../runtime/mozaik.js"
+import { BusMember } from "../runtime/coordination.js"
 
 import {
     AgentState,
@@ -38,6 +38,10 @@ export interface SupervisorOptions {
      * a non-converging loop; shell commands are work, not exploration, and do
      * not count. Default 80. */
     noProgressToolCalls?: number
+    /** …and only once this long has passed without a file change. A survey
+     * story read 80 files in 90 seconds and was aborted for it; exploring
+     * fast is not looping. Default 10 minutes. */
+    noProgressMinMs?: number
     /** Consecutive SHELL invocations with no file change before we call it a
      * non-converging probe loop. Independent of noProgressToolCalls, because a
      * command's runtime is legitimate work and needs far more headroom.
@@ -61,7 +65,7 @@ export interface SupervisorOptions {
     /** Enables fail-closed collective observation and correlated aborts. */
     collective?: {
         runId: string
-        leaseAuthority: Participant
+        leaseAuthority: BusMember
         outcomeAuthority: StoryOutcomeAuthority
     }
 }
@@ -81,7 +85,7 @@ interface StoryProgress {
     intervened: boolean
 }
 
-export class Supervisor extends BaseObserver {
+export class Supervisor extends BusMember {
     private readonly opts: Required<Omit<SupervisorOptions, "collective">> &
         Pick<SupervisorOptions, "collective">
     private readonly stories = new Map<string, StoryProgress>()
@@ -96,6 +100,7 @@ export class Supervisor extends BaseObserver {
         const noProgressToolCalls = opts.noProgressToolCalls ?? 80
         this.opts = {
             noProgressToolCalls,
+            noProgressMinMs: opts.noProgressMinMs ?? 10 * 60_000,
             noProgressShellCalls: opts.noProgressShellCalls ?? 240,
             repeatThreshold: opts.repeatThreshold ?? 12,
             repeatsNeedNoProgress: opts.repeatsNeedNoProgress ?? Math.floor(noProgressToolCalls / 2),
@@ -113,32 +118,32 @@ export class Supervisor extends BaseObserver {
     }
 
     override async onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): Promise<void> {
         const collective = this.opts.collective
         if (collective && WorkLeaseGranted.is(event)) {
             if (
                 source !== collective.leaseAuthority ||
-                event.data.runId !== collective.runId
+                event.payload.runId !== collective.runId
             ) return
-            const storyId = event.data.request.storyId
+            const storyId = event.payload.request.storyId
             const current = this.activeLeases.get(storyId)
             if (
                 current &&
-                (event.data.generation < current.generation ||
-                    (event.data.generation === current.generation &&
-                        event.data.leaseId !== current.leaseId))
+                (event.payload.generation < current.generation ||
+                    (event.payload.generation === current.generation &&
+                        event.payload.leaseId !== current.leaseId))
             ) return
             if (
-                current?.leaseId === event.data.leaseId &&
-                current.generation === event.data.generation
+                current?.leaseId === event.payload.leaseId &&
+                current.generation === event.payload.generation
             ) return
             this.activeLeases.set(storyId, {
                 runId: collective.runId,
                 storyId,
-                leaseId: event.data.leaseId,
-                generation: event.data.generation,
+                leaseId: event.payload.leaseId,
+                generation: event.payload.generation,
             })
             this.resetAttempt(storyId)
             return
@@ -146,12 +151,12 @@ export class Supervisor extends BaseObserver {
         if (collective && WorkLeaseReleased.is(event)) {
             if (
                 source !== collective.leaseAuthority ||
-                event.data.runId !== collective.runId
+                event.payload.runId !== collective.runId
             ) return
-            const current = this.activeLeases.get(event.data.storyId)
-            if (current?.leaseId !== event.data.leaseId) return
-            this.activeLeases.delete(event.data.storyId)
-            this.stories.delete(event.data.storyId)
+            const current = this.activeLeases.get(event.payload.storyId)
+            if (current?.leaseId !== event.payload.leaseId) return
+            this.activeLeases.delete(event.payload.storyId)
+            this.stories.delete(event.payload.storyId)
             return
         }
         if (StorySpawned.is(event)) {
@@ -159,12 +164,12 @@ export class Supervisor extends BaseObserver {
             // A recovery can spawn the same logical story id again. The
             // successful spawn event is the authoritative boundary between
             // executions, so no intervention/progress state crosses it.
-            this.resetAttempt(event.data.storyId)
+            this.resetAttempt(event.payload.storyId)
             return
         }
 
         if (!AgentState.is(event)) return
-        const { agentId, phase } = event.data
+        const { agentId, phase } = event.payload
         if (collective) {
             if (!this.collectiveCorrelation(source, agentId)) return
         } else {
@@ -181,7 +186,7 @@ export class Supervisor extends BaseObserver {
     }
 
     override async onExternalFunctionCall(
-        source: Participant,
+        source: BusMember,
         item: FunctionCallItem,
     ): Promise<void> {
         const id = (source as unknown as { agentId?: string }).agentId
@@ -226,8 +231,8 @@ export class Supervisor extends BaseObserver {
         if (!reason) return
         st.intervened = true
         this.interventions += 1
-        for (const env of this.getEnvironments()) {
-            env.deliverSemanticEvent(
+        for (const env of this.getBuses()) {
+            env.publish(
                 this,
                 StoryIntervention.create({
                     storyId: id,
@@ -247,7 +252,7 @@ export class Supervisor extends BaseObserver {
     }
 
     override async onExternalFunctionCallOutput(
-        source: Participant,
+        source: BusMember,
         item: FunctionCallOutputItem,
     ): Promise<void> {
         const id = (source as unknown as { agentId?: string }).agentId
@@ -256,7 +261,7 @@ export class Supervisor extends BaseObserver {
         if (!st) return
         const callId =
             (item as unknown as { callId?: string }).callId ??
-            (item.toJSON() as { call_id?: string }).call_id
+            (toWire(item) as { call_id?: string }).call_id
         if (callId && st.pendingShell.delete(callId)) {
             // The command's whole runtime was work. Move the clock to its
             // completion, or the story's first call after a long suite reads
@@ -266,7 +271,10 @@ export class Supervisor extends BaseObserver {
     }
 
     private stallReason(st: StoryProgress, repeats: number): string | null {
-        if (st.sinceLastChange >= this.opts.noProgressToolCalls) {
+        if (
+            st.sinceLastChange >= this.opts.noProgressToolCalls &&
+            this.opts.now() - st.lastProgressAt >= this.opts.noProgressMinMs
+        ) {
             return `${st.sinceLastChange} tool calls with no file change — exploring, not converging`
         }
         // Commands are work, but a story running them forever without touching
@@ -317,7 +325,7 @@ export class Supervisor extends BaseObserver {
     }
 
     private collectiveCorrelation(
-        source: Participant,
+        source: BusMember,
         storyId: string,
     ): StoryResultAuthorityCorrelation | null {
         const collective = this.opts.collective

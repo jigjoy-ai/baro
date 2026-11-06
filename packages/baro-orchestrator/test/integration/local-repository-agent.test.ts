@@ -20,7 +20,7 @@ describe("LocalRepositoryAgent", () => {
         const repository = new LocalRepositoryAgent(runId)
         const env = joinWithCapture(repository)
 
-        env.deliverSemanticEvent(
+        env.publish(
             source("board"),
             RunPreparationRequested.create({ runId }),
         )
@@ -37,9 +37,9 @@ describe("LocalRepositoryAgent", () => {
         const env = joinWithCapture(repository)
 
         const preparation = RunPreparationRequested.create({ runId })
-        env.deliverSemanticEvent(observer, preparation)
+        env.publish(observer, preparation)
         assert.equal(env.events.filter(RunPrepared.is).length, 0)
-        env.deliverSemanticEvent(board, preparation)
+        env.publish(board, preparation)
         assert.equal(env.events.filter(RunPrepared.is).length, 1)
 
         const integration = StoryIntegrationRequested.create({
@@ -49,9 +49,9 @@ describe("LocalRepositoryAgent", () => {
             attempts: 1,
             durationSecs: 1,
         })
-        env.deliverSemanticEvent(observer, integration)
+        env.publish(observer, integration)
         assert.equal(env.events.filter(StoryMerged.is).length, 0)
-        env.deliverSemanticEvent(board, integration)
+        env.publish(board, integration)
         assert.equal(env.events.filter(StoryMerged.is).length, 1)
 
         const cleanup = WorkspaceCleanupRequested.create({
@@ -61,15 +61,15 @@ describe("LocalRepositoryAgent", () => {
             leaseId: "lease-1",
             generation: 1,
         })
-        env.deliverSemanticEvent(observer, cleanup)
+        env.publish(observer, cleanup)
         assert.equal(env.events.filter(WorkspaceCleanupCompleted.is).length, 0)
-        env.deliverSemanticEvent(board, cleanup)
+        env.publish(board, cleanup)
         assert.equal(env.events.filter(WorkspaceCleanupCompleted.is).length, 1)
 
         const push = RunPushRequested.create({ runId })
-        env.deliverSemanticEvent(observer, push)
+        env.publish(observer, push)
         assert.equal(env.events.filter(RunPushed.is).length, 0)
-        env.deliverSemanticEvent(board, push)
+        env.publish(board, push)
         assert.equal(env.events.filter(RunPushed.is).length, 1)
     })
 })

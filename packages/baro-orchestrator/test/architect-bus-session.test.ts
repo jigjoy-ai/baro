@@ -1,8 +1,8 @@
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
-import { AgenticEnvironment, BaseObserver } from "../src/runtime/mozaik.js"
-import type { AgenticEnvironment as Env, Participant } from "../src/runtime/mozaik.js"
+import { CoordinationBus, BusMember } from "../src/runtime/coordination.js"
+import type { CoordinationBus as Env } from "../src/runtime/coordination.js"
 import { AgentResult } from "../src/semantic-events.js"
 import { registerLane } from "../src/harness/lane-registry.js"
 import type {
@@ -38,7 +38,7 @@ class DefectiveOutcomeError extends Error {
  * process, no provider, no network.
  */
 class ScriptedOutcomeParticipant
-    extends BaseObserver
+    extends BusMember
     implements InteractiveModelParticipant<unknown>
 {
     readonly done: Promise<unknown>
@@ -67,8 +67,8 @@ class ScriptedOutcomeParticipant
         const reply = this.script[this.spoken]
         if (reply === undefined || this.env === null) return
         this.spoken += 1
-        this.env.deliverSemanticEvent(
-            this as unknown as Participant,
+        this.env.publish(
+            this as unknown as BusMember,
             AgentResult.create({
                 agentId: this.agentId,
                 terminalId: `${this.agentId}:turn-${this.spoken}`,
@@ -137,7 +137,7 @@ async function runOutcomeSession(input: {
             goal: "Decide the shape of the change.",
             cwd: process.cwd(),
             backend: "fake-outcome",
-            environment: new AgenticEnvironment("architect-bus-outcome-test"),
+            environment: new CoordinationBus("architect-bus-outcome-test"),
             maxResearchRounds: 0,
             idleTimeoutMs: 30_000,
             validateOutcome: input.validateOutcome,

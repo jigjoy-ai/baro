@@ -21,7 +21,11 @@ import {
     CollaborationNote,
     GoalInvariantChallengeRaised,
     GoalLedgerProjectionPersisted,
+    PathsClaimed,
     RunCompleted,
+    StoryCheckpointDecided,
+    StoryCheckpointRequested,
+    StoryCheckpointWithdrawn,
     RunStartRequest,
     RuntimeReplanApplied,
     RuntimeReplanProposed,
@@ -58,7 +62,7 @@ describe("CollaborationBridge", () => {
                 /already sealed/,
             )
             const env = joinWithCapture(bridge)
-            env.deliverSemanticEvent(
+            env.publish(
                 broker,
                 WorkLeaseGranted.create({
                     runId,
@@ -75,7 +79,7 @@ describe("CollaborationBridge", () => {
                     },
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 impostor,
                 AgentTargetedMessage.create({
                     recipientId: "S1",
@@ -83,7 +87,7 @@ describe("CollaborationBridge", () => {
                     metadata: {},
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 operator,
                 AgentTargetedMessage.create({
                     recipientId: "S1",
@@ -98,9 +102,9 @@ describe("CollaborationBridge", () => {
 
             const deliveries = env.events
                 .filter(AgentTargetedMessage.is)
-                .filter((event) => event.data.runId === runId)
+                .filter((event) => event.payload.runId === runId)
             assert.equal(deliveries.length, 1)
-            assert.deepEqual(deliveries[0]?.data, {
+            assert.deepEqual(deliveries[0]?.payload, {
                 recipientId: "S1",
                 text: "authorized",
                 metadata: { source: "operator" },
@@ -172,13 +176,13 @@ describe("CollaborationBridge", () => {
             const message = (recipientId: string, text: string) =>
                 AgentTargetedMessage.create({ recipientId, text, metadata: {} })
 
-            env.deliverSemanticEvent(broker, grant(slashId, "lease-slash-1", 1))
-            env.deliverSemanticEvent(
+            env.publish(broker, grant(slashId, "lease-slash-1", 1))
+            env.publish(
                 broker,
                 grant(questionId, "lease-question-1", 1),
             )
-            env.deliverSemanticEvent(operator, message(slashId, "slash generation 1"))
-            env.deliverSemanticEvent(
+            env.publish(operator, message(slashId, "slash generation 1"))
+            env.publish(
                 operator,
                 message(questionId, "question generation 1"),
             )
@@ -192,11 +196,11 @@ describe("CollaborationBridge", () => {
             )
             assert.doesNotMatch(readFileSync(questionInbox, "utf8"), /slash/u)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 broker,
                 release(slashId, "lease-slash-1"),
             )
-            env.deliverSemanticEvent(broker, grant(slashId, "lease-slash-2", 2))
+            env.publish(broker, grant(slashId, "lease-slash-2", 2))
             await bridge.idle()
             assert.equal(existsSync(slashInbox), false)
             assert.match(
@@ -204,8 +208,8 @@ describe("CollaborationBridge", () => {
                 /question generation 1/u,
             )
 
-            env.deliverSemanticEvent(operator, message(slashId, "slash generation 2"))
-            env.deliverSemanticEvent(
+            env.publish(operator, message(slashId, "slash generation 2"))
+            env.publish(
                 operator,
                 message(questionId, "question still generation 1"),
             )
@@ -221,11 +225,11 @@ describe("CollaborationBridge", () => {
                 /question still generation 1/u,
             )
 
-            env.deliverSemanticEvent(
+            env.publish(
                 broker,
                 release(questionId, "lease-question-1"),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 broker,
                 grant(questionId, "lease-question-2", 2),
             )
@@ -233,7 +237,7 @@ describe("CollaborationBridge", () => {
             assert.equal(existsSync(questionInbox), false)
             assert.match(readFileSync(slashInbox, "utf8"), /slash generation 2/u)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 operator,
                 message(questionId, "question generation 2"),
             )
@@ -264,7 +268,7 @@ describe("CollaborationBridge", () => {
             bridge.setLeaseAuthority(broker)
             bridge.setMessageIntentAuthorities([])
             const env = joinWithCapture(bridge)
-            env.deliverSemanticEvent(
+            env.publish(
                 broker,
                 WorkLeaseGranted.create({
                     runId,
@@ -281,7 +285,7 @@ describe("CollaborationBridge", () => {
                     },
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 broker,
                 WorkLeaseReleased.create({
                     runId,
@@ -329,7 +333,7 @@ describe("CollaborationBridge", () => {
             })
             const env = joinWithCapture(bridge)
             const lease = (storyId: string, leaseId: string, writes?: string[]) =>
-                env.deliverSemanticEvent(
+                env.publish(
                     source("broker"),
                     WorkLeaseGranted.create({
                         runId: "run-claim",
@@ -359,17 +363,17 @@ describe("CollaborationBridge", () => {
                 env.events,
                 (event): event is ReturnType<typeof AgentTargetedMessage.create> =>
                     AgentTargetedMessage.is(event) &&
-                    event.data.metadata.kind === "ownership_update",
+                    event.payload.metadata.kind === "ownership_update",
             )
-            assert.equal(update.data.recipientId, "S9")
-            assert.match(update.data.text, /S14 started and now owns/u)
-            assert.match(update.data.text, /promotions\.audit\.spec\.ts/u)
+            assert.equal(update.payload.recipientId, "S9")
+            assert.match(update.payload.text, /S14 started and now owns/u)
+            assert.match(update.payload.text, /promotions\.audit\.spec\.ts/u)
             assert.equal(
                 env.events.filter(
                     (event) =>
                         AgentTargetedMessage.is(event) &&
-                        event.data.metadata.kind === "ownership_update" &&
-                        event.data.recipientId === "S14",
+                        event.payload.metadata.kind === "ownership_update" &&
+                        event.payload.recipientId === "S14",
                 ).length,
                 0,
                 "a story is not told about its own paths",
@@ -394,7 +398,7 @@ describe("CollaborationBridge", () => {
                           : null,
             })
             const env = joinWithCapture(bridge)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("broker"),
                 WorkLeaseGranted.create({
                     runId: "run-owner",
@@ -428,13 +432,13 @@ describe("CollaborationBridge", () => {
                 env.events,
                 (event): event is ReturnType<typeof AgentTargetedMessage.create> =>
                     AgentTargetedMessage.is(event) &&
-                    event.data.metadata.kind === "ownership_answer",
+                    event.payload.metadata.kind === "ownership_answer",
             )
-            assert.equal(answer.data.recipientId, "S9")
-            assert.match(answer.data.text, /audit\.module\.ts → S3 \(not integrated yet/u)
-            assert.match(answer.data.text, /promotions\.service\.ts → S13 \(already integrated/u)
+            assert.equal(answer.payload.recipientId, "S9")
+            assert.match(answer.payload.text, /audit\.module\.ts → S3 \(not integrated yet/u)
+            assert.match(answer.payload.text, /promotions\.service\.ts → S13 \(already integrated/u)
             assert.doesNotMatch(
-                answer.data.text,
+                answer.payload.text,
                 /menu\.service\.ts/u,
                 "a path nobody owns is not an ownership fact",
             )
@@ -453,7 +457,7 @@ describe("CollaborationBridge", () => {
             })
             const env = joinWithCapture(bridge)
             for (const [storyId, leaseId] of [["S1", "lease-1"], ["S2", "lease-2"]]) {
-                env.deliverSemanticEvent(
+                env.publish(
                     source("broker"),
                     WorkLeaseGranted.create({
                         runId: "run-collab",
@@ -483,8 +487,8 @@ describe("CollaborationBridge", () => {
                 }),
             )
             const message = await waitFor(env.events, AgentTargetedMessage.is)
-            assert.equal(message.data.recipientId, "S2")
-            assert.equal(message.data.metadata.sourceAgentId, "S1")
+            assert.equal(message.payload.recipientId, "S2")
+            assert.equal(message.payload.metadata.sourceAgentId, "S1")
             await bridge.idle()
             const inbox = join(
                 dir,
@@ -511,12 +515,12 @@ describe("CollaborationBridge", () => {
                 }),
             )
             const discovered = await waitFor(env.events, WorkDiscovered.is)
-            assert.equal(discovered.data.sourceAgentId, "S1")
-            assert.equal(discovered.data.leaseId, "lease-1")
-            assert.equal(discovered.data.generation, 1)
-            assert.equal(discovered.data.story.id, "S3")
+            assert.equal(discovered.payload.sourceAgentId, "S1")
+            assert.equal(discovered.payload.leaseId, "lease-1")
+            assert.equal(discovered.payload.generation, 1)
+            assert.equal(discovered.payload.story.id, "S3")
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("board"),
                 RunCompleted.create({
                     success: true,
@@ -548,7 +552,7 @@ describe("CollaborationBridge", () => {
                 inboxFilenameForAgentId("S2"),
             )
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("peer"),
                 AgentTargetedMessage.create({
                     recipientId: "S2",
@@ -562,7 +566,7 @@ describe("CollaborationBridge", () => {
             await bridge.idle()
             assert.equal(existsSync(inbox), false)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("broker"),
                 WorkLeaseGranted.create({
                     runId: "run-pending",
@@ -584,7 +588,7 @@ describe("CollaborationBridge", () => {
             assert.equal(existsSync(inbox), true)
             assert.match(readFileSync(inbox, "utf8"), /terminal Responses event/)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("board"),
                 RunCompleted.create({
                     success: true,
@@ -610,7 +614,7 @@ describe("CollaborationBridge", () => {
                 unsafeAllowUnboundAuthorities: true,
             })
             const env = joinWithCapture(bridge)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("broker"),
                 WorkLeaseGranted.create({
                     runId: "run-release",
@@ -635,7 +639,7 @@ describe("CollaborationBridge", () => {
                     text: "This finding was written immediately before exit.",
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("broker"),
                 WorkLeaseReleased.create({
                     runId: "run-release",
@@ -649,11 +653,11 @@ describe("CollaborationBridge", () => {
             await bridge.idle()
 
             const note = await waitFor(env.events, CollaborationNote.is)
-            assert.equal(note.data.runId, "run-release")
-            assert.equal(note.data.sourceAgentId, "S1")
-            assert.match(note.data.text, /immediately before exit/)
+            assert.equal(note.payload.runId, "run-release")
+            assert.equal(note.payload.sourceAgentId, "S1")
+            assert.match(note.payload.text, /immediately before exit/)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("board"),
                 RunCompleted.create({
                     success: true,
@@ -681,7 +685,7 @@ describe("CollaborationBridge", () => {
             })
             bridge.setLeaseAuthority(broker)
             const env = joinWithCapture(bridge)
-            env.deliverSemanticEvent(
+            env.publish(
                 broker,
                 WorkLeaseGranted.create({
                     runId,
@@ -708,7 +712,7 @@ describe("CollaborationBridge", () => {
                     reason: "cleanup can still race the terminal response",
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 broker,
                 WorkLeaseReleased.create({
                     runId,
@@ -723,7 +727,7 @@ describe("CollaborationBridge", () => {
 
             const challenges = env.events.filter(GoalInvariantChallengeRaised.is)
             assert.equal(challenges.length, 1)
-            assert.equal(challenges[0]?.data.raisedBy, "S1")
+            assert.equal(challenges[0]?.payload.raisedBy, "S1")
 
             const stalePath = join(
                 dir,
@@ -763,7 +767,7 @@ describe("CollaborationBridge", () => {
             bridge.setLeaseAuthority(broker)
             bridge.setDecisionAuthority(board)
             const env = joinWithCapture(bridge)
-            env.deliverSemanticEvent(
+            env.publish(
                 broker,
                 WorkLeaseGranted.create({
                     runId,
@@ -821,21 +825,21 @@ describe("CollaborationBridge", () => {
                 revision: projection.revision,
                 projection,
             })
-            env.deliverSemanticEvent(attacker, receipt)
+            env.publish(attacker, receipt)
             await bridge.idle()
             assert.equal(existsSync(retainedPath), true)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 board,
                 GoalLedgerProjectionPersisted.create({
-                    ...receipt.data,
+                    ...receipt.payload,
                     projection: { ...projection, challenges: [] },
                 }),
             )
             await bridge.idle()
             assert.equal(existsSync(retainedPath), true)
 
-            env.deliverSemanticEvent(board, receipt)
+            env.publish(board, receipt)
             await bridge.idle()
             assert.equal(existsSync(retainedPath), false)
             bridge.leave(env)
@@ -857,7 +861,7 @@ describe("CollaborationBridge", () => {
             })
             firstBridge.setLeaseAuthority(broker)
             const firstEnv = joinWithCapture(firstBridge)
-            firstEnv.deliverSemanticEvent(
+            firstEnv.publish(
                 broker,
                 WorkLeaseGranted.create({
                     runId,
@@ -952,7 +956,7 @@ describe("CollaborationBridge", () => {
             board.join(secondEnv)
             secondBridge.join(secondEnv)
 
-            secondEnv.deliverSemanticEvent(
+            secondEnv.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "resume after crash" }),
             )
@@ -973,7 +977,7 @@ describe("CollaborationBridge", () => {
             assert.equal(
                 secondEnv.events
                     .filter(GoalLedgerProjectionPersisted.is)
-                    .some(({ data }) =>
+                    .some(({ payload: data }) =>
                         data.projection.challenges.some(
                             ({ challengeId }) =>
                                 challengeId === "challenge-survives-restart",
@@ -1016,8 +1020,8 @@ describe("CollaborationBridge", () => {
                     },
                 })
 
-            env.deliverSemanticEvent(broker, grant("lease-old", 1))
-            env.deliverSemanticEvent(
+            env.publish(broker, grant("lease-old", 1))
+            env.publish(
                 broker,
                 WorkLeaseReleased.create({
                     runId,
@@ -1028,7 +1032,7 @@ describe("CollaborationBridge", () => {
                     reason: "operational_failed",
                 }),
             )
-            env.deliverSemanticEvent(broker, grant("lease-new", 2))
+            env.publish(broker, grant("lease-new", 2))
             await bridge.idle()
 
             const stalePath = join(dir, "outbox", "stale-discovery.json")
@@ -1084,9 +1088,9 @@ describe("CollaborationBridge", () => {
                     graphVersion: 4,
                 },
             })
-            env.deliverSemanticEvent(attacker, grant)
-            env.deliverSemanticEvent(broker, grant)
-            env.deliverSemanticEvent(
+            env.publish(attacker, grant)
+            env.publish(broker, grant)
+            env.publish(
                 attacker,
                 WorkLeaseReleased.create({
                     runId,
@@ -1127,7 +1131,7 @@ describe("CollaborationBridge", () => {
             )
 
             const proposed = await waitFor(env.events, RuntimeReplanProposed.is)
-            assert.deepEqual(proposed.data, {
+            assert.deepEqual(proposed.payload, {
                 runId,
                 proposalId: "proposal-1",
                 sourceStoryId: "S1",
@@ -1139,11 +1143,11 @@ describe("CollaborationBridge", () => {
             })
 
             const applied = RuntimeReplanApplied.create({
-                ...proposed.data,
+                ...proposed.payload,
                 previousGraphVersion: 4,
                 graphVersion: 5,
             })
-            env.deliverSemanticEvent(attacker, applied)
+            env.publish(attacker, applied)
             await bridge.idle()
             const decisionPath = join(dir, "decisions", "proposal-1.json")
             assert.equal(existsSync(decisionPath), false)
@@ -1163,7 +1167,7 @@ describe("CollaborationBridge", () => {
                 }
                 writeDecision(proposalId, decision)
             }
-            env.deliverSemanticEvent(board, applied)
+            env.publish(board, applied)
             await waitForPath(decisionPath)
             assert.equal(
                 env.events.filter(RuntimeReplanProposed.is).length,
@@ -1172,7 +1176,7 @@ describe("CollaborationBridge", () => {
             const decision = JSON.parse(readFileSync(decisionPath, "utf8"))
             assert.deepEqual(decision, {
                 status: "applied",
-                ...applied.data,
+                ...applied.payload,
             })
             assert.deepEqual(
                 readdirSync(join(dir, "decisions")).filter((name) =>
@@ -1181,7 +1185,7 @@ describe("CollaborationBridge", () => {
                 [],
             )
 
-            env.deliverSemanticEvent(
+            env.publish(
                 attacker,
                 RunCompleted.create({
                     success: true,
@@ -1216,27 +1220,27 @@ describe("CollaborationBridge", () => {
             )
             const rejected = RuntimeReplanRejected.create({
                 runId,
-                proposalId: secondProposal.data.proposalId,
-                sourceStoryId: secondProposal.data.sourceStoryId,
-                leaseId: secondProposal.data.leaseId,
-                generation: secondProposal.data.generation,
-                baseGraphVersion: secondProposal.data.baseGraphVersion,
+                proposalId: secondProposal.payload.proposalId,
+                sourceStoryId: secondProposal.payload.sourceStoryId,
+                leaseId: secondProposal.payload.leaseId,
+                generation: secondProposal.payload.generation,
+                baseGraphVersion: secondProposal.payload.baseGraphVersion,
                 currentGraphVersion: 5,
                 code: "stale_graph_version",
                 reason: "the graph advanced after this story launched",
             })
-            env.deliverSemanticEvent(board, rejected)
+            env.publish(board, rejected)
             const rejectedPath = join(dir, "decisions", "proposal-2.json")
             await waitForPath(rejectedPath)
             assert.deepEqual(
                 JSON.parse(readFileSync(rejectedPath, "utf8")),
                 {
                     status: "rejected",
-                    ...rejected.data,
+                    ...rejected.payload,
                 },
             )
 
-            env.deliverSemanticEvent(
+            env.publish(
                 board,
                 RunCompleted.create({
                     success: true,
@@ -1264,7 +1268,7 @@ describe("CollaborationBridge", () => {
             })
             bridge.setLeaseAuthority(broker)
             const env = joinWithCapture(bridge)
-            env.deliverSemanticEvent(
+            env.publish(
                 broker,
                 WorkLeaseGranted.create({
                     runId,
@@ -1290,7 +1294,7 @@ describe("CollaborationBridge", () => {
                     text: "Retain this final observation.",
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 broker,
                 WorkLeaseReleased.create({
                     runId,
@@ -1319,7 +1323,7 @@ describe("CollaborationBridge", () => {
             )
 
             const note = await waitFor(env.events, CollaborationNote.is)
-            assert.equal(note.data.sourceAgentId, "S1")
+            assert.equal(note.payload.sourceAgentId, "S1")
 
             const staleNotePath = join(dir, "outbox", "c-stale-note.json")
             writeFileSync(
@@ -1366,7 +1370,7 @@ describe("CollaborationBridge", () => {
             bridge.setLeaseAuthority(broker)
             bridge.setDecisionAuthority(board)
             const env = joinWithCapture(bridge)
-            env.deliverSemanticEvent(
+            env.publish(
                 broker,
                 WorkLeaseGranted.create({
                     runId,
@@ -1397,7 +1401,7 @@ describe("CollaborationBridge", () => {
             )
 
             const blocked = await waitFor(env.events, WorkBlocked.is)
-            assert.deepEqual(blocked.data, {
+            assert.deepEqual(blocked.payload, {
                 runId,
                 blockId: "block-S6-S11",
                 storyId: "S6",
@@ -1407,19 +1411,19 @@ describe("CollaborationBridge", () => {
                 reason: "iterateWithAbort must integrate first",
             })
             const accepted = WorkBlockAccepted.create({
-                ...blocked.data,
+                ...blocked.payload,
                 graphVersion: 5,
             })
-            env.deliverSemanticEvent(attacker, accepted)
+            env.publish(attacker, accepted)
             await bridge.idle()
             const decisionPath = join(dir, "decisions", "block-S6-S11.json")
             assert.equal(existsSync(decisionPath), false)
 
-            env.deliverSemanticEvent(board, accepted)
+            env.publish(board, accepted)
             await waitForPath(decisionPath)
             assert.deepEqual(JSON.parse(readFileSync(decisionPath, "utf8")), {
                 status: "accepted",
-                ...accepted.data,
+                ...accepted.payload,
             })
         })
     })
@@ -1438,7 +1442,7 @@ describe("CollaborationBridge", () => {
             bridge.setLeaseAuthority(broker)
             bridge.setDecisionAuthority(board)
             const env = joinWithCapture(bridge)
-            env.deliverSemanticEvent(
+            env.publish(
                 broker,
                 WorkLeaseGranted.create({
                     runId,
@@ -1485,7 +1489,7 @@ describe("CollaborationBridge", () => {
             await waitFor(env.events, WorkBlocked.is)
             await waitFor(env.events, RuntimeReplanProposed.is)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 board,
                 RunCompleted.create({
                     runId,
@@ -1636,7 +1640,7 @@ describe("CollaborationBridge", () => {
                 env.events.filter(
                     (event) =>
                         CollaborationNote.is(event) &&
-                        event.data.text === "still live",
+                        event.payload.text === "still live",
                 ).length,
                 1,
             )
@@ -1661,7 +1665,7 @@ describe("CollaborationBridge", () => {
             grantLease(env, broker, runId, "S-poll", "lease-poll", 1, 2)
             await bridge.idle()
 
-            env.deliverSemanticEvent(
+            env.publish(
                 operator,
                 AgentTargetedMessage.create({
                     recipientId: "S-live",
@@ -1669,7 +1673,7 @@ describe("CollaborationBridge", () => {
                     metadata: { source: "operator" },
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 operator,
                 AgentTargetedMessage.create({
                     recipientId: "S-poll",
@@ -1687,7 +1691,7 @@ describe("CollaborationBridge", () => {
             })
             assert.deepEqual(live.initialMessages, ["bootstrap live message"])
             assert.equal((await brokerFetch(live, "/v1/inbox")).status, 409)
-            env.deliverSemanticEvent(
+            env.publish(
                 operator,
                 AgentTargetedMessage.create({
                     recipientId: "S-live",
@@ -1708,7 +1712,7 @@ describe("CollaborationBridge", () => {
                 (await brokerFetch(poll, "/v1/inbox")).value.messages,
                 [],
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 operator,
                 AgentTargetedMessage.create({
                     recipientId: "S-poll",
@@ -1728,7 +1732,7 @@ describe("CollaborationBridge", () => {
 
             const correlated = env.events
                 .filter(AgentTargetedMessage.is)
-                .filter((event) => event.data.runId === runId)
+                .filter((event) => event.payload.runId === runId)
             for (const text of [
                 "bootstrap live message",
                 "bootstrap poll message",
@@ -1736,7 +1740,7 @@ describe("CollaborationBridge", () => {
                 "poll-only message",
             ]) {
                 assert.equal(
-                    correlated.filter((event) => event.data.text === text).length,
+                    correlated.filter((event) => event.payload.text === text).length,
                     1,
                 )
             }
@@ -1777,7 +1781,7 @@ describe("CollaborationBridge", () => {
                 env.events.some(
                     (event) =>
                         CollaborationNote.is(event) &&
-                        event.data.text === "must not survive release",
+                        event.payload.text === "must not survive release",
                 ),
                 false,
             )
@@ -1818,12 +1822,12 @@ describe("CollaborationBridge", () => {
             assert.equal(disputes.length, 1)
             assert.deepEqual(
                 {
-                    runId: disputes[0]!.data.runId,
-                    storyId: disputes[0]!.data.storyId,
-                    claim: disputes[0]!.data.claim,
-                    command: disputes[0]!.data.command,
-                    output: disputes[0]!.data.output,
-                    obligationId: disputes[0]!.data.obligationId,
+                    runId: disputes[0]!.payload.runId,
+                    storyId: disputes[0]!.payload.storyId,
+                    claim: disputes[0]!.payload.claim,
+                    command: disputes[0]!.payload.command,
+                    output: disputes[0]!.payload.output,
+                    obligationId: disputes[0]!.payload.obligationId,
                 },
                 {
                     runId,
@@ -1918,7 +1922,7 @@ describe("CollaborationBridge", () => {
             // Let the long poll authenticate and register its waiter before
             // the terminal event closes the listening socket.
             await new Promise<void>((resolve) => setTimeout(resolve, 20))
-            env.deliverSemanticEvent(
+            env.publish(
                 board,
                 RunCompleted.create({
                     runId,
@@ -2171,7 +2175,7 @@ describe("CollaborationBridge", () => {
                 firstEnv.events,
                 GoalInvariantChallengeRaised.is,
             )
-            assert.equal(first.data.raisedBy, storyId)
+            assert.equal(first.payload.raisedBy, storyId)
             const duplicate = await brokerFetch(capability, "/v1/events", {
                 method: "POST",
                 body: {
@@ -2215,7 +2219,7 @@ describe("CollaborationBridge", () => {
                 secondEnv.events,
                 GoalInvariantChallengeRaised.is,
             )
-            assert.equal(replay.data.raisedBy, storyId)
+            assert.equal(replay.payload.raisedBy, storyId)
             await secondBridge.shutdown()
         })
     })
@@ -2261,7 +2265,7 @@ function grantLease(
     generation: number,
     graphVersion: number,
 ): void {
-    env.deliverSemanticEvent(
+    env.publish(
         broker,
         WorkLeaseGranted.create({
             runId,
@@ -2288,7 +2292,7 @@ function releaseLease(
     storyId: string,
     leaseId: string,
 ): void {
-    env.deliverSemanticEvent(
+    env.publish(
         broker,
         WorkLeaseReleased.create({
             runId,
@@ -2452,7 +2456,7 @@ async function waitForProposal(
             >[0]
             if (
                 RuntimeReplanProposed.is(event) &&
-                event.data.proposalId === proposalId
+                event.payload.proposalId === proposalId
             ) {
                 return event
             }
@@ -2461,3 +2465,209 @@ async function waitForProposal(
     }
     assert.fail(`timed out waiting for runtime replan proposal ${proposalId}`)
 }
+
+describe("CollaborationBridge — runtime path claims", () => {
+    it("answers a claim in the broker receipt and tells running peers who owns the path now", async () => {
+        await withTempDir("collaboration-claim-", async (dir) => {
+            const runId = "run-claim"
+            const broker = source("broker")
+            const asked: Array<{ storyId: string; paths: readonly string[] }> = []
+            const bridge = new CollaborationBridge({
+                runId,
+                sessionDir: dir,
+                claimPaths: (storyId, paths) => {
+                    asked.push({ storyId, paths })
+                    return [
+                        { path: paths[0]!, outcome: "granted", releasedBy: "S3" },
+                        { path: paths[1]!, outcome: "held", ownerStoryId: "S6" },
+                    ]
+                },
+            })
+            bridge.setLeaseAuthority(broker)
+            const env = joinWithCapture(bridge)
+            await bridge.ready()
+            grantLease(env, broker, runId, "S5", "lease-S5", 1, 3)
+            grantLease(env, broker, runId, "S6", "lease-S6", 1, 3)
+            await bridge.idle()
+            const claimant = bridge.capabilityForLease({
+                runId, storyId: "S5", leaseId: "lease-S5", generation: 1, deliveryMode: "poll",
+            })
+            const peer = bridge.capabilityForLease({
+                runId, storyId: "S6", leaseId: "lease-S6", generation: 1, deliveryMode: "poll",
+            })
+
+            const sent = await brokerFetch(claimant, "/v1/events", {
+                method: "POST",
+                body: {
+                    kind: "claim",
+                    eventId: "event-claim-1",
+                    paths: ["tests/test_tools.py", "__init__.py"],
+                    reason: "O-066 scans tests/",
+                },
+            })
+
+            assert.equal(sent.status, 202)
+            assert.deepEqual(asked, [
+                { storyId: "S5", paths: ["tests/test_tools.py", "__init__.py"] },
+            ])
+            assert.equal(sent.value.claims[0].outcome, "granted")
+            assert.equal(sent.value.claims[1].ownerStoryId, "S6")
+            const audit = await waitFor(env.events, PathsClaimed.is)
+            assert.equal(audit.payload.storyId, "S5")
+
+            const answer = await brokerFetch(claimant, "/v1/inbox")
+            assert.match(
+                JSON.stringify(answer.value.messages),
+                /tests\/test_tools\.py: yours now \(released by S3/,
+            )
+            assert.match(JSON.stringify(answer.value.messages), /held by S6, which has not integrated/)
+            const told = await brokerFetch(peer, "/v1/inbox")
+            assert.match(JSON.stringify(told.value.messages), /Story S5 now owns these paths/)
+            assert.doesNotMatch(
+                JSON.stringify(told.value.messages),
+                /__init__\.py/,
+                "a path that stayed with its owner did not change hands",
+            )
+            bridge.leave(env)
+        })
+    })
+
+    it("rejects a claim that names a tree or escapes the repository", async () => {
+        await withTempDir("collaboration-claim-shape-", async (dir) => {
+            const runId = "run-claim-shape"
+            const broker = source("broker")
+            const bridge = new CollaborationBridge({
+                runId,
+                sessionDir: dir,
+                claimPaths: () => assert.fail("an invalid claim never reaches the Board"),
+            })
+            bridge.setLeaseAuthority(broker)
+            const env = joinWithCapture(bridge)
+            await bridge.ready()
+            grantLease(env, broker, runId, "S5", "lease-S5", 1, 3)
+            await bridge.idle()
+            const claimant = bridge.capabilityForLease({
+                runId, storyId: "S5", leaseId: "lease-S5", generation: 1, deliveryMode: "poll",
+            })
+            for (const paths of [["../outside.ts"], ["/etc/passwd"], ["src/"], [], ["a.ts", "a.ts"]]) {
+                const sent = await brokerFetch(claimant, "/v1/events", {
+                    method: "POST",
+                    body: { kind: "claim", eventId: `event-${paths.length}-${paths[0] ?? "none"}`.replace(/[^\w-]/g, "x"), paths },
+                })
+                assert.equal(sent.status, 400, JSON.stringify(paths))
+            }
+            bridge.leave(env)
+        })
+    })
+})
+
+describe("CollaborationBridge — checkpoints", () => {
+    it("turns a worker's checkpoint into a Board request and relays the decision", async () => {
+        await withTempDir("collaboration-checkpoint-", async (dir) => {
+            const runId = "run-checkpoint"
+            const broker = source("broker")
+            const board = source("board")
+            const bridge = new CollaborationBridge({
+                runId,
+                sessionDir: dir,
+                prepareCheckpoint: async (storyId) =>
+                    storyId === "S1"
+                        ? { sha: "a".repeat(40), changedPaths: ["src/contract.ts"] }
+                        : null,
+            })
+            bridge.setLeaseAuthority(broker)
+            bridge.setDecisionAuthority(board)
+            const env = joinWithCapture(bridge)
+            await bridge.ready()
+            grantLease(env, broker, runId, "S1", "lease-S1", 1, 3)
+            grantLease(env, broker, runId, "S2", "lease-S2", 1, 3)
+            await bridge.idle()
+            const s1 = bridge.capabilityForLease({
+                runId, storyId: "S1", leaseId: "lease-S1", generation: 1, deliveryMode: "poll",
+            })
+            const s2 = bridge.capabilityForLease({
+                runId, storyId: "S2", leaseId: "lease-S2", generation: 1, deliveryMode: "poll",
+            })
+
+            const sent = await brokerFetch(s1, "/v1/events", {
+                method: "POST",
+                body: { kind: "checkpoint", eventId: "event-checkpoint-1", reason: "parser contract" },
+            })
+            assert.equal(sent.status, 202)
+            const requested = await waitFor(env.events, StoryCheckpointRequested.is)
+            assert.deepEqual(
+                { ...requested.payload },
+                {
+                    runId,
+                    storyId: "S1",
+                    leaseId: "lease-S1",
+                    generation: 1,
+                    sha: "a".repeat(40),
+                    changedPaths: ["src/contract.ts"],
+                    reason: "parser contract",
+                },
+            )
+
+            env.publish(
+                board,
+                StoryCheckpointDecided.create({
+                    runId,
+                    storyId: "S1",
+                    leaseId: "lease-S1",
+                    sha: "a".repeat(40),
+                    outcome: "published",
+                    reason: "parser contract",
+                    admitted: ["S3"],
+                    alreadyStarted: ["S2"],
+                }),
+            )
+            await bridge.idle()
+            const toS1 = JSON.stringify((await brokerFetch(s1, "/v1/inbox")).value.messages)
+            assert.match(toS1, /Checkpoint a{12} published/)
+            assert.match(toS1, /Started on it now: S3/)
+            const toS2 = JSON.stringify((await brokerFetch(s2, "/v1/inbox")).value.messages)
+            assert.match(toS2, /S1 published a newer checkpoint/)
+
+            env.publish(
+                board,
+                StoryCheckpointWithdrawn.create({
+                    runId,
+                    storyId: "S1",
+                    sha: "a".repeat(40),
+                    reason: "S1 failed",
+                    affected: ["S2"],
+                }),
+            )
+            await bridge.idle()
+            const withdrawn = JSON.stringify((await brokerFetch(s2, "/v1/inbox")).value.messages)
+            assert.match(withdrawn, /which you started on, was withdrawn: S1 failed/)
+            bridge.leave(env)
+        })
+    })
+
+    it("ignores checkpoint decisions that do not come from the Board", async () => {
+        await withTempDir("collaboration-checkpoint-forged-", async (dir) => {
+            const runId = "run-checkpoint-forged"
+            const broker = source("broker")
+            const bridge = new CollaborationBridge({ runId, sessionDir: dir })
+            bridge.setLeaseAuthority(broker)
+            bridge.setDecisionAuthority(source("board"))
+            const env = joinWithCapture(bridge)
+            await bridge.ready()
+            grantLease(env, broker, runId, "S2", "lease-S2", 1, 3)
+            await bridge.idle()
+            const s2 = bridge.capabilityForLease({
+                runId, storyId: "S2", leaseId: "lease-S2", generation: 1, deliveryMode: "poll",
+            })
+            env.publish(
+                source("S9"),
+                StoryCheckpointWithdrawn.create({
+                    runId, storyId: "S1", sha: "b".repeat(40), reason: "forged", affected: ["S2"],
+                }),
+            )
+            await bridge.idle()
+            assert.deepEqual((await brokerFetch(s2, "/v1/inbox")).value.messages, [])
+            bridge.leave(env)
+        })
+    })
+})

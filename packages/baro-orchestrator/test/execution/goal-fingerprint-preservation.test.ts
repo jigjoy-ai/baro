@@ -3,7 +3,14 @@ import assert from "node:assert/strict"
 import { readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 
-import { Conductor } from "../../src/execution/conductor.js"
+import type { CoordinationBus } from "../../src/runtime/coordination.js"
+import type {
+    StoryExecOpts,
+    StoryExecution,
+    StoryExecutor,
+} from "../../src/execution/story-executor.js"
+import type { StoryRoute } from "../../src/market/routing.js"
+import { orchestrate } from "../../src/orchestrate.js"
 import {
     loadPrd,
     persistPrdPreserving,
@@ -11,20 +18,15 @@ import {
     type PrdFile,
 } from "../../src/prd.js"
 import {
-    RunStartRequest,
     StoryResult,
-    StorySpawnRequest,
+    type StorySpawnRequestData,
 } from "../../src/semantic-events.js"
-import { joinWithCapture, source, withTempDir } from "./helpers.js"
+import { withTempDir } from "./helpers.js"
 
 /**
  * Form — the shared `persistPrdPreserving` helper in prd.ts was adopted over a
- * conductor-local re-read: the audit found SEVEN full-file prd.json writers
- * (conductor.ts:851, runtime-graph/runtime-replan-coordinator.ts:94,
- * orchestrate.ts:714 and :1087, collective-board.ts:495, :1580, :3111), and
- * collective-board.ts:495 — not conductor — is the first to drop the stamp on a
- * progressive run. A conductor-local re-read would fix one of seven and
- * duplicate the merge rule six more times.
+ * writer-local re-read: there are several full-file prd.json writers, and a
+ * local re-read would duplicate the merge rule in each.
  *
  * Diagnosis — the stamp is NOT bypassed. Rust's stamp_goal_fingerprint
  * (crates/baro-tui/src/main.rs:3945) is reached on the headless progressive
@@ -75,52 +77,57 @@ function readRaw(path: string): Record<string, unknown> {
     return JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>
 }
 
-function passResult(storyId: string) {
-    return StoryResult.create({
-        storyId,
-        success: true,
-        attempts: 1,
-        durationSecs: 1,
-        error: null,
-    })
-}
-
-async function waitForEvents<T>(
-    events: readonly unknown[],
-    guard: (event: unknown) => event is T,
-    count: number,
-): Promise<T[]> {
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-        const found = events.filter(guard)
-        if (found.length >= count) return found
-        await new Promise((resolve) => setTimeout(resolve, 0))
+class PassingExecutor implements StoryExecutor {
+    start(
+        request: StorySpawnRequestData,
+        _route: StoryRoute,
+        _cwd: string,
+        environment: CoordinationBus,
+        options: StoryExecOpts,
+    ): StoryExecution {
+        const resultSource = { agentId: request.storyId } as never
+        options.registerResultAuthority?.(resultSource)
+        setImmediate(() => {
+            environment.publish(
+                resultSource,
+                StoryResult.create({
+                    storyId: request.storyId,
+                    success: true,
+                    attempts: 1,
+                    durationSecs: 1,
+                    error: null,
+                    runId: request.runId,
+                    leaseId: request.leaseId,
+                    generation: request.generation,
+                }),
+            )
+        })
+        return { dispose: () => {} }
     }
-    assert.fail("timed out waiting for semantic events")
 }
 
-/** A real conductor persist over the default (uninjected) seam. */
-async function conductorPersist(dir: string, prdPath: string): Promise<void> {
-    const conductor = new Conductor({
+/** A real Board persist through a whole local run. */
+async function boardPersist(dir: string, prdPath: string): Promise<void> {
+    const result = await orchestrate({
         prdPath,
         cwd: dir,
-        parallel: 1,
-        timeoutSecs: 45,
-        defaultModel: "sonnet",
+        publishRemote: false,
+        withGit: false,
+        emitTuiEvents: false,
+        withLibrarian: false,
+        withMemory: false,
+        withSentry: false,
+        withCritic: false,
+        withSurgeon: false,
+        withSupervisor: false,
         intraLevelDelaySecs: 0,
+        executor: new PassingExecutor(),
     })
-    const env = joinWithCapture(conductor)
-    env.deliverSemanticEvent(
-        source("operator"),
-        RunStartRequest.create({ reason: "unit test" }),
-    )
-    await waitForEvents(env.events, StorySpawnRequest.is, 1)
-    env.deliverSemanticEvent(source("S1"), passResult("S1"))
-    const summary = await conductor.done
-    assert.equal(summary.success, true)
+    assert.deepEqual(result.summary.completedStories, ["S1"])
 }
 
 describe("goalFingerprint survives the TypeScript full-file write path", () => {
-    it("survives a progressive plan-persist followed by a conductor persist", async () => {
+    it("survives a progressive plan-persist followed by a Board persist", async () => {
         await withTempDir("goal-fingerprint-", async (dir) => {
             const prdPath = join(dir, "prd.json")
             writeFileSync(prdPath, stampedPrdJson())
@@ -139,14 +146,14 @@ describe("goalFingerprint survives the TypeScript full-file write path", () => {
             persistPrdPreserving(prdPath, planned)
             assert.equal(readRaw(prdPath).goalFingerprint, RUST_STAMP)
 
-            await conductorPersist(dir, prdPath)
+            await boardPersist(dir, prdPath)
 
             const after = readRaw(prdPath)
             assert.equal(after.goalFingerprint, RUST_STAMP)
             assert.equal(
                 (after.userStories as Record<string, unknown>[])[0]?.passes,
                 true,
-                "the conductor persist really happened",
+                "the Board persist really happened",
             )
         })
     })
@@ -180,7 +187,7 @@ describe("goalFingerprint survives the TypeScript full-file write path", () => {
             writeFileSync(prdPath, JSON.stringify(unstamped, null, 2) + "\n")
 
             persistPrdPreserving(prdPath, loadPrd(prdPath))
-            await conductorPersist(dir, prdPath)
+            await boardPersist(dir, prdPath)
 
             assert.equal("goalFingerprint" in readRaw(prdPath), false)
         })

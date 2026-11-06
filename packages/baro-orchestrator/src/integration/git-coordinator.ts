@@ -1,16 +1,13 @@
 /**
  * GitCoordinator — owns the per-story git side effects (worktree merge-back,
  * shared-tree reconcile, pushes, cleanup) and reports them on the bus as
- * StoryMerged / StoryMergeFailed.
- *
- * Legacy mode calls the same operations through hooks. Collective mode
- * performs the lifecycle entirely in response to semantic events.
+ * StoryMerged / StoryMergeFailed, entirely in response to semantic events.
  */
 
 import {
-    type Participant,
     type SemanticEvent,
 } from "../runtime/mozaik.js"
+import type { BusMember } from "../runtime/coordination.js"
 
 import {
     GitGate,
@@ -67,8 +64,6 @@ export interface GitCoordinatorOptions {
     worktrees: WorktreeManager | null
     /** Mirror progress/diffs to the TUI protocol. Default: true. */
     emitTui?: boolean
-    /** Subscribe to collective lifecycle events instead of direct hooks. */
-    eventDriven?: boolean
     runId?: string
     prdPath?: string
     /** Push commits to the configured remote. Default true. */
@@ -85,6 +80,7 @@ interface LeaseCorrelation {
 interface CandidateSealRequest {
     required: boolean
     fingerprint?: string
+    heldElsewhere?: Readonly<Record<string, string>>
 }
 
 /** Carries which pre-merge seal check refused the candidate, so the outer
@@ -114,22 +110,22 @@ export class GitCoordinator extends SerializedObserver {
         }
     >()
     private readonly completedCleanups = new Map<string, string | null>()
-    private eventAuthority: Participant | null = null
-    private leaseAuthority: Participant | null = null
+    private eventAuthority: BusMember | null = null
+    private leaseAuthority: BusMember | null = null
     private preparedBaseSha: string | null = null
 
     constructor(private readonly opts: GitCoordinatorOptions) {
         super()
     }
 
-    setEventAuthority(authority: Participant): void {
+    setEventAuthority(authority: BusMember): void {
         if (this.eventAuthority && this.eventAuthority !== authority) {
             throw new Error("git coordinator event authority is already bound")
         }
         this.eventAuthority = authority
     }
 
-    setLeaseAuthority(authority: Participant): void {
+    setLeaseAuthority(authority: BusMember): void {
         if (this.leaseAuthority && this.leaseAuthority !== authority) {
             throw new Error("git coordinator lease authority is already bound")
         }
@@ -141,67 +137,61 @@ export class GitCoordinator extends SerializedObserver {
         return this.preparedBaseSha
     }
 
-    protected override async handleEvent(
-        context: SerializedEventContext,
-    ): Promise<void> {
-        if (!this.opts.eventDriven) return
-        await this.handleDomainEvent(context)
-    }
-
     protected override onManagedFailure(failure: SerializedObserverFailure): void {
         process.stderr.write(`[git-coordinator] ${failure.error.stack ?? failure.error.message}\n`)
     }
 
-    private async handleDomainEvent(context: SerializedEventContext): Promise<void> {
+    protected override async handleEvent(context: SerializedEventContext): Promise<void> {
         const { event, source } = context
         const runId = this.opts.runId
         if (!runId) return
-        if (WorkLeaseGranted.is(event) && event.data.runId === runId) {
-            // Event-driven mode is collective-only. Authorities are bound
-            // after the Board/Broker objects are constructed, so the interval
-            // between join and binding must deny rather than ambiently trust.
+        if (WorkLeaseGranted.is(event) && event.payload.runId === runId) {
+            // Authorities are bound after the Board/Broker objects are
+            // constructed, so the interval between join and binding must deny
+            // rather than ambiently trust.
             if (!this.leaseAuthority || source !== this.leaseAuthority) return
-            this.activeLeases.set(event.data.request.storyId, {
-                leaseId: event.data.leaseId,
-                generation: event.data.generation,
+            this.activeLeases.set(event.payload.request.storyId, {
+                leaseId: event.payload.leaseId,
+                generation: event.payload.generation,
                 requiresQualityReview:
-                    event.data.request.requiresQualityReview === true,
+                    event.payload.request.requiresQualityReview === true,
             })
             return
         }
         if (!this.eventAuthority || source !== this.eventAuthority) return
         if (
             RunPreparationRequested.is(event) &&
-            event.data.runId === runId
+            event.payload.runId === runId
         ) {
             await this.prepareRun(runId)
             return
         }
         if (
             StoryIntegrationRequested.is(event) &&
-            event.data.runId === runId
+            event.payload.runId === runId
         ) {
-            if (this.integrationLeases.has(event.data.leaseId)) return
-            this.integrationLeases.add(event.data.leaseId)
+            if (this.integrationLeases.has(event.payload.leaseId)) return
+            this.integrationLeases.add(event.payload.leaseId)
             try {
-                await this.onStoryPassed(event.data.storyId, {
-                    runId: event.data.runId,
-                    leaseId: event.data.leaseId,
+                await this.onStoryPassed(event.payload.storyId, {
+                    runId: event.payload.runId,
+                    leaseId: event.payload.leaseId,
                 }, {
+                    heldElsewhere: event.payload.heldElsewhere ?? {},
                     required:
-                        event.data.candidateFingerprintRequired === true,
-                    ...(event.data.candidateFingerprint
+                        event.payload.candidateFingerprintRequired === true,
+                    ...(event.payload.candidateFingerprint
                         ? {
                               fingerprint:
-                                  event.data.candidateFingerprint,
+                                  event.payload.candidateFingerprint,
                           }
                         : {}),
                 })
             } catch (error) {
                 this.emitIntegrationRefused({
-                    storyId: event.data.storyId,
-                    runId: event.data.runId,
-                    leaseId: event.data.leaseId,
+                    storyId: event.payload.storyId,
+                    runId: event.payload.runId,
+                    leaseId: event.payload.leaseId,
                     invariant:
                         error instanceof CandidateSealRefusalError
                             ? error.invariant
@@ -214,10 +204,10 @@ export class GitCoordinator extends SerializedObserver {
                 })
                 this.emitBus(
                     StoryMergeFailed.create({
-                        storyId: event.data.storyId,
+                        storyId: event.payload.storyId,
                         error: (error as Error)?.message ?? String(error),
-                        runId: event.data.runId,
-                        leaseId: event.data.leaseId,
+                        runId: event.payload.runId,
+                        leaseId: event.payload.leaseId,
                     }),
                 )
             }
@@ -225,25 +215,25 @@ export class GitCoordinator extends SerializedObserver {
         }
         if (
             WorkspaceCleanupRequested.is(event) &&
-            event.data.runId === runId
+            event.payload.runId === runId
         ) {
-            const active = this.activeLeases.get(event.data.storyId)
+            const active = this.activeLeases.get(event.payload.storyId)
             const cleanupResult = {
-                runId: event.data.runId,
-                cleanupId: event.data.cleanupId,
-                storyId: event.data.storyId,
-                ...(event.data.leaseId !== undefined
-                    ? { leaseId: event.data.leaseId }
+                runId: event.payload.runId,
+                cleanupId: event.payload.cleanupId,
+                storyId: event.payload.storyId,
+                ...(event.payload.leaseId !== undefined
+                    ? { leaseId: event.payload.leaseId }
                     : {}),
-                ...(event.data.generation !== undefined
-                    ? { generation: event.data.generation }
+                ...(event.payload.generation !== undefined
+                    ? { generation: event.payload.generation }
                     : {}),
             }
             const stale =
-                event.data.leaseId !== undefined &&
+                event.payload.leaseId !== undefined &&
                 active !== undefined &&
-                (active.leaseId !== event.data.leaseId ||
-                    active.generation !== event.data.generation)
+                (active.leaseId !== event.payload.leaseId ||
+                    active.generation !== event.payload.generation)
             if (stale) {
                 this.emitBus(
                     WorkspaceCleanupCompleted.create({
@@ -252,9 +242,9 @@ export class GitCoordinator extends SerializedObserver {
                 )
                 return
             }
-            if (this.completedCleanups.has(event.data.cleanupId)) {
+            if (this.completedCleanups.has(event.payload.cleanupId)) {
                 const preservedBranch =
-                    this.completedCleanups.get(event.data.cleanupId) ?? null
+                    this.completedCleanups.get(event.payload.cleanupId) ?? null
                 this.emitBus(
                     WorkspaceCleanupCompleted.create({
                         ...cleanupResult,
@@ -265,10 +255,10 @@ export class GitCoordinator extends SerializedObserver {
             }
             try {
                 const preservedBranch = await this.cleanupFailedStory(
-                    event.data.storyId,
-                    event.data.preserveForRecovery === true,
+                    event.payload.storyId,
+                    event.payload.preserveForRecovery === true,
                 )
-                this.completedCleanups.set(event.data.cleanupId, preservedBranch)
+                this.completedCleanups.set(event.payload.cleanupId, preservedBranch)
                 this.emitBus(
                     WorkspaceCleanupCompleted.create({
                         ...cleanupResult,
@@ -282,7 +272,7 @@ export class GitCoordinator extends SerializedObserver {
                         ...(this.opts.worktrees
                             ? {
                                   retainedBranch:
-                                      this.opts.worktrees.branchName(event.data.storyId),
+                                      this.opts.worktrees.branchName(event.payload.storyId),
                               }
                             : {}),
                         error: (error as Error)?.message ?? String(error),
@@ -291,7 +281,7 @@ export class GitCoordinator extends SerializedObserver {
             }
             return
         }
-        if (RunPushRequested.is(event) && event.data.runId === runId) {
+        if (RunPushRequested.is(event) && event.payload.runId === runId) {
             await this.finish()
             if (this.pushError) {
                 this.emitBus(RunPushFailed.create({ runId, error: this.pushError }))
@@ -336,9 +326,9 @@ export class GitCoordinator extends SerializedObserver {
         }
     }
 
-    private emitBus(event: SemanticEvent<unknown>): void {
-        for (const env of this.getEnvironments()) {
-            env.deliverSemanticEvent(this, event)
+    private emitBus(event: SemanticEvent<string, unknown>): void {
+        for (const env of this.getBuses()) {
+            env.publish(this, event)
         }
     }
 
@@ -430,7 +420,7 @@ export class GitCoordinator extends SerializedObserver {
         }
     }
 
-    async onStoryPassed(
+    private async onStoryPassed(
         storyId: string,
         correlation?: LeaseCorrelation,
         requestedSeal?: CandidateSealRequest,
@@ -441,10 +431,6 @@ export class GitCoordinator extends SerializedObserver {
         // Run-branch HEAD before this story merges, so we can diff exactly
         // what the story added once merge-back lands.
         const beforeMerge = emitTui ? await getHeadSha(integrationRoot) : null
-        // Merge-back happens on the critical path (fast, local) so the next
-        // DAG level sees it. mergeBack returns false when the story had no
-        // worktree — that story still needs the shared-tree reconciliation
-        // below.
         if (worktrees) {
             const candidateSeal = this.candidateSealFor(
                 storyId,
@@ -455,7 +441,11 @@ export class GitCoordinator extends SerializedObserver {
             try {
                 merged = await this.mergeSurvivingSignals(
                     storyId,
-                    () => worktrees.mergeBack(storyId, candidateSeal),
+                    () => worktrees.mergeBack(
+                        storyId,
+                        candidateSeal,
+                        requestedSeal?.heldElsewhere ?? {},
+                    ),
                 )
             } catch (e) {
                 const error = (e as Error)?.message ?? String(e)
@@ -559,28 +549,24 @@ export class GitCoordinator extends SerializedObserver {
                 }
                 return
             }
-            if (this.opts.eventDriven) {
-                this.emitIntegrationRefused({
+            this.emitIntegrationRefused({
+                storyId,
+                runId: correlation?.runId ?? null,
+                leaseId: correlation?.leaseId ?? null,
+                invariant: "worktree_missing",
+                detail: `isolated worktree state missing for ${storyId}`,
+                branch: null,
+                retryable: false,
+                recoveryRef: null,
+            })
+            this.emitBus(
+                StoryMergeFailed.create({
                     storyId,
-                    runId: correlation?.runId ?? null,
-                    leaseId: correlation?.leaseId ?? null,
-                    invariant: "worktree_missing",
-                    detail: `isolated worktree state missing for ${storyId}`,
-                    branch: null,
-                    retryable: false,
-                    recoveryRef: null,
-                })
-                this.emitBus(
-                    StoryMergeFailed.create({
-                        storyId,
-                        error: `isolated worktree state missing for ${storyId}`,
-                        ...correlation,
-                    }),
-                )
-                return
-            }
-            // merged === false → shared-tree fallback; reconcile + push like
-            // the non-worktree path below.
+                    error: `isolated worktree state missing for ${storyId}`,
+                    ...correlation,
+                }),
+            )
+            return
         }
         if (this.opts.push ?? true) {
             await safePullRebase(integrationRoot, log, gitGate)
@@ -611,10 +597,6 @@ export class GitCoordinator extends SerializedObserver {
         )
     }
 
-    async onStoryFailed(storyId: string): Promise<void> {
-        await this.opts.worktrees?.cleanup(storyId)
-    }
-
     private async cleanupFailedStory(
         storyId: string,
         preserveForRecovery: boolean,
@@ -629,10 +611,9 @@ export class GitCoordinator extends SerializedObserver {
 
     /**
      * Drain detached pushes and do the single post-run push for all worktree
-     * merge-backs. Call after conductor.done, before the Finalizer needs the
-     * remote branch complete.
+     * merge-backs, before the Finalizer needs the remote branch complete.
      */
-    async finish(): Promise<void> {
+    private async finish(): Promise<void> {
         await Promise.allSettled(this.storyPushes)
         if (!(this.opts.push ?? true)) return
         if (!this.worktreePushNeeded) return

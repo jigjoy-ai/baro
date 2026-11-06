@@ -23,7 +23,6 @@ const REPO_ROOT = join(ORCHESTRATOR_ROOT, "../..")
 const PLANNER_FIELD_GATES = [
     "src/prd.ts",
     "src/runtime/runtime-replan.ts",
-    "src/runtime-graph/legacy-replan.ts",
     "src/planning/adapters/planner-openai-progressive.ts",
     "src/planning/domain/progressive-plan.ts",
 ].map((relative) => join(ORCHESTRATOR_ROOT, relative))

@@ -61,7 +61,7 @@ export function runtimeReplanTargetIds(
 }
 
 export interface StagedReplanGateHost {
-    emit(event: SemanticEvent<unknown>): void
+    emit(event: SemanticEvent<string, unknown>): void
     planningFailed(): boolean
     graphVersion(): number
     /** Run the graph transaction now. Stories whose offers resolved as

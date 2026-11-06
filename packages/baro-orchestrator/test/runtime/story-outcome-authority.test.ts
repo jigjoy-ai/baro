@@ -1,12 +1,12 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 
-import type { Participant } from "../../src/runtime/mozaik.js"
+import type { BusMember } from "../../src/runtime/coordination.js"
 
 import { StoryOutcomeAuthority } from "../../src/runtime/story-outcome-authority.js"
 
-function source(agentId: string): Participant {
-    return { agentId } as unknown as Participant
+function source(agentId: string): BusMember {
+    return { agentId } as unknown as BusMember
 }
 
 describe("StoryOutcomeAuthority", () => {

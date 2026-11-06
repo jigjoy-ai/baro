@@ -4,7 +4,8 @@
  * The process/stream skeleton lives in CliParticipant.
  */
 
-import { Participant, SemanticEvent } from "../../runtime/mozaik.js"
+import { SemanticEvent } from "../../runtime/mozaik.js"
+import { BusMember } from "../../runtime/coordination.js"
 
 import {
     AgentTargetedMessage,
@@ -39,7 +40,7 @@ export interface CodexCliParticipantOptions {
     codexBin?: string
     /** Bound inherited-stdio drain after the direct CLI root exits. */
     closeDrainTimeoutMs?: number
-    targetedMessageAuthority?: Participant
+    targetedMessageAuthority?: BusMember
     targetedMessageCorrelation?: Readonly<{
         runId?: string
         leaseId?: string
@@ -121,13 +122,13 @@ export class CodexCliParticipant extends CliParticipant<CodexRunSummary> {
                 // thread.completed appears only on multi-turn sessions.
                 if (
                     CodexSystem.is(item) &&
-                    item.data.subtype === "thread.started"
+                    item.payload.subtype === "thread.started"
                 ) {
                     this.transition("running", "codex thread started")
                     this.settleReady()
                 }
                 if (CodexTurnEvent.is(item)) {
-                    const phase = item.data.phase
+                    const phase = item.payload.phase
                     if (phase === "failed") {
                         this.transition("failed", "codex turn failed")
                     }
@@ -141,8 +142,8 @@ export class CodexCliParticipant extends CliParticipant<CodexRunSummary> {
     }
 
     override async onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): Promise<void> {
         // Codex exec is one-shot — stdin carries only the initial prompt;
         // targeted messages are logged and dropped.
@@ -150,7 +151,7 @@ export class CodexCliParticipant extends CliParticipant<CodexRunSummary> {
             AgentTargetedMessage.is(event) &&
             acceptsTargetedMessage(
                 source,
-                event.data,
+                event.payload,
                 this.agentId,
                 this.options.targetedMessageAuthority,
                 this.options.targetedMessageCorrelation ?? {},

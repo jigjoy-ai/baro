@@ -63,6 +63,8 @@ test, not a schema change:
 | `story_complete` / `story_error` | a story's terminal state |
 | `level_started` / `level_completed` / `recovery_started` | graph progress |
 | `replan` | the graph itself changed |
+| `checkpoint` / `checkpoint_withdrawn` | a running story published (or lost) work its dependents started on: `{id, sha, reason, admitted}` / `{id, sha, reason, affected}` |
+| `paths_claimed` | a running story took files beyond its declared writes: `{id, granted, held: [{path, owner}]}` |
 | `progress` | completed/total snapshot |
 | `push_status` / `finalize_start` / `finalize_complete` | integration outcome |
 | `done` | the run's terminal state, stats, and classification |

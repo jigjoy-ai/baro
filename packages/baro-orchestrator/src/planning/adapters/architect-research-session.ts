@@ -12,11 +12,9 @@
 import { randomUUID } from "node:crypto"
 
 import {
-    AgenticEnvironment,
-    BaseObserver,
-    type Participant,
     type SemanticEvent,
 } from "../../runtime/mozaik.js"
+import { BusMember, CoordinationBus } from "../../runtime/coordination.js"
 import {
     AgentResult,
     AgentTargetedMessage,
@@ -69,7 +67,7 @@ function scoutCorrelation(
  * Collects answers, publishes them as events, and keeps the still-reading
  * scouts informed of what their peers found.
  */
-class ResearchBoard extends BaseObserver {
+class ResearchBoard extends BusMember {
     private readonly settled = new Map<string, ScoutFinding>()
     private readonly live = new Set<string>()
 
@@ -110,14 +108,14 @@ class ResearchBoard extends BaseObserver {
     }
 
     override onExternalEvent(
-        _source: Participant,
-        event: SemanticEvent<unknown>,
+        _source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): void {
         if (!AgentResult.is(event)) return
-        const agentId = event.data.agentId
+        const agentId = event.payload.agentId
         if (!this.questions.has(agentId) || this.settled.has(agentId)) return
         const question = this.questions.get(agentId)!
-        const text = event.data.isError ? null : event.data.resultText
+        const text = event.payload.isError ? null : event.payload.resultText
         this.publishFinding(
             typeof text === "string" && text.trim()
                 ? {
@@ -168,9 +166,9 @@ class ResearchBoard extends BaseObserver {
         }
     }
 
-    private emit(event: SemanticEvent<unknown>): void {
-        for (const environment of this.getEnvironments()) {
-            environment.deliverSemanticEvent(this, event)
+    private emit(event: SemanticEvent<string, unknown>): void {
+        for (const environment of this.getBuses()) {
+            environment.publish(this, event)
         }
     }
 }
@@ -198,7 +196,7 @@ export interface ResearchSessionOptions {
      */
     onScoutActivity?: () => void
     /** Test seam: an environment the caller owns and observes. */
-    environment?: AgenticEnvironment
+    environment?: CoordinationBus
 }
 
 /**
@@ -210,7 +208,7 @@ export async function runArchitectResearchSession(
 ): Promise<ScoutFinding[]> {
     if (opts.questions.length === 0) return []
     const sessionId = randomUUID().slice(0, 8)
-    const env = opts.environment ?? new AgenticEnvironment("architect-research")
+    const env = opts.environment ?? new CoordinationBus("architect-research")
     const questions = new Map<string, ScoutQuestion>(
         opts.questions.map((question) => [
             scoutAgentId(question.id, sessionId),
@@ -266,7 +264,7 @@ export async function runArchitectResearchSession(
             const question = questions.get(agentId)!
             scout.join(env)
             scout.start(env)
-            env.deliverSemanticEvent(
+            env.publish(
                 board,
                 ScoutDispatched.create({
                     scoutId: agentId,
@@ -316,7 +314,7 @@ export async function runArchitectResearchSession(
     } finally {
         for (const watchdog of watchdogs.values()) watchdog.dispose()
         for (const scout of scouts.values()) {
-            if (scout.getEnvironments().includes(env)) scout.leave(env)
+            if (scout.getBuses().includes(env)) scout.leave(env)
         }
         board.leave(env)
     }

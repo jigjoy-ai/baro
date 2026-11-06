@@ -19,7 +19,7 @@ describe("ModelTelemetryCollector", () => {
         const collector = new ModelTelemetryCollector({ runId: "run-1" })
         const env = joinWithCapture(collector)
         const route = (storyId: string, backend: string, model: string) =>
-            env.deliverSemanticEvent(
+            env.publish(
                 source("factory"),
                 StoryRouted.create({ storyId, backend, model }),
             )
@@ -30,7 +30,7 @@ describe("ModelTelemetryCollector", () => {
         route("OC", "opencode", "glm-5")
         route("P", "pi", "deepseek-v4")
 
-        env.deliverSemanticEvent(
+        env.publish(
             source("C"),
             AgentResult.create({
                 agentId: "C",
@@ -55,7 +55,7 @@ describe("ModelTelemetryCollector", () => {
             }),
         )
         // Exact terminal replay must not become a second paid invocation.
-        env.deliverSemanticEvent(
+        env.publish(
             source("C-replay"),
             AgentResult.create({
                 agentId: "C",
@@ -78,7 +78,7 @@ describe("ModelTelemetryCollector", () => {
                 durationMs: 25,
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             source("O"),
             AgentResult.create({
                 agentId: "O",
@@ -98,7 +98,7 @@ describe("ModelTelemetryCollector", () => {
                 durationMs: null,
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             source("X"),
             CodexTurnEvent.create({
                 agentId: "X",
@@ -113,7 +113,7 @@ describe("ModelTelemetryCollector", () => {
                 },
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             source("OC"),
             OpenCodeSystem.create({
                 agentId: "OC",
@@ -133,7 +133,7 @@ describe("ModelTelemetryCollector", () => {
                 },
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             source("P"),
             PiTurnEvent.create({
                 agentId: "P",
@@ -160,7 +160,7 @@ describe("ModelTelemetryCollector", () => {
 
         const measured = env.events.filter(ModelInvocationMeasured.is)
         assert.equal(measured.length, 5)
-        const byStory = new Map(measured.map((event) => [event.data.storyId, event.data]))
+        const byStory = new Map(measured.map((event) => [event.payload.storyId, event.payload]))
 
         assert.deepEqual(byStory.get("C")?.tokens.inputTotal, knownMetric(105, "derived"))
         assert.deepEqual(byStory.get("C")?.tokens.cachedInput, knownMetric(90, "provider_response"))
@@ -195,11 +195,11 @@ describe("ModelTelemetryCollector", () => {
     it("keeps incomplete Claude cache accounting unknown instead of calling it zero", async () => {
         const collector = new ModelTelemetryCollector({ runId: "run-2" })
         const env = joinWithCapture(collector)
-        env.deliverSemanticEvent(
+        env.publish(
             source("factory"),
             StoryRouted.create({ storyId: "S1", backend: "claude", model: "sonnet" }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             source("S1"),
             AgentResult.create({
                 agentId: "S1",
@@ -217,7 +217,7 @@ describe("ModelTelemetryCollector", () => {
 
         const measurement = env.events.find(ModelInvocationMeasured.is)
         assert.deepEqual(
-            measurement?.data.tokens.inputTotal,
+            measurement?.payload.tokens.inputTotal,
             unknownMetric("not_reported"),
         )
     })
@@ -245,7 +245,7 @@ describe("ModelTelemetryCollector", () => {
             outcomeAuthority,
         })
         const env = joinWithCapture(collector)
-        env.deliverSemanticEvent(
+        env.publish(
             factory,
             StoryRouted.create({
                 ...correlation,
@@ -255,7 +255,7 @@ describe("ModelTelemetryCollector", () => {
         )
         // A forged route arriving later must not overwrite the authenticated
         // route for this exact lease generation.
-        env.deliverSemanticEvent(
+        env.publish(
             forged,
             StoryRouted.create({
                 ...correlation,
@@ -264,7 +264,7 @@ describe("ModelTelemetryCollector", () => {
             }),
         )
 
-        env.deliverSemanticEvent(
+        env.publish(
             forged,
             AgentResult.create({
                 agentId: storyId,
@@ -278,7 +278,7 @@ describe("ModelTelemetryCollector", () => {
                 durationMs: 1,
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             resultSource,
             AgentResult.create({
                 agentId: storyId,
@@ -292,7 +292,7 @@ describe("ModelTelemetryCollector", () => {
                 durationMs: 20,
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             forged,
             CodexTurnEvent.create({
                 agentId: storyId,
@@ -300,7 +300,7 @@ describe("ModelTelemetryCollector", () => {
                 raw: { usage: { input_tokens: 999, output_tokens: 999 } },
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             forged,
             OpenCodeSystem.create({
                 agentId: storyId,
@@ -313,7 +313,7 @@ describe("ModelTelemetryCollector", () => {
                 },
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             forged,
             PiTurnEvent.create({
                 agentId: storyId,
@@ -330,7 +330,7 @@ describe("ModelTelemetryCollector", () => {
                 },
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             cliSource,
             CodexTurnEvent.create({
                 agentId: storyId,
@@ -342,17 +342,17 @@ describe("ModelTelemetryCollector", () => {
 
         const measured = env.events.filter(ModelInvocationMeasured.is)
         assert.equal(measured.length, 2)
-        assert.ok(measured.every((event) => event.data.backend === "claude"))
-        assert.ok(measured.every((event) => event.data.resolvedModel === "sonnet"))
+        assert.ok(measured.every((event) => event.payload.backend === "claude"))
+        assert.ok(measured.every((event) => event.payload.resolvedModel === "sonnet"))
         assert.ok(
             measured.every(
                 (event) =>
-                    event.data.leaseId === correlation.leaseId &&
-                    event.data.generation === correlation.generation,
+                    event.payload.leaseId === correlation.leaseId &&
+                    event.payload.generation === correlation.generation,
             ),
         )
         assert.deepEqual(
-            measured[0]?.data.cost.equivalentUsd,
+            measured[0]?.payload.cost.equivalentUsd,
             knownMetric(0.25, "cli_result"),
         )
     })

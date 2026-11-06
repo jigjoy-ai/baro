@@ -5,8 +5,8 @@ in the orchestrator: passive bus listeners that watch bus traffic and
 (optionally) emit their own events back onto the bus. Cartographer is
 **not** covered here — it lives Rust-side under `crates/baro-tui/`.
 
-Every observer extends Mozaik's `BaseObserver`. They subscribe via
-`onExternalEvent(source, event: SemanticEvent<unknown>)` and gate per
+Every observer extends Baro's `BusMember` (`runtime/coordination.ts`). They subscribe via
+`onExternalEvent(source, event: SemanticEvent<string, unknown>)` and gate per
 event type with the `.is()` user-defined type guard from
 [../semantic-events.ts](../semantic-events.ts). Mozaik LLM-shape items
 (`FunctionCallItem`, `FunctionCallOutputItem`, `ModelMessageItem`,
@@ -37,8 +37,7 @@ Source: [critic.ts](./critic.ts)
 ## Surgeon
 
 An adaptive DAG mutation participant. It watches terminal story failures
-and emits `Replan` events that the Conductor applies at the next level
-boundary. In the default deterministic mode it removes the failing story
+and emits `Replan` proposals that the Board applies as recovery decisions. In the default deterministic mode it removes the failing story
 so dependents either run with one fewer prerequisite or get
 cascade-removed. In LLM mode it shells out to `claude --print` with a
 compact PRD snapshot and the failure reason and asks for a structured
@@ -162,9 +161,9 @@ the BaroEvent.
 
 Source: [forwarders/token-usage.ts](./forwarders/token-usage.ts)
 
-`ProgressForwarder` mirrors Conductor level progress for the Rust TUI,
+`ProgressForwarder` mirrors Board level progress for the Rust TUI,
 which does not consume raw `ConductorState` events directly. It emits
-only while the conductor is running a level and both level ordinals are
+only while the Board is running a level and both level ordinals are
 available.
 
 - Subscribes to: `ConductorState`

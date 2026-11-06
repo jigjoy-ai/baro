@@ -3,9 +3,9 @@ import assert from "node:assert/strict"
 
 import {
     FunctionCallItem,
-    FunctionCallOutputItem,
-    type Participant,
+    FunctionCallOutputItem
 } from "../../src/runtime/mozaik.js"
+import type { BusMember } from "../../src/runtime/coordination.js"
 import type { Finding, MemoryStore } from "@baro/memory"
 
 import { MemoryLibrarian } from "../../src/execution/memory-librarian.js"
@@ -209,30 +209,6 @@ describe("MemoryLibrarian", () => {
         assert.equal(cachedPathsRead, false)
     })
 
-    it("pins every advertised legacy memory command to an explicit quoted session path", async () => {
-        const sessionPath = "/tmp/baro-memory/session with spaces-$HOME-`id`"
-        const librarian = new MemoryLibrarian({ sessionPath })
-        ;(librarian as unknown as { store: MemoryStore }).store = memoryStore()
-
-        const prompt = await librarian.gatherContext("S2", ["auth"])
-        const commandLines = (prompt ?? "")
-            .split("\n")
-            .filter((line) => line.includes("baro-memory.mjs"))
-        const quotedPath = JSON.stringify(sessionPath)
-            .replace(/\$/g, "\\$")
-            .replace(/`/g, "\\`")
-
-        assert.equal(commandLines.length, 4)
-        for (const line of commandLines) {
-            assert.match(line, /\b(query|cache|store)\b/)
-            assert.ok(line.includes(`--path ${quotedPath}`), line)
-        }
-        assert.doesNotMatch(prompt ?? "", /BARO_MEMORY_PATH/)
-        assert.ok(commandLines.some((line) => line.includes(" query ")))
-        assert.equal(commandLines.filter((line) => line.includes(" cache ")).length, 2)
-        assert.ok(commandLines.some((line) => line.includes(" store ")))
-    })
-
     it("does not advertise cross-process memory CLI without a session path", async () => {
         const librarian = new MemoryLibrarian()
         ;(librarian as unknown as { store: MemoryStore }).store = memoryStore({
@@ -287,7 +263,7 @@ describe("MemoryLibrarian", () => {
         )
         await librarian.onExternalEvent(broker, oldGrant)
         const state = librarian as unknown as {
-            pending: Map<Participant, Map<string, unknown>>
+            pending: Map<BusMember, Map<string, unknown>>
         }
         assert.equal(state.pending.get(oldWorker)?.has("unfinished"), true)
 
@@ -450,7 +426,7 @@ describe("MemoryLibrarian", () => {
             }),
         )
         const state = librarian as unknown as {
-            pending: Map<Participant, Map<string, unknown>>
+            pending: Map<BusMember, Map<string, unknown>>
         }
         assert.equal(state.pending.get(worker)?.has("unfinished") ?? false, false)
         await librarian.onExternalFunctionCall(

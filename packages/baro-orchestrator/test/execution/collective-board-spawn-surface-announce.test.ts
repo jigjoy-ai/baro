@@ -45,7 +45,7 @@ describe("CollectiveBoard write-surface re-announcement at spawn", () => {
 
             // The decision lands while the factory is still starting the
             // process, so announceRevisedSurfaces reaches nobody.
-            env.deliverSemanticEvent(
+            env.publish(
                 source("S1"),
                 RuntimeReplanProposed.create({
                     runId,
@@ -65,12 +65,12 @@ describe("CollectiveBoard write-surface re-announcement at spawn", () => {
                 }),
             )
             const applied = await waitFor(env.events, RuntimeReplanApplied.is)
-            assert.equal(applied.data.graphVersion, 2)
+            assert.equal(applied.payload.graphVersion, 2)
             // Emitted before the worker process existed, so it reached nobody:
             // StoryAgent only applies a revision once its surface is live.
             assert.equal(env.events.filter(GateRuleAnnounced.is).length, 1)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("factory"),
                 StorySpawned.create({ storyId: "S1" }),
             )
@@ -83,19 +83,19 @@ describe("CollectiveBoard write-surface re-announcement at spawn", () => {
                 "the spawn re-announces the revision the worker could not hear",
             )
             const spawnAnnounce = announced.at(-1)!
-            assert.equal(spawnAnnounce.data.runId, runId)
-            assert.equal(spawnAnnounce.data.storyId, "S1")
-            assert.equal(spawnAnnounce.data.leaseId, lease.leaseId)
-            assert.equal(spawnAnnounce.data.generation, lease.generation)
-            assert.equal(spawnAnnounce.data.gateId, "write-surface")
-            assert.equal(spawnAnnounce.data.graphVersion, 2)
-            assert.deepEqual(spawnAnnounce.data.surface?.writes, ["src/one.ts"])
+            assert.equal(spawnAnnounce.payload.runId, runId)
+            assert.equal(spawnAnnounce.payload.storyId, "S1")
+            assert.equal(spawnAnnounce.payload.leaseId, lease.leaseId)
+            assert.equal(spawnAnnounce.payload.generation, lease.generation)
+            assert.equal(spawnAnnounce.payload.gateId, "write-surface")
+            assert.equal(spawnAnnounce.payload.graphVersion, 2)
+            assert.deepEqual(spawnAnnounce.payload.surface?.writes, ["src/one.ts"])
             assert.equal(
-                spawnAnnounce.data.surface?.ownedElsewhere["src/shared.ts"],
+                spawnAnnounce.payload.surface?.ownedElsewhere["src/shared.ts"],
                 "S1b",
             )
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("factory"),
                 StorySpawned.create({ storyId: "S1" }),
             )
@@ -108,7 +108,7 @@ describe("CollectiveBoard write-surface re-announcement at spawn", () => {
 
             // Once the worker is live it hears decisions directly, so a later
             // revision must not be replayed by a stray spawn observation.
-            env.deliverSemanticEvent(
+            env.publish(
                 source("S1"),
                 RuntimeReplanProposed.create({
                     runId,
@@ -131,7 +131,7 @@ describe("CollectiveBoard write-surface re-announcement at spawn", () => {
             await board.idle()
             assert.equal(env.events.filter(GateRuleAnnounced.is).length, 3)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("factory"),
                 StorySpawned.create({ storyId: "S1" }),
             )
@@ -161,7 +161,7 @@ describe("CollectiveBoard write-surface re-announcement at spawn", () => {
             assert.deepEqual(lease.request.surface?.writes, ["src/one.ts"])
             assert.equal(env.events.filter(GateRuleAnnounced.is).length, 0)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("factory"),
                 StorySpawned.create({ storyId: "S1" }),
             )
@@ -194,13 +194,13 @@ describe("CollectiveBoard write-surface re-announcement at spawn", () => {
             const env = joinWithCapture(board)
             const first = await startAndLeaseFirst(env, runId)
             for (const context of env.events.filter(WorkContextRequested.is)) {
-                if (context.data.storyId === first.request.storyId) continue
-                env.deliverSemanticEvent(
+                if (context.payload.storyId === first.request.storyId) continue
+                env.publish(
                     source("context"),
                     WorkContextProvided.create({
                         runId,
-                        requestId: context.data.requestId,
-                        storyId: context.data.storyId,
+                        requestId: context.payload.requestId,
+                        storyId: context.payload.storyId,
                         context: null,
                     }),
                 )
@@ -208,10 +208,10 @@ describe("CollectiveBoard write-surface re-announcement at spawn", () => {
             await board.idle()
             const offer = env.events
                 .filter(WorkOffered.is)
-                .find((event) => event.data.request.storyId === "S2")!
+                .find((event) => event.payload.request.storyId === "S2")!
             assert.ok(offer, "S2 holds an open offer")
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("S1"),
                 RuntimeReplanProposed.create({
                     runId,
@@ -235,7 +235,7 @@ describe("CollectiveBoard write-surface re-announcement at spawn", () => {
             const announcedForS2 = () =>
                 env.events
                     .filter(GateRuleAnnounced.is)
-                    .filter((event) => event.data.storyId === "S2")
+                    .filter((event) => event.payload.storyId === "S2")
             assert.equal(
                 announcedForS2().length,
                 0,
@@ -244,17 +244,17 @@ describe("CollectiveBoard write-surface re-announcement at spawn", () => {
 
             const lease = {
                 runId,
-                offerId: offer.data.offerId,
+                offerId: offer.payload.offerId,
                 leaseId: `${runId}:lease:2`,
                 workerId: "worker-2",
-                generation: offer.data.generation,
-                request: offer.data.request,
+                generation: offer.payload.generation,
+                request: offer.payload.request,
             }
-            env.deliverSemanticEvent(source("broker"), WorkLeaseGranted.create(lease))
+            env.publish(source("broker"), WorkLeaseGranted.create(lease))
             await board.idle()
             assert.equal(announcedForS2().length, 0)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("factory"),
                 StorySpawned.create({ storyId: "S2" }),
             )
@@ -262,11 +262,11 @@ describe("CollectiveBoard write-surface re-announcement at spawn", () => {
 
             const announced = announcedForS2()
             assert.equal(announced.length, 1)
-            assert.equal(announced[0]!.data.leaseId, lease.leaseId)
-            assert.equal(announced[0]!.data.generation, lease.generation)
-            assert.equal(announced[0]!.data.graphVersion, 2)
+            assert.equal(announced[0]!.payload.leaseId, lease.leaseId)
+            assert.equal(announced[0]!.payload.generation, lease.generation)
+            assert.equal(announced[0]!.payload.graphVersion, 2)
             assert.equal(
-                announced[0]!.data.surface?.ownedElsewhere["src/shared.ts"],
+                announced[0]!.payload.surface?.ownedElsewhere["src/shared.ts"],
                 "S1b",
             )
         })
@@ -287,7 +287,7 @@ describe("CollectiveBoard write-surface re-announcement at spawn", () => {
             const env = joinWithCapture(board)
             await startAndLeaseFirst(env, runId)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("factory"),
                 StorySpawned.create({ storyId: "S2" }),
             )
@@ -343,48 +343,48 @@ function dynamicStory(id: string, dependsOn: string[]) {
 }
 
 async function startAndLeaseFirst(env: CapturedEnvironment, runId: string) {
-    env.deliverSemanticEvent(
+    env.publish(
         source("operator"),
         RunStartRequest.create({ reason: "test" }),
     )
-    env.deliverSemanticEvent(
+    env.publish(
         source("repo"),
         RunPrepared.create({ runId, baseSha: null }),
     )
     const context = await waitFor(env.events, WorkContextRequested.is)
-    env.deliverSemanticEvent(
+    env.publish(
         source("context"),
         WorkContextProvided.create({
             runId,
-            requestId: context.data.requestId,
-            storyId: context.data.storyId,
+            requestId: context.payload.requestId,
+            storyId: context.payload.storyId,
             context: null,
         }),
     )
     const offer = await waitFor(env.events, WorkOffered.is)
     const lease = {
         runId,
-        offerId: offer.data.offerId,
+        offerId: offer.payload.offerId,
         leaseId: `${runId}:lease:1`,
         workerId: "worker",
-        generation: offer.data.generation,
-        request: offer.data.request,
+        generation: offer.payload.generation,
+        request: offer.payload.request,
     }
-    env.deliverSemanticEvent(source("broker"), WorkLeaseGranted.create(lease))
+    env.publish(source("broker"), WorkLeaseGranted.create(lease))
     await flush()
     return lease
 }
 
-async function waitFor<T extends SemanticEvent<unknown>>(
-    events: SemanticEvent<unknown>[],
-    guard: (event: SemanticEvent<unknown>) => event is T,
+async function waitFor<T extends SemanticEvent<string, unknown>>(
+    events: SemanticEvent<string, unknown>[],
+    guard: (event: SemanticEvent<string, unknown>) => event is T,
 ): Promise<T> {
     return (await waitForCount(events, guard, 1))[0]!
 }
 
-async function waitForCount<T extends SemanticEvent<unknown>>(
-    events: SemanticEvent<unknown>[],
-    guard: (event: SemanticEvent<unknown>) => event is T,
+async function waitForCount<T extends SemanticEvent<string, unknown>>(
+    events: SemanticEvent<string, unknown>[],
+    guard: (event: SemanticEvent<string, unknown>) => event is T,
     count: number,
 ): Promise<T[]> {
     const deadline = Date.now() + 2_000

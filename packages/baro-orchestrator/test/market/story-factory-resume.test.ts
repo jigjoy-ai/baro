@@ -1,7 +1,7 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 
-import type { AgenticEnvironment } from "../../src/runtime/mozaik.js"
+import type { CoordinationBus } from "../../src/runtime/coordination.js"
 
 import { StoryFactory } from "../../src/market/story-factory.js"
 import type {
@@ -19,6 +19,7 @@ import {
 import type { WorktreeManager } from "../../src/integration/worktree.js"
 import { StoryOutcomeAuthority } from "../../src/runtime/story-outcome-authority.js"
 import { joinWithCapture, source, withTempDir } from "../execution/helpers.js"
+import { flushBus, leasedFactory } from "./lease-fixture.js"
 
 const PRESERVED = "baro-recovery/run/S1/1"
 const RESUMED_PATH = "/tmp/wt/S1"
@@ -31,7 +32,7 @@ class CapturingExecutor implements StoryExecutor {
         req: StorySpawnRequestData,
         _route: StoryRoute,
         cwd: string,
-        _env: AgenticEnvironment,
+        _env: CoordinationBus,
         opts: StoryExecOpts,
     ): StoryExecution {
         this.calls.push({ req, cwd })
@@ -74,34 +75,20 @@ function worktreeDouble(opts: { resumeError?: Error } = {}): {
     return { manager, createCalls, resumeCalls }
 }
 
-function spawn(resume?: { preservedBranch: string | null }) {
-    return StorySpawnRequest.create({
-        storyId: "S1",
-        prompt: "Implement S1",
-        model: "sonnet",
-        retries: 0,
-        timeoutSecs: 30,
-        ...(resume ? { resume } : {}),
-    })
-}
-
 describe("StoryFactory suspension resume routing", () => {
     it("routes a resume with preserved material through the host-owned resume step", async () => {
         await withTempDir("story-factory-resume-", async (dir) => {
             const executor = new CapturingExecutor()
             const { manager, createCalls, resumeCalls } = worktreeDouble()
-            const factory = new StoryFactory({
+            const { lease } = leasedFactory({
                 cwd: dir,
                 executor,
                 llm: "claude",
                 worktrees: manager,
             })
-            joinWithCapture(factory)
 
-            await factory.onExternalEvent(
-                source("conductor"),
-                spawn({ preservedBranch: PRESERVED }),
-            )
+            await lease("S1", { resume: { preservedBranch: PRESERVED } })
+            await flushBus()
 
             assert.deepEqual(resumeCalls, [
                 { storyId: "S1", opts: { restoreFrom: PRESERVED } },
@@ -116,18 +103,15 @@ describe("StoryFactory suspension resume routing", () => {
         await withTempDir("story-factory-resume-empty-", async (dir) => {
             const executor = new CapturingExecutor()
             const { manager, createCalls, resumeCalls } = worktreeDouble()
-            const factory = new StoryFactory({
+            const { lease } = leasedFactory({
                 cwd: dir,
                 executor,
                 llm: "claude",
                 worktrees: manager,
             })
-            joinWithCapture(factory)
 
-            await factory.onExternalEvent(
-                source("conductor"),
-                spawn({ preservedBranch: null }),
-            )
+            await lease("S1", { resume: { preservedBranch: null } })
+            await flushBus()
 
             assert.deepEqual(resumeCalls, [{ storyId: "S1", opts: {} }])
             assert.deepEqual(createCalls, [])
@@ -139,15 +123,15 @@ describe("StoryFactory suspension resume routing", () => {
         await withTempDir("story-factory-resume-absent-", async (dir) => {
             const executor = new CapturingExecutor()
             const { manager, createCalls, resumeCalls } = worktreeDouble()
-            const factory = new StoryFactory({
+            const { lease } = leasedFactory({
                 cwd: dir,
                 executor,
                 llm: "claude",
                 worktrees: manager,
             })
-            joinWithCapture(factory)
 
-            await factory.onExternalEvent(source("conductor"), spawn())
+            await lease("S1")
+            await flushBus()
 
             assert.deepEqual(createCalls, ["S1"])
             assert.deepEqual(resumeCalls, [])
@@ -161,26 +145,22 @@ describe("StoryFactory suspension resume routing", () => {
             const { manager, createCalls, resumeCalls } = worktreeDouble({
                 resumeError: new Error("replay conflicted"),
             })
-            const factory = new StoryFactory({
+            const { env, lease } = leasedFactory({
                 cwd: dir,
                 executor,
                 llm: "claude",
                 worktrees: manager,
-                requireWorktree: true,
             })
-            const env = joinWithCapture(factory)
 
-            await factory.onExternalEvent(
-                source("conductor"),
-                spawn({ preservedBranch: PRESERVED }),
-            )
+            await lease("S1", { resume: { preservedBranch: PRESERVED } })
+            await flushBus()
 
             assert.equal(resumeCalls.length, 1)
             assert.deepEqual(createCalls, [])
             assert.equal(executor.calls.length, 0)
             const failure = env.events.find(StorySpawnFailed.is)
             assert.match(
-                failure?.data.error ?? "",
+                failure?.payload.error ?? "",
                 /isolated worktree unavailable for S1/,
             )
         })
@@ -194,7 +174,6 @@ describe("StoryFactory suspension resume routing", () => {
             const { manager, resumeCalls } = worktreeDouble()
             const factory = new StoryFactory({
                 cwd: dir,
-                coordinationMode: "collective",
                 runId: "run-resume-propagate",
                 workerId: "worker-a",
                 leaseAuthority: broker,
@@ -229,7 +208,7 @@ describe("StoryFactory suspension resume routing", () => {
             await new Promise<void>((resolve) => setImmediate(resolve))
 
             const requested = env.events.find(StorySpawnRequest.is)
-            assert.deepEqual(requested?.data.resume, {
+            assert.deepEqual(requested?.payload.resume, {
                 preservedBranch: PRESERVED,
             })
             assert.deepEqual(resumeCalls, [

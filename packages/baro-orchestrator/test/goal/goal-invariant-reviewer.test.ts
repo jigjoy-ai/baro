@@ -58,20 +58,20 @@ describe("GoalInvariantReviewer", () => {
             deliverEvidence(env, repository, verifier, runId, repo.baseSha)
             const request = aggregateRequest(runId)
 
-            env.deliverSemanticEvent(source("forged-guardian"), request)
-            env.deliverSemanticEvent(guardian, request)
+            env.publish(source("forged-guardian"), request)
+            env.publish(guardian, request)
             await reviewer.idle()
 
             const completed = env.events.filter(
                 GoalAggregateReviewCompleted.is,
             )
             assert.equal(completed.length, 1)
-            assert.equal(completed[0]!.data.status, "passed")
+            assert.equal(completed[0]!.payload.status, "passed")
             assert.match(
-                completed[0]!.data.repositoryFingerprint ?? "",
+                completed[0]!.payload.repositoryFingerprint ?? "",
                 /^[0-9a-f]{64}$/,
             )
-            assert.equal(completed[0]!.data.invariants[0]!.status, "passed")
+            assert.equal(completed[0]!.payload.invariants[0]!.status, "passed")
             assert.equal(prompts.length, 1)
             assert.match(prompts[0]!, /jointly preserve cooperative cancellation/)
             for (const storyId of ["S5", "S6", "S7", "S8"]) {
@@ -80,7 +80,7 @@ describe("GoalInvariantReviewer", () => {
             assert.match(prompts[0]!, /provider shard merged composition/)
             assert.match(prompts[0]!, /npm test/)
 
-            env.deliverSemanticEvent(guardian, request)
+            env.publish(guardian, request)
             await reviewer.idle()
             assert.equal(prompts.length, 1, "exact replay spends no second call")
             assert.equal(
@@ -122,7 +122,7 @@ describe("GoalInvariantReviewer", () => {
                 ]),
             )
 
-            fixture.env.deliverSemanticEvent(
+            fixture.env.publish(
                 fixture.guardian,
                 aggregateRequest(runId),
             )
@@ -132,7 +132,7 @@ describe("GoalInvariantReviewer", () => {
                 GoalAggregateReviewCompleted.is,
             )
             assert.equal(calls, 1)
-            assert.equal(completed?.data.status, "passed")
+            assert.equal(completed?.payload.status, "passed")
             assert.match(prompt, /"status":"skipped"/)
             assert.match(prompt, /declared verification budget exhausted/)
         } finally {
@@ -174,7 +174,7 @@ describe("GoalInvariantReviewer", () => {
                 ]),
             )
 
-            fixture.env.deliverSemanticEvent(
+            fixture.env.publish(
                 fixture.guardian,
                 aggregateRequest(runId),
             )
@@ -184,10 +184,10 @@ describe("GoalInvariantReviewer", () => {
                 GoalAggregateReviewCompleted.is,
             )
             assert.equal(calls, 1)
-            assert.equal(completed?.data.status, "inconclusive")
-            assert.equal(completed?.data.invariants[0]?.status, "inconclusive")
+            assert.equal(completed?.payload.status, "inconclusive")
+            assert.equal(completed?.payload.invariants[0]?.status, "inconclusive")
             assert.match(
-                completed?.data.invariants[0]?.reason ?? "",
+                completed?.payload.invariants[0]?.reason ?? "",
                 /skipped lint command/,
             )
             assert.match(systemPrompt, /not itself a violated goal invariant/)
@@ -256,7 +256,7 @@ describe("GoalInvariantReviewer", () => {
                     },
                     testCase.evidence,
                 )
-                fixture.env.deliverSemanticEvent(
+                fixture.env.publish(
                     fixture.guardian,
                     aggregateRequest(testCase.evidence.runId),
                 )
@@ -266,10 +266,10 @@ describe("GoalInvariantReviewer", () => {
                     GoalAggregateReviewCompleted.is,
                 )
                 assert.equal(calls, 0, testCase.name)
-                assert.equal(completed?.data.status, "inconclusive", testCase.name)
-                assert.equal(completed?.data.attempts, 0, testCase.name)
+                assert.equal(completed?.payload.status, "inconclusive", testCase.name)
+                assert.equal(completed?.payload.attempts, 0, testCase.name)
                 assert.match(
-                    completed?.data.invariants[0]?.reason ?? "",
+                    completed?.payload.invariants[0]?.reason ?? "",
                     testCase.reason,
                     testCase.name,
                 )
@@ -317,16 +317,16 @@ describe("GoalInvariantReviewer", () => {
             reviewer.setRepositoryAuthority(repository)
             const env = joinWithCapture(reviewer)
             deliverEvidence(env, repository, verifier, runId, repo.baseSha)
-            env.deliverSemanticEvent(guardian, aggregateRequest(runId))
+            env.publish(guardian, aggregateRequest(runId))
             await reviewer.idle()
 
             const completed = env.events.find(GoalAggregateReviewCompleted.is)
             assert.equal(calls, 2)
-            assert.equal(completed?.data.status, "failed")
-            assert.equal(completed?.data.invariants[0]?.status, "failed")
-            assert.match(completed?.data.invariants[0]?.reason ?? "", /S8/)
+            assert.equal(completed?.payload.status, "failed")
+            assert.equal(completed?.payload.invariants[0]?.status, "failed")
+            assert.match(completed?.payload.invariants[0]?.reason ?? "", /S8/)
             assert.match(
-                completed?.data.invariants[0]?.remediationGroupId ?? "",
+                completed?.payload.invariants[0]?.remediationGroupId ?? "",
                 /^goal-remediation-group-[0-9a-f]{24}$/,
             )
         } finally {
@@ -345,7 +345,7 @@ describe("GoalInvariantReviewer", () => {
                 ["G-A1", "Every provider aborts its network stream."],
                 ["G-C1", "Every provider closes its source iterator."],
             ])
-            const criteria = request.data.basis.invariants.map(
+            const criteria = request.payload.basis.invariants.map(
                 ({ invariantId, text }) => `[${invariantId}] ${text}`,
             )
             let systemPrompt = ""
@@ -372,18 +372,18 @@ describe("GoalInvariantReviewer", () => {
             reviewer.setRepositoryAuthority(repository)
             const env = joinWithCapture(reviewer)
             deliverEvidence(env, repository, verifier, runId, repo.baseSha)
-            env.deliverSemanticEvent(guardian, request)
+            env.publish(guardian, request)
             await reviewer.idle()
 
             const completed = env.events.find(GoalAggregateReviewCompleted.is)
-            assert.equal(completed?.data.status, "failed")
-            assert.equal(completed?.data.invariants.length, 2)
+            assert.equal(completed?.payload.status, "failed")
+            assert.equal(completed?.payload.invariants.length, 2)
             assert.equal(
-                completed?.data.invariants[0]?.remediationGroupId,
-                completed?.data.invariants[1]?.remediationGroupId,
+                completed?.payload.invariants[0]?.remediationGroupId,
+                completed?.payload.invariants[1]?.remediationGroupId,
             )
             assert.match(
-                completed?.data.invariants[0]?.reason ?? "",
+                completed?.payload.invariants[0]?.reason ?? "",
                 /never forwards cancellation/,
             )
             assert.match(systemPrompt, /remediation_groups.*required/s)
@@ -403,7 +403,7 @@ describe("GoalInvariantReviewer", () => {
                 ["G-A1", "Every provider aborts its network stream."],
                 ["G-C1", "Every provider closes its source iterator."],
             ])
-            const criteria = request.data.basis.invariants.map(
+            const criteria = request.payload.basis.invariants.map(
                 ({ invariantId, text }) => `[${invariantId}] ${text}`,
             )
             const reviewer = new GoalInvariantReviewer({
@@ -426,13 +426,13 @@ describe("GoalInvariantReviewer", () => {
             reviewer.setRepositoryAuthority(repository)
             const env = joinWithCapture(reviewer)
             deliverEvidence(env, repository, verifier, runId, repo.baseSha)
-            env.deliverSemanticEvent(guardian, request)
+            env.publish(guardian, request)
             await reviewer.idle()
 
             const completed = env.events.find(GoalAggregateReviewCompleted.is)
-            assert.equal(completed?.data.status, "inconclusive")
+            assert.equal(completed?.payload.status, "inconclusive")
             assert.match(
-                completed?.data.invariants[0]?.reason ?? "",
+                completed?.payload.invariants[0]?.reason ?? "",
                 /do not partition failed criteria/,
             )
         } finally {
@@ -465,14 +465,14 @@ describe("GoalInvariantReviewer", () => {
             reviewer.setRepositoryAuthority(repository)
             const env = joinWithCapture(reviewer)
             deliverEvidence(env, repository, verifier, runId, repo.baseSha)
-            env.deliverSemanticEvent(guardian, aggregateRequest(runId))
+            env.publish(guardian, aggregateRequest(runId))
             await reviewer.idle()
 
             const completed = env.events.find(GoalAggregateReviewCompleted.is)
             assert.equal(calls, 2)
             assert.deepEqual(billingAttempts, [1, 2])
-            assert.equal(completed?.data.status, "inconclusive")
-            assert.equal(completed?.data.attempts, 2)
+            assert.equal(completed?.payload.status, "inconclusive")
+            assert.equal(completed?.payload.attempts, 2)
         } finally {
             rmSync(repo.path, { recursive: true, force: true })
         }
@@ -516,22 +516,22 @@ describe("GoalInvariantReviewer", () => {
             reviewer.setRepositoryAuthority(repository)
             const env = joinWithCapture(reviewer)
             deliverEvidence(env, repository, verifier, runId, repo.baseSha)
-            env.deliverSemanticEvent(guardian, aggregateRequest(runId))
+            env.publish(guardian, aggregateRequest(runId))
             await reviewer.idle()
 
             const completed = env.events.find(GoalAggregateReviewCompleted.is)
             assert.equal(providerSettled, true)
             assert.equal(calls, 1)
-            assert.equal(completed?.data.status, "inconclusive")
-            assert.equal(completed?.data.attempts, 1)
+            assert.equal(completed?.payload.status, "inconclusive")
+            assert.equal(completed?.payload.attempts, 1)
             assert.match(
-                completed?.data.invariants[0]?.reason ?? "",
+                completed?.payload.invariants[0]?.reason ?? "",
                 /timed out/,
             )
             const measurements = env.events.filter(ModelInvocationMeasured.is)
             assert.equal(measurements.length, 1)
-            assert.equal(measurements[0]!.data.status, "timed_out")
-            assert.equal(measurements[0]!.data.attempt, 1)
+            assert.equal(measurements[0]!.payload.status, "timed_out")
+            assert.equal(measurements[0]!.payload.attempt, 1)
         } finally {
             rmSync(repo.path, { recursive: true, force: true })
         }
@@ -552,7 +552,7 @@ describe("GoalInvariantReviewer", () => {
                     )
                 },
             )
-            fixture.env.deliverSemanticEvent(
+            fixture.env.publish(
                 fixture.guardian,
                 aggregateRequest(fixture.runId),
             )
@@ -562,18 +562,18 @@ describe("GoalInvariantReviewer", () => {
                 GoalAggregateReviewCompleted.is,
             )
             assert.equal(calls, 1)
-            assert.equal(completed?.data.status, "inconclusive")
-            assert.equal(completed?.data.attempts, 1)
+            assert.equal(completed?.payload.status, "inconclusive")
+            assert.equal(completed?.payload.attempts, 1)
             assert.match(
-                completed?.data.invariants[0]?.reason ?? "",
+                completed?.payload.invariants[0]?.reason ?? "",
                 /provider invocation timed out.*105000ms/,
             )
             const measurements = fixture.env.events.filter(
                 ModelInvocationMeasured.is,
             )
             assert.equal(measurements.length, 1)
-            assert.equal(measurements[0]!.data.status, "timed_out")
-            assert.equal(measurements[0]!.data.attempt, 1)
+            assert.equal(measurements[0]!.payload.status, "timed_out")
+            assert.equal(measurements[0]!.payload.attempt, 1)
         } finally {
             rmSync(repo.path, { recursive: true, force: true })
         }
@@ -594,7 +594,7 @@ describe("GoalInvariantReviewer", () => {
                     )
                 },
             )
-            fixture.env.deliverSemanticEvent(
+            fixture.env.publish(
                 fixture.guardian,
                 aggregateRequest(fixture.runId),
             )
@@ -604,18 +604,18 @@ describe("GoalInvariantReviewer", () => {
                 GoalAggregateReviewCompleted.is,
             )
             assert.equal(calls, 1)
-            assert.equal(completed?.data.status, "inconclusive")
-            assert.equal(completed?.data.attempts, 1)
+            assert.equal(completed?.payload.status, "inconclusive")
+            assert.equal(completed?.payload.attempts, 1)
             assert.match(
-                completed?.data.invariants[0]?.reason ?? "",
+                completed?.payload.invariants[0]?.reason ?? "",
                 /provider invocation was cancelled.*read-only evaluation/,
             )
             const measurements = fixture.env.events.filter(
                 ModelInvocationMeasured.is,
             )
             assert.equal(measurements.length, 1)
-            assert.equal(measurements[0]!.data.status, "cancelled")
-            assert.equal(measurements[0]!.data.attempt, 1)
+            assert.equal(measurements[0]!.payload.status, "cancelled")
+            assert.equal(measurements[0]!.payload.attempt, 1)
         } finally {
             rmSync(repo.path, { recursive: true, force: true })
         }
@@ -647,15 +647,15 @@ describe("GoalInvariantReviewer", () => {
             const env = joinWithCapture(reviewer)
             deliverEvidence(env, repository, verifier, runId, repo.baseSha)
 
-            env.deliverSemanticEvent(guardian, aggregateRequest(runId))
+            env.publish(guardian, aggregateRequest(runId))
             await reviewer.idle()
 
             const completed = env.events.find(GoalAggregateReviewCompleted.is)
             assert.equal(calls, 1)
-            assert.equal(completed?.data.status, "inconclusive")
-            assert.equal(completed?.data.attempts, 1)
+            assert.equal(completed?.payload.status, "inconclusive")
+            assert.equal(completed?.payload.attempts, 1)
             assert.match(
-                completed?.data.invariants[0]?.reason ?? "",
+                completed?.payload.invariants[0]?.reason ?? "",
                 /not dispatched.*executable is unavailable/,
             )
             assert.equal(env.events.filter(ModelInvocationMeasured.is).length, 0)
@@ -720,7 +720,7 @@ describe("GoalInvariantReviewer", () => {
             const env = joinWithCapture(reviewer)
             deliverEvidence(env, repository, verifier, runId, repo.baseSha)
 
-            env.deliverSemanticEvent(guardian, aggregateRequest(runId))
+            env.publish(guardian, aggregateRequest(runId))
             await preparationEntered
             let safetyTimer: ReturnType<typeof setTimeout> | null = null
             try {
@@ -742,10 +742,10 @@ describe("GoalInvariantReviewer", () => {
 
             const completed = env.events.find(GoalAggregateReviewCompleted.is)
             assert.equal(calls, 0)
-            assert.equal(completed?.data.status, "inconclusive")
-            assert.equal(completed?.data.attempts, 0)
+            assert.equal(completed?.payload.status, "inconclusive")
+            assert.equal(completed?.payload.attempts, 0)
             assert.match(
-                completed?.data.invariants[0]?.reason ?? "",
+                completed?.payload.invariants[0]?.reason ?? "",
                 /overall deadline exceeded after 20ms/,
             )
             assert.equal(await reviewer.shutdown(), true)
@@ -811,7 +811,7 @@ describe("GoalInvariantReviewer", () => {
             const env = joinWithCapture(reviewer)
             deliverEvidence(env, repository, verifier, runId, repo.baseSha)
 
-            env.deliverSemanticEvent(guardian, aggregateRequest(runId))
+            env.publish(guardian, aggregateRequest(runId))
             await preparationEntered
 
             clock.suspend(suspensionMs)
@@ -824,9 +824,9 @@ describe("GoalInvariantReviewer", () => {
             await reviewer.idle()
             const completed = env.events.find(GoalAggregateReviewCompleted.is)
             assert.equal(calls, 0)
-            assert.equal(completed?.data.status, "inconclusive")
+            assert.equal(completed?.payload.status, "inconclusive")
             assert.match(
-                completed?.data.invariants[0]?.reason ?? "",
+                completed?.payload.invariants[0]?.reason ?? "",
                 /overall deadline exceeded after 1800000ms/,
             )
             assert.equal(await reviewer.shutdown(), true)
@@ -876,7 +876,7 @@ describe("GoalInvariantReviewer", () => {
                 const env = joinWithCapture(reviewer)
                 deliverEvidence(env, repository, verifier, runId, repo.baseSha)
 
-                env.deliverSemanticEvent(guardian, aggregateRequest(runId))
+                env.publish(guardian, aggregateRequest(runId))
                 let safetyTimer: ReturnType<typeof setTimeout> | null = null
                 try {
                     await Promise.race([
@@ -898,9 +898,9 @@ describe("GoalInvariantReviewer", () => {
                     GoalAggregateReviewCompleted.is,
                 )
                 assert.equal(calls, 0)
-                assert.equal(completed?.data.status, "inconclusive")
+                assert.equal(completed?.payload.status, "inconclusive")
                 assert.match(
-                    completed?.data.invariants[0]?.reason ?? "",
+                    completed?.payload.invariants[0]?.reason ?? "",
                     /overall deadline exceeded after 20ms/,
                 )
                 assert.equal(await reviewer.shutdown(), true)
@@ -942,14 +942,14 @@ describe("GoalInvariantReviewer", () => {
             reviewer.setRepositoryAuthority(repository)
             const env = joinWithCapture(reviewer)
             deliverEvidence(env, repository, verifier, runId, repo.baseSha)
-            env.deliverSemanticEvent(guardian, aggregateRequest(runId))
+            env.publish(guardian, aggregateRequest(runId))
             await reviewer.idle()
 
             assert.equal(calls, 1)
             const completed = env.events.filter(GoalAggregateReviewCompleted.is)
             assert.equal(completed.length, 1)
-            assert.equal(completed[0]!.data.status, "inconclusive")
-            assert.equal(completed[0]!.data.attempts, 1)
+            assert.equal(completed[0]!.payload.status, "inconclusive")
+            assert.equal(completed[0]!.payload.attempts, 1)
             assert.equal(env.events.filter(ModelInvocationMeasured.is).length, 1)
             assert.equal(await reviewer.shutdown(), false)
         } finally {
@@ -970,7 +970,7 @@ describe("GoalInvariantReviewer", () => {
                     return passVerdict()
                 },
             )
-            fixture.env.deliverSemanticEvent(
+            fixture.env.publish(
                 fixture.guardian,
                 aggregateRequest(fixture.runId),
             )
@@ -980,10 +980,10 @@ describe("GoalInvariantReviewer", () => {
                 GoalAggregateReviewCompleted.is,
             )
             assert.equal(calls, 0)
-            assert.equal(completed?.data.status, "inconclusive")
-            assert.equal(completed?.data.attempts, 0)
+            assert.equal(completed?.payload.status, "inconclusive")
+            assert.equal(completed?.payload.attempts, 0)
             assert.match(
-                completed?.data.invariants[0]?.reason ?? "",
+                completed?.payload.invariants[0]?.reason ?? "",
                 /evidence|budget|buffer/i,
             )
         } finally {
@@ -1012,11 +1012,11 @@ describe("GoalInvariantReviewer", () => {
             reviewer.setVerificationAuthority(verifier)
             reviewer.setRepositoryAuthority(repository)
             const env = joinWithCapture(reviewer)
-            env.deliverSemanticEvent(
+            env.publish(
                 repository,
                 RunPrepared.create({ runId, baseSha: repo.baseSha }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 verifier,
                 RunVerificationCompleted.create({
                     runId,
@@ -1031,14 +1031,14 @@ describe("GoalInvariantReviewer", () => {
                     durationMs: 1,
                 }),
             )
-            env.deliverSemanticEvent(guardian, aggregateRequest(runId))
+            env.publish(guardian, aggregateRequest(runId))
             await reviewer.idle()
 
             const completed = env.events.find(GoalAggregateReviewCompleted.is)
             assert.equal(calls, 0)
-            assert.equal(completed?.data.status, "inconclusive")
-            assert.equal(completed?.data.attempts, 0)
-            assert.match(completed?.data.invariants[0]?.reason ?? "", /budget/)
+            assert.equal(completed?.payload.status, "inconclusive")
+            assert.equal(completed?.payload.attempts, 0)
+            assert.match(completed?.payload.invariants[0]?.reason ?? "", /budget/)
         } finally {
             rmSync(repo.path, { recursive: true, force: true })
         }
@@ -1058,14 +1058,14 @@ describe("GoalInvariantReviewer", () => {
                     return passVerdict()
                 },
             )
-            fixture.env.deliverSemanticEvent(
+            fixture.env.publish(
                 fixture.guardian,
                 aggregateRequest(fixture.runId),
             )
             await fixture.reviewer.idle()
 
             assert.equal(
-                fixture.env.events.find(GoalAggregateReviewCompleted.is)?.data.status,
+                fixture.env.events.find(GoalAggregateReviewCompleted.is)?.payload.status,
                 "passed",
             )
             assert.match(prompt, /new-provider\.ts/)
@@ -1094,15 +1094,15 @@ describe("GoalInvariantReviewer", () => {
                     return passVerdict()
                 },
             )
-            fixture.env.deliverSemanticEvent(
+            fixture.env.publish(
                 fixture.guardian,
                 aggregateRequest(fixture.runId),
             )
             await fixture.reviewer.idle()
             const completed = fixture.env.events.find(GoalAggregateReviewCompleted.is)
             assert.equal(calls, 0)
-            assert.equal(completed?.data.status, "inconclusive")
-            assert.equal(completed?.data.attempts, 0)
+            assert.equal(completed?.payload.status, "inconclusive")
+            assert.equal(completed?.payload.attempts, 0)
         } finally {
             rmSync(repo.path, { recursive: true, force: true })
         }
@@ -1134,12 +1134,12 @@ describe("GoalInvariantReviewer", () => {
             const env = joinWithCapture(reviewer)
             deliverEvidence(env, repository, verifier, runId, repo.baseSha)
 
-            env.deliverSemanticEvent(guardian, aggregateRequest(runId))
+            env.publish(guardian, aggregateRequest(runId))
             await reviewer.idle()
 
             const completed = env.events.find(GoalAggregateReviewCompleted.is)
-            assert.equal(completed?.data.status, "inconclusive")
-            assert.equal(completed?.data.attempts, 1)
+            assert.equal(completed?.payload.status, "inconclusive")
+            assert.equal(completed?.payload.attempts, 1)
             assert.equal(env.events.filter(ModelInvocationMeasured.is).length, 0)
         } finally {
             rmSync(repo.path, { recursive: true, force: true })
@@ -1158,7 +1158,7 @@ describe("GoalInvariantReviewer", () => {
                     return passVerdict()
                 },
             )
-            const original = aggregateRequest(fixture.runId).data
+            const original = aggregateRequest(fixture.runId).payload
             const basis = createGoalAggregateReviewBasis({
                 ...omitFingerprint(original.basis),
                 challenges: [{
@@ -1193,7 +1193,7 @@ describe("GoalInvariantReviewer", () => {
                 reviewId: `goal-review:${basis.fingerprint}`,
                 basis,
             })
-            fixture.env.deliverSemanticEvent(fixture.guardian, request)
+            fixture.env.publish(fixture.guardian, request)
             await fixture.reviewer.idle()
 
             for (const exact of [
@@ -1254,7 +1254,7 @@ describe("GoalInvariantReviewer", () => {
                 challenges: [],
                 protocolIssues: [],
             })
-            fixture.env.deliverSemanticEvent(
+            fixture.env.publish(
                 fixture.guardian,
                 GoalAggregateReviewRequested.create({
                     runId: fixture.runId,
@@ -1269,15 +1269,15 @@ describe("GoalInvariantReviewer", () => {
             const completed = fixture.env.events.find(GoalAggregateReviewCompleted.is)
             assert.ok(completed, "maximal contract must always terminate with Completed")
             assert.ok(
-                completed.data.status === "passed" ||
-                    completed.data.status === "inconclusive",
+                completed.payload.status === "passed" ||
+                    completed.payload.status === "inconclusive",
             )
             assert.equal(
-                completed.data.attempts,
-                completed.data.status === "passed" ? 1 : 0,
+                completed.payload.attempts,
+                completed.payload.status === "passed" ? 1 : 0,
             )
-            assert.equal(calls, completed.data.status === "passed" ? 1 : 0)
-            assert.equal(completed.data.invariants.length, 64)
+            assert.equal(calls, completed.payload.status === "passed" ? 1 : 0)
+            assert.equal(completed.payload.invariants.length, 64)
         } finally {
             rmSync(repo.path, { recursive: true, force: true })
         }
@@ -1295,14 +1295,14 @@ describe("GoalInvariantReviewer", () => {
                     return passVerdict()
                 },
             )
-            fixture.env.deliverSemanticEvent(
+            fixture.env.publish(
                 fixture.repository,
                 RunPrepared.create({
                     runId: fixture.runId,
                     baseSha: `${repo.baseSha}conflict`,
                 }),
             )
-            fixture.env.deliverSemanticEvent(
+            fixture.env.publish(
                 fixture.verifier,
                 RunVerificationCompleted.create({
                     runId: fixture.runId,
@@ -1316,16 +1316,16 @@ describe("GoalInvariantReviewer", () => {
                     durationMs: 1,
                 }),
             )
-            fixture.env.deliverSemanticEvent(
+            fixture.env.publish(
                 fixture.guardian,
                 aggregateRequest(fixture.runId),
             )
             await fixture.reviewer.idle()
             const completed = fixture.env.events.find(GoalAggregateReviewCompleted.is)
             assert.equal(calls, 0)
-            assert.equal(completed?.data.status, "inconclusive")
-            assert.equal(completed?.data.attempts, 0)
-            assert.match(completed?.data.invariants[0]?.reason ?? "", /conflicting/)
+            assert.equal(completed?.payload.status, "inconclusive")
+            assert.equal(completed?.payload.attempts, 0)
+            assert.match(completed?.payload.invariants[0]?.reason ?? "", /conflicting/)
         } finally {
             rmSync(repo.path, { recursive: true, force: true })
         }
@@ -1349,12 +1349,12 @@ describe("GoalInvariantReviewer", () => {
                     })
                 },
             )
-            fixture.env.deliverSemanticEvent(
+            fixture.env.publish(
                 fixture.guardian,
                 aggregateRequest(fixture.runId),
             )
             await started
-            fixture.env.deliverSemanticEvent(
+            fixture.env.publish(
                 fixture.repository,
                 RunPrepared.create({
                     runId: fixture.runId,
@@ -1365,9 +1365,9 @@ describe("GoalInvariantReviewer", () => {
             await fixture.reviewer.idle()
 
             const completed = fixture.env.events.find(GoalAggregateReviewCompleted.is)
-            assert.equal(completed?.data.status, "inconclusive")
-            assert.equal(completed?.data.attempts, 1)
-            assert.match(completed?.data.invariants[0]?.reason ?? "", /conflicting/)
+            assert.equal(completed?.payload.status, "inconclusive")
+            assert.equal(completed?.payload.attempts, 1)
+            assert.match(completed?.payload.invariants[0]?.reason ?? "", /conflicting/)
         } finally {
             rmSync(repo.path, { recursive: true, force: true })
         }
@@ -1393,7 +1393,7 @@ describe("GoalInvariantReviewer", () => {
                     })
                 },
             )
-            fixture.env.deliverSemanticEvent(
+            fixture.env.publish(
                 fixture.guardian,
                 aggregateRequest(fixture.runId),
             )
@@ -1409,11 +1409,11 @@ describe("GoalInvariantReviewer", () => {
                 GoalAggregateReviewCompleted.is,
             )
             assert.equal(calls, 1)
-            assert.equal(completed?.data.status, "inconclusive")
-            assert.equal(completed?.data.attempts, 1)
-            assert.equal(completed?.data.repositoryFingerprint, null)
+            assert.equal(completed?.payload.status, "inconclusive")
+            assert.equal(completed?.payload.attempts, 1)
+            assert.equal(completed?.payload.repositoryFingerprint, null)
             assert.match(
-                completed?.data.invariants[0]?.reason ?? "",
+                completed?.payload.invariants[0]?.reason ?? "",
                 /repository changed/,
             )
         } finally {
@@ -1434,15 +1434,15 @@ describe("GoalInvariantReviewer", () => {
                 },
             )
             const request = aggregateRequest(fixture.runId)
-            fixture.env.deliverSemanticEvent(fixture.guardian, request)
+            fixture.env.publish(fixture.guardian, request)
             await fixture.reviewer.idle()
 
             const first = fixture.env.events.find(
                 GoalAggregateReviewCompleted.is,
             )
-            assert.equal(first?.data.status, "passed")
+            assert.equal(first?.payload.status, "passed")
             assert.match(
-                first?.data.repositoryFingerprint ?? "",
+                first?.payload.repositoryFingerprint ?? "",
                 /^[0-9a-f]{64}$/,
             )
 
@@ -1450,7 +1450,7 @@ describe("GoalInvariantReviewer", () => {
                 join(repo.path, "providers.ts"),
                 "export const providers = ['changed after cached pass']\n",
             )
-            fixture.env.deliverSemanticEvent(fixture.guardian, request)
+            fixture.env.publish(fixture.guardian, request)
             await fixture.reviewer.idle()
 
             const completed = fixture.env.events.filter(
@@ -1458,11 +1458,11 @@ describe("GoalInvariantReviewer", () => {
             )
             assert.equal(calls, 1, "cached replay spends no second model call")
             assert.equal(completed.length, 2)
-            assert.equal(completed[1]!.data.status, "inconclusive")
-            assert.equal(completed[1]!.data.attempts, 1)
-            assert.equal(completed[1]!.data.repositoryFingerprint, null)
+            assert.equal(completed[1]!.payload.status, "inconclusive")
+            assert.equal(completed[1]!.payload.attempts, 1)
+            assert.equal(completed[1]!.payload.repositoryFingerprint, null)
             assert.match(
-                completed[1]!.data.invariants[0]?.reason ?? "",
+                completed[1]!.payload.invariants[0]?.reason ?? "",
                 /repository changed/,
             )
         } finally {
@@ -1483,13 +1483,13 @@ describe("GoalInvariantReviewer", () => {
                 },
             )
             const request = aggregateRequest(fixture.runId)
-            fixture.env.deliverSemanticEvent(fixture.guardian, request)
+            fixture.env.publish(fixture.guardian, request)
             await fixture.reviewer.idle()
 
-            fixture.env.deliverSemanticEvent(
+            fixture.env.publish(
                 fixture.guardian,
                 GoalAggregateReviewRequested.create({
-                    ...request.data,
+                    ...request.payload,
                     checkId: "check-conflicting-replay",
                 }),
             )
@@ -1500,11 +1500,11 @@ describe("GoalInvariantReviewer", () => {
             )
             assert.equal(calls, 1)
             assert.equal(completed.length, 2)
-            assert.equal(completed[1]!.data.checkId, "check-conflicting-replay")
-            assert.equal(completed[1]!.data.status, "inconclusive")
-            assert.equal(completed[1]!.data.attempts, 0)
+            assert.equal(completed[1]!.payload.checkId, "check-conflicting-replay")
+            assert.equal(completed[1]!.payload.status, "inconclusive")
+            assert.equal(completed[1]!.payload.attempts, 0)
             assert.match(
-                completed[1]!.data.invariants[0]?.reason ?? "",
+                completed[1]!.payload.invariants[0]?.reason ?? "",
                 /conflicting request correlation/,
             )
         } finally {
@@ -1576,15 +1576,15 @@ function deliverEvidence(
         tail: "all provider cancellation tests passed",
     }]),
 ): void {
-    env.deliverSemanticEvent(
+    env.publish(
         source("forged-repository"),
         RunPrepared.create({ runId, baseSha: "forged" }),
     )
-    env.deliverSemanticEvent(
+    env.publish(
         repository,
         RunPrepared.create({ runId, baseSha }),
     )
-    env.deliverSemanticEvent(
+    env.publish(
         source("forged-verifier"),
         RunVerificationCompleted.create({
             runId,
@@ -1594,7 +1594,7 @@ function deliverEvidence(
             durationMs: 1,
         }),
     )
-    env.deliverSemanticEvent(
+    env.publish(
         verifier,
         RunVerificationCompleted.create(verification),
     )

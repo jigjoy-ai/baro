@@ -5,12 +5,10 @@ import { isAbsolute, relative, resolve, sep } from "node:path"
 
 import { CollaborationNote } from "../semantic-events.js"
 import {
-    BaseObserver,
     FunctionCallItem,
     FunctionCallOutputItem,
-    type Participant,
-    type SemanticEvent,
-} from "../runtime/mozaik.js"
+    type SemanticEvent, toWire } from "../runtime/mozaik.js"
+import { BusMember } from "../runtime/coordination.js"
 
 import { participantAgentId } from "../runtime/participant-identity.js"
 import { AgentState } from "../semantic-events.js"
@@ -186,7 +184,7 @@ interface RetainedCommand {
  * artifact is judgeable instead of unfalsifiable. Bounded per story: the last
  * notes win, because a story that keeps republishing is correcting itself.
  */
-export class PublishedNoteCollector extends BaseObserver {
+export class PublishedNoteCollector extends BusMember {
     private readonly notes = new Map<string, string[]>()
 
     constructor(private readonly maxNotesPerStory = 6) {
@@ -198,11 +196,11 @@ export class PublishedNoteCollector extends BaseObserver {
     }
 
     override onExternalEvent(
-        _source: Participant,
-        event: SemanticEvent<unknown>,
+        _source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): void {
         if (!CollaborationNote.is(event)) return
-        const { sourceAgentId, text } = event.data
+        const { sourceAgentId, text } = event.payload
         if (typeof text !== "string" || !text.trim()) return
         const kept = this.notes.get(sourceAgentId) ?? []
         kept.push(text.trim())
@@ -213,7 +211,7 @@ export class PublishedNoteCollector extends BaseObserver {
     }
 }
 
-export class CriticCommandEvidenceCollector extends BaseObserver {
+export class CriticCommandEvidenceCollector extends BusMember {
     private readonly commands = new Map<string, RetainedCommand[]>()
     private readonly pending = new Map<string, RetainedCommand>()
     private readonly fingerprintTasks = new Map<string, Set<Promise<void>>>()
@@ -226,22 +224,22 @@ export class CriticCommandEvidenceCollector extends BaseObserver {
     }
 
     override onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): void {
         if (
             AgentState.is(event) &&
-            this.acceptsSource(source, event.data.agentId) &&
-            event.data.phase === "running" &&
-            (event.data.detail?.startsWith("attempt ") === true ||
-                event.data.detail === "first turn")
+            this.acceptsSource(source, event.payload.agentId) &&
+            event.payload.phase === "running" &&
+            (event.payload.detail?.startsWith("attempt ") === true ||
+                event.payload.detail === "first turn")
         ) {
-            this.resetAttempt(event.data.agentId)
+            this.resetAttempt(event.payload.agentId)
         }
     }
 
     override onExternalFunctionCall(
-        source: Participant,
+        source: BusMember,
         item: FunctionCallItem,
     ): void {
         const agentId = participantAgentId(source)
@@ -280,13 +278,13 @@ export class CriticCommandEvidenceCollector extends BaseObserver {
     }
 
     override onExternalFunctionCallOutput(
-        source: Participant,
+        source: BusMember,
         item: FunctionCallOutputItem,
     ): void {
         const agentId = participantAgentId(source)
         if (!agentId) return
         if (!this.acceptsSource(source, agentId)) return
-        const json = item.toJSON() as {
+        const json = toWire(item) as {
             call_id?: string
             output?: Array<{ text?: string }>
         }
@@ -385,7 +383,7 @@ export class CriticCommandEvidenceCollector extends BaseObserver {
         }
     }
 
-    private acceptsSource(source: Participant, agentId: string): boolean {
+    private acceptsSource(source: BusMember, agentId: string): boolean {
         return this.opts.outcomeAuthority === undefined ||
             this.opts.outcomeAuthority.matchesTerminalTurnSource(source, agentId)
     }

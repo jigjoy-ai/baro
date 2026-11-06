@@ -7,7 +7,6 @@ import {
 } from "../../src/acceptance/critic-target-registry.js"
 import {
     Replan,
-    ReplanApplied,
     RuntimeReplanApplied,
 } from "../../src/semantic-events.js"
 import { source } from "../execution/helpers.js"
@@ -28,7 +27,7 @@ describe("CriticTargetRegistry runtime replans", () => {
         ])
     })
 
-    it("keeps collective targets local while legacy retains goal invariants", () => {
+    it("keeps critic targets local to each story", () => {
         const crossProviderInvariantId = "G-A6"
         const stories = [
             {
@@ -54,11 +53,6 @@ describe("CriticTargetRegistry runtime replans", () => {
         ]
 
         const collectiveTargets = buildCriticTargets(stories)
-        const invariantText = `[${crossProviderInvariantId}] Every provider preserves cancellation`
-        const legacyTargets = buildCriticTargets(
-            stories,
-            new Map([[crossProviderInvariantId, invariantText]]),
-        )
 
         for (const story of stories) {
             assert.deepEqual(collectiveTargets.get(story.id), story.acceptance)
@@ -68,78 +62,8 @@ describe("CriticTargetRegistry runtime replans", () => {
                 ),
                 false,
             )
-            assert.deepEqual(legacyTargets.get(story.id), [
-                ...story.acceptance,
-                invariantText,
-            ])
             assert.deepEqual(story.goalInvariantIds, [crossProviderInvariantId])
         }
-    })
-
-    it("projects only the Conductor's effective persisted legacy delta", async () => {
-        const targets = new Map<string, readonly string[]>([["S-old", ["old"]]])
-        const invariantText =
-            "[G-CROSS-STORY] Every legacy contribution preserves the goal"
-        const registry = new CriticTargetRegistry(
-            targets,
-            new Map([["G-CROSS-STORY", invariantText]]),
-        )
-        const conductor = source("conductor")
-        registry.setLegacyReplanAuthority(conductor)
-        const mutation = {
-            source: "surgeon",
-            reason: "replacement",
-            addedStories: [
-                {
-                    id: "S-new",
-                    priority: 1,
-                    title: "new",
-                    description: "new",
-                    dependsOn: [],
-                    acceptance: ["new criterion"],
-                    tests: ["npm test"],
-                    goalInvariantIds: ["G-CROSS-STORY"],
-                },
-                {
-                    id: "S-old",
-                    priority: 1,
-                    title: "duplicate persisted pass",
-                    description: "ignored by persistence",
-                    dependsOn: [],
-                    acceptance: ["must not replace old criterion"],
-                    tests: ["npm test"],
-                },
-            ],
-            removedStoryIds: ["S-old", "S-missing"],
-            modifiedDeps: { "S-missing": [] },
-        }
-        const effective = {
-            ...mutation,
-            addedStories: [mutation.addedStories[0]!],
-            removedStoryIds: [],
-            modifiedDeps: {},
-        }
-
-        await registry.onExternalEvent(source("surgeon"), Replan.create(mutation))
-        assert.deepEqual(targets.get("S-old"), ["old"])
-        assert.equal(targets.has("S-new"), false)
-
-        await registry.onExternalEvent(
-            source("forged-conductor"),
-            ReplanApplied.create(mutation),
-        )
-        assert.deepEqual(targets.get("S-old"), ["old"])
-        assert.equal(targets.has("S-new"), false)
-
-        await registry.onExternalEvent(
-            conductor,
-            ReplanApplied.create(effective),
-        )
-        assert.deepEqual(targets.get("S-old"), ["old"])
-        assert.deepEqual(targets.get("S-new"), [
-            "new criterion",
-            invariantText,
-        ])
     })
 
     it("updates acceptance targets only after an authoritative Applied event", async () => {
@@ -213,7 +137,7 @@ describe("CriticTargetRegistry runtime replans", () => {
         assert.deepEqual(targets.get("S-new"), ["new criterion"])
 
         const remove = RuntimeReplanApplied.create({
-            ...event.data,
+            ...event.payload,
             proposalId: "proposal-2",
             baseGraphVersion: 2,
             previousGraphVersion: 2,
@@ -232,7 +156,7 @@ describe("CriticTargetRegistry runtime replans", () => {
         await registry.onExternalEvent(
             board,
             RuntimeReplanApplied.create({
-                ...event.data,
+                ...event.payload,
                 currentGraphVersion: 3,
             }),
         )

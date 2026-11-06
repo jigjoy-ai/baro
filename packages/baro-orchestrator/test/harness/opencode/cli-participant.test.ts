@@ -168,8 +168,8 @@ console.log(JSON.stringify({ type: "step_finish", timestamp: 2, sessionID: "env-
     it("maps fake JSONL output into lifecycle and tool events", async () => {
         await withTempDir("baro-opencode-cli-", async (dir) => {
             const env = captureEnv()
-            env.deliverFunctionCall = (() => {}) as typeof env.deliverFunctionCall
-            env.deliverFunctionCallOutput =
+            env.publishFunctionCall = (() => {}) as typeof env.deliverFunctionCall
+            env.publishFunctionCallOutput =
                 (() => {}) as typeof env.deliverFunctionCallOutput
             const participant = new OpenCodeCliParticipant("opencode-agent", {
                 cwd: dir,
@@ -192,22 +192,22 @@ console.log(JSON.stringify({ type: "step_finish", timestamp: 2, sessionID: "env-
                 env.events.some(
                     (event) =>
                         AgentState.is(event) &&
-                        event.data.agentId === "opencode-agent" &&
-                        event.data.phase === "running",
+                        event.payload.agentId === "opencode-agent" &&
+                        event.payload.phase === "running",
                 ),
             )
             assert.ok(
                 env.events.some(
                     (event) =>
                         OpenCodeSystem.is(event) &&
-                        event.data.subtype === "step_finish",
+                        event.payload.subtype === "step_finish",
                 ),
             )
             assert.ok(
                 env.events.some(
                     (event) =>
                         OpenCodeStepEvent.is(event) &&
-                        event.data.stepType === "tool_result",
+                        event.payload.stepType === "tool_result",
                 ),
             )
         })
@@ -234,8 +234,8 @@ console.log(JSON.stringify({ type: "step_finish", timestamp: 2, sessionID: "env-
             process.env.BARO_OPENCODE_MAJOR = "2"
             try {
                 const env = captureEnv()
-                env.deliverFunctionCall = (() => {}) as typeof env.deliverFunctionCall
-                env.deliverFunctionCallOutput = (() => {}) as typeof env.deliverFunctionCallOutput
+                env.publishFunctionCall = (() => {}) as typeof env.deliverFunctionCall
+                env.publishFunctionCallOutput = (() => {}) as typeof env.deliverFunctionCallOutput
                 const participant = new OpenCodeCliParticipant("opencode-agent", {
                     cwd: dir,
                     prompt: "do the work",
@@ -246,12 +246,12 @@ console.log(JSON.stringify({ type: "step_finish", timestamp: 2, sessionID: "env-
                 await participant.done
 
                 const finishes = env.events.filter(
-                    (event) => OpenCodeSystem.is(event) && event.data.subtype === "step_finish",
+                    (event) => OpenCodeSystem.is(event) && event.payload.subtype === "step_finish",
                 )
                 // The real tool-step frame plus the closing one for the answer step.
                 assert.equal(finishes.length, 2)
                 const last = env.events.filter((event) => OpenCodeSystem.is(event)).at(-1)
-                assert.ok(last && OpenCodeSystem.is(last) && last.data.subtype === "step_finish")
+                assert.ok(last && OpenCodeSystem.is(last) && last.payload.subtype === "step_finish")
             } finally {
                 if (pinned === undefined) delete process.env.BARO_OPENCODE_MAJOR
                 else process.env.BARO_OPENCODE_MAJOR = pinned
@@ -282,9 +282,9 @@ console.log(JSON.stringify({ type: "step_finish", timestamp: 2, sessionID: "env-
                 env.events.some(
                     (event) =>
                         AgentState.is(event) &&
-                        event.data.agentId === "opencode-agent" &&
-                        event.data.phase === "failed" &&
-                        event.data.detail === "exit code 7",
+                        event.payload.agentId === "opencode-agent" &&
+                        event.payload.phase === "failed" &&
+                        event.payload.detail === "exit code 7",
                 ),
             )
         })
@@ -293,8 +293,8 @@ console.log(JSON.stringify({ type: "step_finish", timestamp: 2, sessionID: "env-
     it("waits for inherited stdio to flush final JSON and stderr after process exit", async () => {
         await withTempDir("baro-opencode-cli-final-line-", async (dir) => {
             const env = captureEnv()
-            env.deliverFunctionCall = (() => {}) as typeof env.deliverFunctionCall
-            env.deliverFunctionCallOutput =
+            env.publishFunctionCall = (() => {}) as typeof env.deliverFunctionCall
+            env.publishFunctionCallOutput =
                 (() => {}) as typeof env.deliverFunctionCallOutput
             const participant = new OpenCodeCliParticipant("opencode-agent", {
                 cwd: dir,

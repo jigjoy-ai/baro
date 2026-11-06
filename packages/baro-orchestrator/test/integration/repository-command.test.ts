@@ -249,7 +249,6 @@ if (args[0] === "rev-parse" && args[1] === "HEAD") {
             const gate = new GitGate()
             const worktreeRunId = uniqueRunId("run-timeout")
             const manager = new WorktreeManager(repo, gate, worktreeRunId, {
-                allowSharedFallback: false,
                 linkDepDirs: false,
             })
             try {
@@ -262,14 +261,12 @@ if (args[0] === "rev-parse" && args[1] === "HEAD") {
                 }
                 const factory = new StoryFactory({
                     cwd: repo,
-                    coordinationMode: "collective",
                     runId,
                     workerId: "worker-timeout",
                     leaseAuthority: broker,
                     offerAuthority: board,
                     outcomeAuthority,
                     worktrees: manager,
-                    requireWorktree: true,
                     executor,
                 })
                 const env = joinWithCapture(factory)
@@ -298,17 +295,17 @@ if (args[0] === "rev-parse" && args[1] === "HEAD") {
 
                 const failure = env.events.find(StorySpawnFailed.is)
                 assert.ok(failure)
-                assert.equal(failure.data.leaseId, "lease-timeout")
+                assert.equal(failure.payload.leaseId, "lease-timeout")
                 assert.match(
-                    failure.data.error,
+                    failure.payload.error,
                     /repository command "git (?:rev-parse|worktree)" produced no output/u,
                 )
-                assert.deepEqual(failure.data.failure, {
+                assert.deepEqual(failure.payload.failure, {
                     kind: "infrastructure",
                     code: "command_timeout",
                 })
                 assert.equal(
-                    outcomeAuthority.matchesSpawnFailure(factory, failure.data),
+                    outcomeAuthority.matchesSpawnFailure(factory, failure.payload),
                     true,
                 )
 

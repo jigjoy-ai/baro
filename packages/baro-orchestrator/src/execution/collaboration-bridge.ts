@@ -17,7 +17,7 @@ import {
     type ServerResponse,
 } from "node:http"
 import { basename, join } from "node:path"
-import type { Participant } from "../runtime/mozaik.js"
+import type { BusMember } from "../runtime/coordination.js"
 
 import { inboxFilenameForAgentId } from "../../scripts/collaboration-inbox-path.mjs"
 
@@ -27,7 +27,11 @@ import {
     CollaborationNote,
     GoalInvariantChallengeRaised,
     GoalLedgerProjectionPersisted,
+    PathsClaimed,
     PeerHelpRequested,
+    StoryCheckpointDecided,
+    StoryCheckpointRequested,
+    StoryCheckpointWithdrawn,
     RunCompleted,
     RuntimeReplanApplied,
     RuntimeReplanProposed,
@@ -46,6 +50,7 @@ import {
     type WorkBlockedData,
 } from "../semantic-events.js"
 import { snapshotRuntimeReplanMutation } from "../runtime-graph/runtime-replan.js"
+import type { PathClaimDecision } from "./write-surface.js"
 import { correlatedTargetedMessage } from "../runtime/targeted-message-authority.js"
 import {
     SerializedObserver,
@@ -68,6 +73,16 @@ export interface CollaborationBridgeOptions {
      * after which the agents built the missing pieces themselves.
      */
     pathOwner?: (path: string) => { storyId: string; integrated: boolean } | null
+    /** Reads a running story's committed HEAD and the paths its commits
+     * change, for a checkpoint it asked to publish. */
+    prepareCheckpoint?: (
+        storyId: string,
+    ) => Promise<{ sha: string; changedPaths: string[] } | null>
+    /** The Board's decision on a running story taking paths at runtime. */
+    claimPaths?: (
+        storyId: string,
+        paths: readonly string[],
+    ) => readonly PathClaimDecision[]
     pollMs?: number
     /** Explicit test-only bypass for object-identity authority binding. */
     unsafeAllowUnboundAuthorities?: boolean
@@ -116,6 +131,8 @@ interface OutboxRecord {
     command?: string
     output?: string
     obligationId?: string
+    /** claim: paths the story needs beyond its declared writes. */
+    paths?: string[]
 }
 
 interface RetainedChallengeRecord {
@@ -168,6 +185,7 @@ interface ProcessedBrokerEvent {
 
 interface ProcessRecordResult {
     deliveryGaps: readonly string[]
+    claims?: readonly PathClaimDecision[]
 }
 
 interface DecisionWaiter {
@@ -245,9 +263,9 @@ export class CollaborationBridge extends SerializedObserver {
     private brokerServer: Server | null = null
     private brokerStart: Promise<void> | null = null
     private brokerEndpoint: string | null = null
-    private leaseAuthority: Participant | null = null
-    private decisionAuthority: Participant | null = null
-    private messageIntentAuthorities: ReadonlySet<Participant> | null = null
+    private leaseAuthority: BusMember | null = null
+    private decisionAuthority: BusMember | null = null
+    private messageIntentAuthorities: ReadonlySet<BusMember> | null = null
 
     constructor(private readonly opts: CollaborationBridgeOptions) {
         super()
@@ -275,14 +293,14 @@ export class CollaborationBridge extends SerializedObserver {
         }
     }
 
-    setLeaseAuthority(authority: Participant): void {
+    setLeaseAuthority(authority: BusMember): void {
         if (this.leaseAuthority && this.leaseAuthority !== authority) {
             throw new Error("collaboration bridge lease authority is already bound")
         }
         this.leaseAuthority = authority
     }
 
-    setDecisionAuthority(authority: Participant): void {
+    setDecisionAuthority(authority: BusMember): void {
         if (this.decisionAuthority && this.decisionAuthority !== authority) {
             throw new Error("collaboration bridge decision authority is already bound")
         }
@@ -291,7 +309,7 @@ export class CollaborationBridge extends SerializedObserver {
 
     /** Seal the exact participants allowed to submit message intents. Worker
      * outbox messages enter through this Bridge's lease capability instead. */
-    setMessageIntentAuthorities(authorities: readonly Participant[]): void {
+    setMessageIntentAuthorities(authorities: readonly BusMember[]): void {
         if (this.messageIntentAuthorities) {
             throw new Error(
                 "collaboration bridge message intent authorities are already sealed",
@@ -440,63 +458,63 @@ export class CollaborationBridge extends SerializedObserver {
 
     protected override handleEvent(context: SerializedEventContext): void {
         const { event } = context
-        if (WorkLeaseGranted.is(event) && event.data.runId === this.opts.runId) {
+        if (WorkLeaseGranted.is(event) && event.payload.runId === this.opts.runId) {
             if (
                 context.source !== this.leaseAuthority &&
                 this.opts.unsafeAllowUnboundAuthorities !== true
             ) return
-            const agentId = event.data.request.storyId
+            const agentId = event.payload.request.storyId
             const previousLeaseId = this.activeLeaseByStory.get(agentId)
             const previous = previousLeaseId
                 ? this.activeLeases.get(previousLeaseId)
                 : undefined
             if (
-                previous?.leaseId === event.data.leaseId &&
-                previous.generation === event.data.generation
+                previous?.leaseId === event.payload.leaseId &&
+                previous.generation === event.payload.generation
             ) return
             if (
                 previous &&
-                (event.data.generation < previous.generation ||
-                    (event.data.generation === previous.generation &&
-                        event.data.leaseId !== previous.leaseId))
+                (event.payload.generation < previous.generation ||
+                    (event.payload.generation === previous.generation &&
+                        event.payload.leaseId !== previous.leaseId))
             ) return
             if (
                 previousLeaseId &&
-                (previousLeaseId !== event.data.leaseId ||
-                    previous?.generation !== event.data.generation)
+                (previousLeaseId !== event.payload.leaseId ||
+                    previous?.generation !== event.payload.generation)
             ) {
                 this.revokeCapability(previousLeaseId)
                 this.activeLeases.delete(previousLeaseId)
                 this.agentsByLease.delete(previousLeaseId)
             }
-            this.agentsByLease.set(event.data.leaseId, agentId)
-            this.activeLeases.set(event.data.leaseId, {
+            this.agentsByLease.set(event.payload.leaseId, agentId)
+            this.activeLeases.set(event.payload.leaseId, {
                 storyId: agentId,
-                leaseId: event.data.leaseId,
-                generation: event.data.generation,
+                leaseId: event.payload.leaseId,
+                generation: event.payload.generation,
                 launchGraphVersion: positiveIntegerOrNull(
-                    event.data.request.graphVersion,
+                    event.payload.request.graphVersion,
                 ),
                 deliveryMode:
                     this.opts.unsafeAllowFilesystemTransport === true
                         ? "poll"
                         : null,
             })
-            this.activeLeaseByStory.set(agentId, event.data.leaseId)
+            this.activeLeaseByStory.set(agentId, event.payload.leaseId)
             this.activeAgents.add(agentId)
-            this.announceNewOwnership(agentId, event.data.request.surface?.writes)
+            this.announceNewOwnership(agentId, event.payload.request.surface?.writes)
             // A stable story id may be leased repeatedly. Never expose a
             // previous execution's inbox to the new capability.
             this.resetInbox(agentId)
             if (this.opts.unsafeAllowFilesystemTransport === true) {
-                const active = this.activeLeases.get(event.data.leaseId)!
+                const active = this.activeLeases.get(event.payload.leaseId)!
                 const pending = this.pendingInbox.get(agentId) ?? []
                 this.pendingInbox.delete(agentId)
                 for (const intent of pending) this.deliverMessage(intent, active)
             }
             return
         }
-        if (WorkLeaseReleased.is(event) && event.data.runId === this.opts.runId) {
+        if (WorkLeaseReleased.is(event) && event.payload.runId === this.opts.runId) {
             if (
                 context.source !== this.leaseAuthority &&
                 this.opts.unsafeAllowUnboundAuthorities !== true
@@ -510,28 +528,28 @@ export class CollaborationBridge extends SerializedObserver {
             if (this.opts.unsafeAllowFilesystemTransport === true) {
                 this.consumeAvailableOutbox()
             }
-            const active = this.activeLeases.get(event.data.leaseId)
-            if (active?.storyId === event.data.storyId) {
+            const active = this.activeLeases.get(event.payload.leaseId)
+            if (active?.storyId === event.payload.storyId) {
                 // `consumeAvailableOutbox` above is the revocation barrier:
                 // records atomically committed before it retain attribution;
                 // anything committed after it is stale, including notes. A
                 // stale note could otherwise influence Dialogue indirectly.
-                this.agentsByLease.delete(event.data.leaseId)
-                this.revokeCapability(event.data.leaseId)
-                this.activeLeases.delete(event.data.leaseId)
+                this.agentsByLease.delete(event.payload.leaseId)
+                this.revokeCapability(event.payload.leaseId)
+                this.activeLeases.delete(event.payload.leaseId)
                 if (
-                    this.activeLeaseByStory.get(event.data.storyId) ===
-                    event.data.leaseId
+                    this.activeLeaseByStory.get(event.payload.storyId) ===
+                    event.payload.leaseId
                 ) {
-                    this.activeLeaseByStory.delete(event.data.storyId)
-                    this.activeAgents.delete(event.data.storyId)
+                    this.activeLeaseByStory.delete(event.payload.storyId)
+                    this.activeAgents.delete(event.payload.storyId)
                 }
             }
             return
         }
         if (
             (RuntimeReplanApplied.is(event) || RuntimeReplanRejected.is(event)) &&
-            event.data.runId === this.opts.runId
+            event.payload.runId === this.opts.runId
         ) {
             if (
                 context.source !== this.decisionAuthority &&
@@ -542,7 +560,7 @@ export class CollaborationBridge extends SerializedObserver {
         }
         if (
             (WorkBlockAccepted.is(event) || WorkBlockRejected.is(event)) &&
-            event.data.runId === this.opts.runId
+            event.payload.runId === this.opts.runId
         ) {
             if (
                 context.source !== this.decisionAuthority &&
@@ -552,14 +570,26 @@ export class CollaborationBridge extends SerializedObserver {
             return
         }
         if (
-            GoalLedgerProjectionPersisted.is(event) &&
-            event.data.runId === this.opts.runId
+            (StoryCheckpointDecided.is(event) || StoryCheckpointWithdrawn.is(event)) &&
+            event.payload.runId === this.opts.runId
         ) {
             if (
                 context.source !== this.decisionAuthority &&
                 this.opts.unsafeAllowUnboundAuthorities !== true
             ) return
-            this.onGoalLedgerProjectionPersisted(event.data)
+            if (StoryCheckpointDecided.is(event)) this.onCheckpointDecided(event.payload)
+            else this.onCheckpointWithdrawn(event.payload)
+            return
+        }
+        if (
+            GoalLedgerProjectionPersisted.is(event) &&
+            event.payload.runId === this.opts.runId
+        ) {
+            if (
+                context.source !== this.decisionAuthority &&
+                this.opts.unsafeAllowUnboundAuthorities !== true
+            ) return
+            this.onGoalLedgerProjectionPersisted(event.payload)
             return
         }
         if (AgentTargetedMessage.is(event)) {
@@ -572,16 +602,16 @@ export class CollaborationBridge extends SerializedObserver {
                 this.messageIntentAuthorities?.has(context.source) !== true &&
                 this.opts.unsafeAllowUnboundAuthorities !== true
             ) return
-            this.routeMessageIntent(event.data)
+            this.routeMessageIntent(event.payload)
             return
         }
-        if (PeerHelpRequested.is(event) && event.data.runId === this.opts.runId) {
+        if (PeerHelpRequested.is(event) && event.payload.runId === this.opts.runId) {
             // Worker help is routed synchronously when its active outbox
             // record is consumed. This event is its audit projection only.
             if (context.source !== this) return
             return
         }
-        if (RunCompleted.is(event) && event.data.runId === this.opts.runId) {
+        if (RunCompleted.is(event) && event.payload.runId === this.opts.runId) {
             if (
                 context.source !== this.decisionAuthority &&
                 this.opts.unsafeAllowUnboundAuthorities !== true
@@ -761,6 +791,12 @@ export class CollaborationBridge extends SerializedObserver {
                     text,
                 }),
             )
+        } else if (record.kind === "checkpoint" && liveSource && activeLease) {
+            void this.requestCheckpoint(agentId, activeLease, record.reason?.trim() || "")
+        } else if (record.kind === "claim" && record.paths && liveSource) {
+            const claims = this.decideClaim(agentId, record.paths)
+            deliveryGaps.push(...this.announceClaim(agentId, claims))
+            return { deliveryGaps, claims }
         } else if (record.kind === "note" && text && liveSource) {
             // A published note reaches a story through its launch context,
             // which is frozen when the Board asks for it — so a wave admitted
@@ -1103,7 +1139,7 @@ export class CollaborationBridge extends SerializedObserver {
                 deliveryId: randomUUID(),
                 ts: new Date().toISOString(),
                 type: event.type,
-                data: event.data,
+                data: event.payload,
             }
             // Reserve enough space for the fail-closed gap marker even before
             // the first rejection. The GET response therefore remains within
@@ -1144,7 +1180,7 @@ export class CollaborationBridge extends SerializedObserver {
         if (this.opts.unsafeAllowFilesystemTransport === true) {
             this.writeUnsafeInbox(active.storyId, {
                 type: event.type,
-                data: event.data,
+                data: event.payload,
             })
         }
         this.publish(event)
@@ -1221,8 +1257,8 @@ export class CollaborationBridge extends SerializedObserver {
             lines.push(
                 `- ${normalized} → ${owner.storyId}` +
                     (owner.integrated
-                        ? " (already integrated; pull the latest run branch)"
-                        : " (not integrated yet; block on it or wait — do not write it)"),
+                        ? " (already integrated, so it released the path: claim it with --kind claim and pull the latest run branch)"
+                        : " (not integrated yet: message it if it is running, block on it, or wait — do not write it)"),
             )
             if (lines.length >= 8) break
         }
@@ -1232,7 +1268,7 @@ export class CollaborationBridge extends SerializedObserver {
             text: [
                 "Ownership answer from the plan:",
                 ...lines,
-                "Writing a path owned by another story loses your whole story at the merge gate, not just that edit.",
+                "Writing a path a story that has not integrated holds loses your whole story at the merge gate, not just that edit.",
             ].join("\n"),
             metadata: { kind: "ownership_answer", sourceAgentId: "host" },
         })
@@ -1263,6 +1299,140 @@ export class CollaborationBridge extends SerializedObserver {
                 metadata: { kind: "ownership_update", sourceAgentId: "host" },
             })
         }
+    }
+
+    private async requestCheckpoint(
+        agentId: string,
+        lease: ActiveLeaseCorrelation,
+        reason: string,
+    ): Promise<void> {
+        const refuse = (why: string) =>
+            this.routeMessageIntent({
+                recipientId: agentId,
+                text: `Checkpoint not published: ${why}`,
+                metadata: { kind: "checkpoint_answer", sourceAgentId: "host" },
+            })
+        let candidate: { sha: string; changedPaths: string[] } | null = null
+        try {
+            candidate = (await this.opts.prepareCheckpoint?.(agentId)) ?? null
+        } catch (error) {
+            refuse(`your worktree could not be read (${(error as Error)?.message ?? String(error)})`)
+            return
+        }
+        if (!candidate) {
+            refuse("this run cannot publish checkpoints for your story")
+            return
+        }
+        // The lease may have ended while git ran.
+        if (this.activeLeaseByStory.get(agentId) !== lease.leaseId) return
+        this.publish(
+            StoryCheckpointRequested.create({
+                runId: this.opts.runId,
+                storyId: agentId,
+                leaseId: lease.leaseId,
+                generation: lease.generation,
+                sha: candidate.sha,
+                changedPaths: candidate.changedPaths,
+                reason: reason || "work dependents can build on",
+            }),
+        )
+    }
+
+    private onCheckpointDecided(
+        decision: Parameters<typeof StoryCheckpointDecided.create>[0],
+    ): void {
+        const short = decision.sha.slice(0, 12)
+        if (decision.outcome === "refused") {
+            this.routeMessageIntent({
+                recipientId: decision.storyId,
+                text: `Checkpoint ${short} not published: ${decision.reason}`,
+                metadata: { kind: "checkpoint_answer", sourceAgentId: "host" },
+            })
+            return
+        }
+        this.routeMessageIntent({
+            recipientId: decision.storyId,
+            text: [
+                `Checkpoint ${short} published.`,
+                decision.admitted.length > 0
+                    ? `Started on it now: ${decision.admitted.join(", ")}. They build on what it contains while you finish and integrate after you; keep it stable, and message them if it must change.`
+                    : "No dependent was waiting on it yet; any that becomes ready starts on it.",
+                ...(decision.alreadyStarted.length > 0
+                    ? [`Already running on your earlier checkpoint: ${decision.alreadyStarted.join(", ")}. Tell them what changed.`]
+                    : []),
+            ].join("\n"),
+            metadata: { kind: "checkpoint_answer", sourceAgentId: "host" },
+        })
+        for (const peer of decision.alreadyStarted) {
+            this.routeMessageIntent({
+                recipientId: peer,
+                text: `${decision.storyId} published a newer checkpoint ${short}: ${decision.reason}. You keep the one you started on; its final work reaches you when it integrates, and you integrate after it.`,
+                metadata: { kind: "checkpoint_update", sourceAgentId: "host" },
+            })
+        }
+    }
+
+    private onCheckpointWithdrawn(
+        withdrawal: Parameters<typeof StoryCheckpointWithdrawn.create>[0],
+    ): void {
+        for (const peer of withdrawal.affected) {
+            if (!this.activeAgents.has(peer)) continue
+            this.routeMessageIntent({
+                recipientId: peer,
+                text: `${withdrawal.storyId}'s checkpoint ${withdrawal.sha.slice(0, 12)}, which you started on, was withdrawn: ${withdrawal.reason}. Your story will retry from the run branch when it finishes; if the rest of your work depends on it, block on ${withdrawal.storyId} now.`,
+                metadata: { kind: "checkpoint_update", sourceAgentId: "host" },
+            })
+        }
+    }
+
+    private decideClaim(
+        agentId: string,
+        paths: readonly string[],
+    ): readonly PathClaimDecision[] {
+        const claims = this.opts.claimPaths?.(agentId, paths) ??
+            paths.map((path) => ({
+                path,
+                outcome: "refused" as const,
+                reason: "this run has no claim authority",
+            }))
+        this.publish(
+            PathsClaimed.create({
+                runId: this.opts.runId,
+                storyId: agentId,
+                decisions: [...claims],
+            }),
+        )
+        return claims
+    }
+
+    /** The claimant learns each decision (a broker receipt also carries it);
+     * every other running story learns the paths that changed hands. */
+    private announceClaim(
+        agentId: string,
+        claims: readonly PathClaimDecision[],
+    ): string[] {
+        const gaps: string[] = []
+        const answer = this.routeMessageIntent({
+            recipientId: agentId,
+            text: ["Claim decision from the Board:", ...claims.map(claimLine)].join("\n"),
+            metadata: { kind: "claim_answer", sourceAgentId: "host" },
+        })
+        if (answer === "overflow") gaps.push(agentId)
+        const granted = claims.filter((claim) => claim.outcome === "granted")
+        if (granted.length === 0) return gaps
+        for (const peer of this.activeAgents) {
+            if (peer === agentId) continue
+            const result = this.routeMessageIntent({
+                recipientId: peer,
+                text: [
+                    `Story ${agentId} now owns these paths; ask it before changing them:`,
+                    ...granted.slice(0, 8).map((claim) => `- ${claim.path}`),
+                ].join("\n"),
+                metadata: { kind: "ownership_update", sourceAgentId: "host" },
+            })
+            if (result === "overflow") gaps.push(peer)
+        }
+        return gaps
     }
 
     private broadcastPeerNote(sourceAgentId: string, text: string): string[] {
@@ -1425,13 +1595,13 @@ export class CollaborationBridge extends SerializedObserver {
             | ReturnType<typeof RuntimeReplanApplied.create>
             | ReturnType<typeof RuntimeReplanRejected.create>,
     ): void {
-        const pending = this.pendingReplans.get(event.data.proposalId)
-        if (!pending || !sameCorrelation(pending, event.data)) return
-        this.resolvedDecisionWrites.set(event.data.proposalId, {
+        const pending = this.pendingReplans.get(event.payload.proposalId)
+        if (!pending || !sameCorrelation(pending, event.payload)) return
+        this.resolvedDecisionWrites.set(event.payload.proposalId, {
             status: RuntimeReplanApplied.is(event) ? "applied" : "rejected",
-            ...event.data,
+            ...event.payload,
         })
-        this.flushResolvedDecision(event.data.proposalId)
+        this.flushResolvedDecision(event.payload.proposalId)
     }
 
     private onWorkBlockDecision(
@@ -1439,13 +1609,13 @@ export class CollaborationBridge extends SerializedObserver {
             | ReturnType<typeof WorkBlockAccepted.create>
             | ReturnType<typeof WorkBlockRejected.create>,
     ): void {
-        const pending = this.pendingBlocks.get(event.data.blockId)
-        if (!pending || !sameBlockCorrelation(pending, event.data)) return
-        this.resolvedDecisionWrites.set(event.data.blockId, {
+        const pending = this.pendingBlocks.get(event.payload.blockId)
+        if (!pending || !sameBlockCorrelation(pending, event.payload)) return
+        this.resolvedDecisionWrites.set(event.payload.blockId, {
             status: WorkBlockAccepted.is(event) ? "accepted" : "rejected",
-            ...event.data,
+            ...event.payload,
         })
-        this.flushResolvedDecision(event.data.blockId)
+        this.flushResolvedDecision(event.payload.blockId)
     }
 
     private queueDecision(
@@ -1748,6 +1918,7 @@ export class CollaborationBridge extends SerializedObserver {
                     ? { proposalId: record.proposalId }
                     : {}),
                 ...(record.blockId ? { blockId: record.blockId } : {}),
+                ...(processed.claims ? { claims: processed.claims } : {}),
                 ...(record.challengeId
                     ? { challengeId: record.challengeId }
                     : {}),
@@ -2004,6 +2175,34 @@ function parseBrokerRecord(value: unknown): OutboxRecord | string {
         }
         return { kind, eventId, text: record.text as string }
     }
+    if (kind === "checkpoint") {
+        if (!exactKeys("eventId", "reason")) return "checkpoint has unsupported fields"
+        if (!eventId) return "checkpoint event id is invalid"
+        if (
+            typeof record.reason !== "string" ||
+            !record.reason.trim() ||
+            record.reason.length > 2_000
+        ) return "checkpoint reason must contain 1-2000 characters"
+        return { kind, eventId, reason: record.reason }
+    }
+    if (kind === "claim") {
+        if (!exactKeys("eventId", "paths", "reason")) return "claim has unsupported fields"
+        if (!eventId) return "claim event id is invalid"
+        const paths = claimPaths(record.paths)
+        if (!paths) {
+            return "claim paths must be 1-20 distinct repository-relative file paths"
+        }
+        if (
+            record.reason !== undefined &&
+            (typeof record.reason !== "string" || record.reason.length > 2_000)
+        ) return "claim reason is invalid"
+        return {
+            kind,
+            eventId,
+            paths,
+            ...(typeof record.reason === "string" ? { reason: record.reason } : {}),
+        }
+    }
     if (kind === "discover") {
         if (!exactKeys("eventId", "story", "reason")) return "discover has unsupported fields"
         if (!eventId) return "discover event id is invalid"
@@ -2204,6 +2403,45 @@ function validReplanStory(value: unknown): boolean {
         (story.goalInvariantIds === undefined ||
             validGoalInvariantIds(story.goalInvariantIds))
     )
+}
+
+const MAX_CLAIM_PATHS = 20
+
+/** Repository-relative file paths only: a claim names files, never a tree. */
+function claimPaths(value: unknown): string[] | null {
+    if (!Array.isArray(value) || value.length === 0 || value.length > MAX_CLAIM_PATHS) {
+        return null
+    }
+    const paths: string[] = []
+    for (const entry of value) {
+        if (typeof entry !== "string") return null
+        const path = entry.trim().replace(/^\.\//u, "")
+        if (
+            !path ||
+            path.length > 512 ||
+            path.startsWith("/") ||
+            path.endsWith("/") ||
+            path.includes("\\") ||
+            path.split("/").some((segment) => segment === ".." || segment === "." || segment === "")
+        ) return null
+        paths.push(path)
+    }
+    return new Set(paths).size === paths.length ? paths : null
+}
+
+function claimLine(claim: PathClaimDecision): string {
+    switch (claim.outcome) {
+        case "granted":
+            return claim.releasedBy
+                ? `- ${claim.path}: yours now (released by ${claim.releasedBy}, which integrated; pull the latest run branch before editing)`
+                : `- ${claim.path}: yours now`
+        case "already_owned":
+            return `- ${claim.path}: already yours`
+        case "held":
+            return `- ${claim.path}: held by ${claim.ownerStoryId}, which has not integrated; message it with --kind message --to ${claim.ownerStoryId} if it is running, otherwise block on it`
+        case "refused":
+            return `- ${claim.path}: refused (${claim.reason})`
+    }
 }
 
 function hasOnlyKeys(

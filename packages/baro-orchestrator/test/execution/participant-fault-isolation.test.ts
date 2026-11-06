@@ -4,31 +4,31 @@
 // into a live replay. Every participant we add has to survive malformed input.
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
-import { AgenticEnvironment, BaseObserver } from "../../src/runtime/mozaik.js"
+import { CoordinationBus, BusMember } from "../../src/runtime/coordination.js"
 import { Coordination } from "../../src/events/collaboration.js"
 import { StoryMerged } from "../../src/events/integration.js"
 import { OverlapAwarenessRunner } from "../../src/execution/overlap-awareness-runner.js"
 import { MergeAwarenessRunner } from "../../src/execution/merge-awareness-runner.js"
 
-class Src extends BaseObserver {}
+class Src extends BusMember {}
 
 describe("a participant must never throw out of a handler", () => {
     it("overlap: Coordination with no payload", () => {
-        const env = new AgenticEnvironment("p")
+        const env = new CoordinationBus("p")
         const src = new Src(); src.join(env)
         new OverlapAwarenessRunner({ runId: "r" }).join(env)
         assert.doesNotThrow(() => {
-            env.deliverSemanticEvent(src, Coordination.create({
+            env.publish(src, Coordination.create({
                 fromAgentId: "a", recipientId: "b", kind: "notice", reason: "x",
             } as never))
         })
     })
     it("merge: StoryMerged with no runId", () => {
-        const env = new AgenticEnvironment("p")
+        const env = new CoordinationBus("p")
         const src = new Src(); src.join(env)
         new MergeAwarenessRunner({ runId: "r" }).join(env)
         assert.doesNotThrow(() => {
-            env.deliverSemanticEvent(src, StoryMerged.create({ storyId: "S1" } as never))
+            env.publish(src, StoryMerged.create({ storyId: "S1" } as never))
         })
     })
 })

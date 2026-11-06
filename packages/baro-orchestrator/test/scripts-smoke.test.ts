@@ -120,21 +120,6 @@ describe("script entrypoints run their main()", () => {
         assert.match(r.stderr, /--goal is required/)
     })
 
-    it("orchestrator CLI validates the coordination mode", async () => {
-        const invalid = await runScript("cli.ts", ["--coordination", "centralized"])
-        assert.equal(invalid.code, 2)
-        assert.match(invalid.stderr, /legacy.*collective/)
-
-        const collective = await runScript("cli.ts", [
-            "--coordination",
-            "collective",
-            "--prd",
-            "missing-experiment-prd.json",
-        ])
-        assert.equal(collective.code, 2)
-        assert.match(collective.stderr, /PRD not found/)
-    })
-
     it("orchestrator CLI rejects invalid collective market numbers", async () => {
         const invalidWindow = await runScript("cli.ts", [
             "--collective-bid-window-ms",
@@ -169,18 +154,8 @@ describe("script entrypoints run their main()", () => {
         assert.match(help.stdout, /--no-surgeon-llm\s+Use deterministic Surgeon evaluation/)
     })
 
-    it("keeps DialogueAgent collective-only and accepts every safe text backend", async () => {
-        const legacy = await runScript("cli.ts", [
-            "--coordination",
-            "legacy",
-            "--with-dialogue",
-        ])
-        assert.equal(legacy.code, 2)
-        assert.match(legacy.stderr, /requires --coordination collective/)
-
+    it("accepts every safe text backend for the DialogueAgent", async () => {
         const codex = await runScript("cli.ts", [
-            "--coordination",
-            "collective",
             "--with-dialogue",
             "--dialogue-llm",
             "codex",
@@ -243,8 +218,6 @@ describe("script entrypoints run their main()", () => {
                 dir,
                 "--prd",
                 "prd.json",
-                "--coordination",
-                "collective",
                 "--collective-workers",
                 "workers.json",
             ])

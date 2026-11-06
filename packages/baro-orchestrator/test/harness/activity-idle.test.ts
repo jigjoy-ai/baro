@@ -112,7 +112,7 @@ describe("story activity watchdog", () => {
                 kind: "infrastructure",
                 code: "command_timeout",
             })
-            assert.deepEqual(event?.data.failure, outcome.failure)
+            assert.deepEqual(event?.payload.failure, outcome.failure)
         })
     })
 

@@ -1628,6 +1628,58 @@ describe("declared verification policy", () => {
         })
     })
 
+    // The hermes-baro rerun failed its run only because the final verifier had
+    // no Python support: a story's `pytest tests/test_dashboard_api.py` was
+    // skipped as unsupported, and a skipped declared test fails the run.
+    it("translates pytest and python -m pytest declarations with contained paths", async () => {
+        await withTempDir("baro-verify-declared-pytest-", async (dir) => {
+            mkdirSync(join(dir, "tests"), { recursive: true })
+            writeFileSync(join(dir, "tests", "test_api.py"), "")
+            const [bare, module, node, flags] = translateDeclaredTests(
+                dir,
+                [
+                    { storyId: "S6", command: "pytest tests/test_api.py" },
+                    { storyId: "S6", command: "python3 -m pytest -q tests" },
+                    { storyId: "S6", command: "pytest tests/test_api.py::test_status" },
+                    { storyId: "S6", command: "pytest -x -k status -p no:cacheprovider tests" },
+                ],
+                [{ manager: "npm" }],
+            )
+            assert.equal(bare?.incompleteReason, undefined)
+            assert.equal(bare?.pytest, true)
+            assert.deepEqual(bare?.args, ["tests/test_api.py"])
+            assert.deepEqual(bare?.containedPaths, [
+                { path: join(dir, "tests", "test_api.py"), requireFile: false },
+            ])
+            assert.equal(module?.incompleteReason, undefined)
+            assert.deepEqual(module?.args, ["-q", "tests"])
+            assert.equal(node?.incompleteReason, undefined)
+            assert.deepEqual(node?.args, ["tests/test_api.py::test_status"])
+            assert.equal(flags?.incompleteReason, undefined)
+            assert.deepEqual(flags?.args, ["-x", "-k", "status", "-p", "no:cacheprovider", "tests"])
+        })
+    })
+
+    it("refuses pytest declarations that escape the tree or pass unknown options", async () => {
+        await withTempDir("baro-verify-declared-pytest-unsafe-", async (dir) => {
+            const refused = translateDeclaredTests(
+                dir,
+                [
+                    { storyId: "S6", command: "pytest ../elsewhere" },
+                    { storyId: "S6", command: "pytest /etc" },
+                    { storyId: "S6", command: "pytest --rootdir=/ tests" },
+                    { storyId: "S6", command: "pytest -c /tmp/evil.ini" },
+                    { storyId: "S6", command: "python -m pip install x" },
+                ],
+                [{ manager: "npm" }],
+            )
+            for (const spec of refused) {
+                assert.ok(spec.incompleteReason, `${spec.label} must not run`)
+                assert.notEqual(spec.pytest, true)
+            }
+        })
+    })
+
     it("translates contained vendor/bin/phpunit declarations", async () => {
         await withTempDir("baro-verify-declared-phpunit-", async (dir) => {
             mkdirSync(join(dir, "vendor", "bin"), { recursive: true })
@@ -2321,7 +2373,7 @@ describe("declared verification policy", () => {
             )
             assert.equal(
                 spec?.incompleteReason,
-                "unsupported declared test; allowed tools are npm/pnpm/yarn, exact npx rstest run paths, cargo, node, mvn, gradle, git diff --check, composer, vendor/bin/phpunit, and ddev exec",
+                "unsupported declared test; allowed tools are npm/pnpm/yarn, exact npx rstest run paths, cargo, node, pytest (or python -m pytest), mvn, gradle, git diff --check, composer, vendor/bin/phpunit, and ddev exec",
             )
         })
     })

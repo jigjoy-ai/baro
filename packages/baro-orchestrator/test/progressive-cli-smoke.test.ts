@@ -47,8 +47,6 @@ describe("progressive planner process lane", () => {
                     prdPath,
                     "--cwd",
                     dir,
-                    "--coordination",
-                    "collective",
                     "--progressive-planning",
                     planningId,
                     "--no-git",

@@ -2,25 +2,24 @@ import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
 import {
-    AgenticEnvironment,
-    BaseObserver,
     FunctionCallItem,
 } from "../../src/runtime/mozaik.js"
+import { BusMember, CoordinationBus } from "../../src/runtime/coordination.js"
 import { StoryMerged } from "../../src/events/integration.js"
 import { StoryResult } from "../../src/semantic-events.js"
 import { MergeAwarenessRunner } from "../../src/execution/merge-awareness-runner.js"
 import { pathAliases } from "../../src/runtime/worktree-path.js"
 
-class FakeAgent extends BaseObserver {
+class FakeAgent extends BusMember {
     constructor(readonly agentId: string) {
         super()
     }
 }
 
-class FakeIntegrator extends BaseObserver {}
+class FakeIntegrator extends BusMember {}
 
 function harness(withAuthority = true) {
-    const env = new AgenticEnvironment("merge-awareness")
+    const env = new CoordinationBus("merge-awareness")
     const integrator = new FakeIntegrator()
     integrator.join(env)
     const runner = new MergeAwarenessRunner({
@@ -30,9 +29,9 @@ function harness(withAuthority = true) {
     runner.join(env)
 
     const delivered: Array<{ recipientId: string; text: string; metadata: Record<string, unknown> }> = []
-    const real = env.deliverSemanticEvent.bind(env)
-    env.deliverSemanticEvent = (source, event) => {
-        const data = (event as { data?: unknown }).data as { recipientId?: string }
+    const real = env.publish.bind(env)
+    env.publish = (source, event) => {
+        const data = (event as { payload?: unknown }).payload as { recipientId?: string }
         if (data?.recipientId) delivered.push(data as never)
         real(source, event)
     }
@@ -45,7 +44,7 @@ function harness(withAuthority = true) {
             agent.join(env)
             agents.set(agentId, agent)
         }
-        env.deliverFunctionCall(
+        env.publishFunctionCall(
             agent,
             FunctionCallItem.rehydrate({
                 callId: `c-${agentId}-${path}`,
@@ -54,10 +53,10 @@ function harness(withAuthority = true) {
             }),
         )
     }
-    const merge = (storyId: string, by: BaseObserver = integrator) =>
-        env.deliverSemanticEvent(by, StoryMerged.create({ storyId, mode: "worktree", runId: "run-1" }))
+    const merge = (storyId: string, by: BusMember = integrator) =>
+        env.publish(by, StoryMerged.create({ storyId, mode: "worktree", runId: "run-1" }))
     const finish = (storyId: string) =>
-        env.deliverSemanticEvent(
+        env.publish(
             integrator,
             StoryResult.create({ storyId, runId: "run-1", success: true, attempts: 1, durationSecs: 1, error: null } as never),
         )
@@ -115,7 +114,7 @@ describe("MergeAwarenessRunner on a real bus", () => {
         const h = harness()
         h.write("S1", "a_test.go")
         h.write("S7", "b_test.go")
-        h.env.deliverSemanticEvent(
+        h.env.publish(
             h.integrator,
             StoryMerged.create({ storyId: "S1", mode: "worktree", runId: "other-run" }),
         )
@@ -133,7 +132,7 @@ describe("MergeAwarenessRunner on a real bus", () => {
         const h = harness()
         const reader = new FakeAgent("S7")
         reader.join(h.env)
-        h.env.deliverFunctionCall(
+        h.env.publishFunctionCall(
             reader,
             FunctionCallItem.rehydrate({
                 callId: "r1",
@@ -157,7 +156,7 @@ describe("one file, one name across worktrees", () => {
             S13: "/tmp/wt/run-1/S13",
             S10: "/tmp/wt/run-1/S10",
         }
-        const env = new AgenticEnvironment("relative")
+        const env = new CoordinationBus("relative")
         const integrator = new FakeIntegrator()
         integrator.join(env)
         const runner = new MergeAwarenessRunner({
@@ -168,9 +167,9 @@ describe("one file, one name across worktrees", () => {
         runner.join(env)
 
         const delivered: Array<{ recipientId: string; text: string; metadata: Record<string, unknown> }> = []
-        const real = env.deliverSemanticEvent.bind(env)
-        env.deliverSemanticEvent = (source, event) => {
-            const data = (event as { data?: { recipientId?: string } }).data
+        const real = env.publish.bind(env)
+        env.publish = (source, event) => {
+            const data = (event as { payload?: { recipientId?: string } }).payload
             if (data?.recipientId) delivered.push(data as never)
             real(source, event)
         }
@@ -178,7 +177,7 @@ describe("one file, one name across worktrees", () => {
         for (const [agentId, root] of Object.entries(roots)) {
             const agent = new FakeAgent(agentId)
             agent.join(env)
-            env.deliverFunctionCall(
+            env.publishFunctionCall(
                 agent,
                 FunctionCallItem.rehydrate({
                     callId: `c-${agentId}`,
@@ -187,7 +186,7 @@ describe("one file, one name across worktrees", () => {
                 }),
             )
         }
-        env.deliverSemanticEvent(
+        env.publish(
             integrator,
             StoryMerged.create({ storyId: "S13", mode: "worktree", runId: "run-1" }),
         )
@@ -210,7 +209,7 @@ describe("one file, one name across worktrees", () => {
             S13: "/var/folders/j9/T/baro-worktrees/run-1/S13",
             S10: "/var/folders/j9/T/baro-worktrees/run-1/S10",
         }
-        const env = new AgenticEnvironment("private-alias")
+        const env = new CoordinationBus("private-alias")
         const integrator = new FakeIntegrator()
         integrator.join(env)
         const runner = new MergeAwarenessRunner({
@@ -221,9 +220,9 @@ describe("one file, one name across worktrees", () => {
         runner.join(env)
 
         const delivered: Array<{ recipientId: string; text: string; metadata: Record<string, unknown> }> = []
-        const real = env.deliverSemanticEvent.bind(env)
-        env.deliverSemanticEvent = (source, event) => {
-            const data = (event as { data?: { recipientId?: string } }).data
+        const real = env.publish.bind(env)
+        env.publish = (source, event) => {
+            const data = (event as { payload?: { recipientId?: string } }).payload
             if (data?.recipientId) delivered.push(data as never)
             real(source, event)
         }
@@ -231,7 +230,7 @@ describe("one file, one name across worktrees", () => {
         for (const [agentId, root] of Object.entries(roots)) {
             const agent = new FakeAgent(agentId)
             agent.join(env)
-            env.deliverFunctionCall(
+            env.publishFunctionCall(
                 agent,
                 FunctionCallItem.rehydrate({
                     callId: `c-${agentId}`,
@@ -242,7 +241,7 @@ describe("one file, one name across worktrees", () => {
                 }),
             )
         }
-        env.deliverSemanticEvent(
+        env.publish(
             integrator,
             StoryMerged.create({ storyId: "S13", mode: "worktree", runId: "run-1" }),
         )

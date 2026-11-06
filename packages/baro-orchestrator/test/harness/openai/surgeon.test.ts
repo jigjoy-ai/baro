@@ -164,7 +164,7 @@ describe("SurgeonOpenAI", () => {
         assert.equal(replans.length, 1)
         assert.ok(env.events.indexOf(measured[0]!) < env.events.indexOf(replans[0]!))
 
-        const item = measured[0]!.data
+        const item = measured[0]!.payload
         assert.equal(
             item.invocationId,
             "run-openai-surgeon:surgeon:S1:evaluation-1",
@@ -225,17 +225,17 @@ describe("SurgeonOpenAI", () => {
 
         const replans = env.events.filter(Replan.is)
         assert.equal(replans.length, 1)
-        assert.deepEqual(replans[0]!.data.addedStories, [])
-        assert.deepEqual(replans[0]!.data.removedStoryIds, ["S1"])
-        assert.deepEqual(replans[0]!.data.modifiedDeps, {})
-        assert.match(replans[0]!.data.reason, /deterministic skip: S1 exhausted 3 attempts/)
-        assert.match(replans[0]!.data.reason, /openai-llm fallback after error:/)
+        assert.deepEqual(replans[0]!.payload.addedStories, [])
+        assert.deepEqual(replans[0]!.payload.removedStoryIds, ["S1"])
+        assert.deepEqual(replans[0]!.payload.modifiedDeps, {})
+        assert.match(replans[0]!.payload.reason, /deterministic skip: S1 exhausted 3 attempts/)
+        assert.match(replans[0]!.payload.reason, /openai-llm fallback after error:/)
 
         const measured = env.events.filter(ModelInvocationMeasured.is)
         assert.equal(measured.length, 1)
-        assert.equal(measured[0]!.data.status, "failed")
+        assert.equal(measured[0]!.payload.status, "failed")
         assert.deepEqual(
-            measured[0]!.data.tokens.inputTotal,
+            measured[0]!.payload.tokens.inputTotal,
             unknownMetric("not_reported"),
         )
         assert.ok(env.events.indexOf(measured[0]!) < env.events.indexOf(replans[0]!))
@@ -272,10 +272,10 @@ describe("SurgeonOpenAI", () => {
 
         const replans = env.events.filter(Replan.is)
         assert.equal(replans.length, 1)
-        assert.equal(replans[0]!.data.reason, "prereq: missing setup")
-        assert.deepEqual(replans[0]!.data.addedStories, [added])
-        assert.deepEqual(replans[0]!.data.removedStoryIds, ["S1"])
-        assert.deepEqual(replans[0]!.data.modifiedDeps, { S2: ["S1a"] })
+        assert.equal(replans[0]!.payload.reason, "prereq: missing setup")
+        assert.deepEqual(replans[0]!.payload.addedStories, [added])
+        assert.deepEqual(replans[0]!.payload.removedStoryIds, ["S1"])
+        assert.deepEqual(replans[0]!.payload.modifiedDeps, { S2: ["S1a"] })
     })
 
     it("falls back to a deterministic Replan when OpenAI returns malformed text", async () => {
@@ -292,17 +292,17 @@ describe("SurgeonOpenAI", () => {
 
         const replans = env.events.filter(Replan.is)
         assert.equal(replans.length, 1)
-        assert.deepEqual(replans[0]!.data.addedStories, [])
-        assert.deepEqual(replans[0]!.data.removedStoryIds, ["S1"])
-        assert.deepEqual(replans[0]!.data.modifiedDeps, {})
-        assert.match(replans[0]!.data.reason, /deterministic skip: S1 exhausted 3 attempts/)
-        assert.match(replans[0]!.data.reason, /openai-llm fallback after error: no JSON object found/)
+        assert.deepEqual(replans[0]!.payload.addedStories, [])
+        assert.deepEqual(replans[0]!.payload.removedStoryIds, ["S1"])
+        assert.deepEqual(replans[0]!.payload.modifiedDeps, {})
+        assert.match(replans[0]!.payload.reason, /deterministic skip: S1 exhausted 3 attempts/)
+        assert.match(replans[0]!.payload.reason, /openai-llm fallback after error: no JSON object found/)
 
         const measured = env.events.filter(ModelInvocationMeasured.is)
         assert.equal(measured.length, 1)
-        assert.equal(measured[0]!.data.status, "succeeded")
+        assert.equal(measured[0]!.payload.status, "succeeded")
         assert.deepEqual(
-            measured[0]!.data.tokens.total,
+            measured[0]!.payload.tokens.total,
             knownMetric(2, "provider_response"),
         )
     })
@@ -327,13 +327,13 @@ describe("SurgeonOpenAI", () => {
         const measured = env.events.filter(ModelInvocationMeasured.is)
         const replans = env.events.filter(Replan.is)
         assert.equal(measured.length, 1)
-        assert.equal(measured[0]!.data.status, "timed_out")
+        assert.equal(measured[0]!.payload.status, "timed_out")
         assert.deepEqual(
-            measured[0]!.data.tokens.inputTotal,
+            measured[0]!.payload.tokens.inputTotal,
             unknownMetric("timed_out"),
         )
         assert.deepEqual(
-            measured[0]!.data.tokens.total,
+            measured[0]!.payload.tokens.total,
             unknownMetric("timed_out"),
         )
         assert.equal(replans.length, 1)

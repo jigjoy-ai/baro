@@ -402,7 +402,7 @@ describe("GatewayBillingCoordinator", () => {
             },
         })
         model.setTools([])
-        const context = ModelContext.create("billing-http").addContextItem(
+        const context = ModelContext.create().addContextItem(
             SystemMessageItem.create("Return ok"),
         )
 
@@ -455,7 +455,7 @@ describe("GatewayBillingCoordinator", () => {
         model.setTools([])
 
         const result = await runInferenceRound(
-            ModelContext.create("ordinary-compatible"),
+            ModelContext.create(),
             model,
             {
                 billing: {
@@ -512,7 +512,7 @@ describe("GatewayBillingCoordinator", () => {
         model.setTools([])
 
         await assert.rejects(
-            runInferenceRound(ModelContext.create("failure"), model, {
+            runInferenceRound(ModelContext.create(), model, {
                 billing: {
                     coordinator: gateway,
                     context: {
@@ -576,7 +576,7 @@ describe("GatewayBillingCoordinator", () => {
         model.setTools([])
         const controller = new AbortController()
         const pending = runInferenceRound(
-            ModelContext.create("provider-abort"),
+            ModelContext.create(),
             model,
             {
                 signal: controller.signal,
@@ -660,7 +660,7 @@ describe("GatewayBillingCoordinator", () => {
         model.setTools([])
         const controller = new AbortController()
         const pending = runInferenceRound(
-            ModelContext.create("provider-timeout"),
+            ModelContext.create(),
             model,
             {
                 signal: controller.signal,

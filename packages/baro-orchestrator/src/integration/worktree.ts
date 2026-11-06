@@ -19,10 +19,11 @@ import {
     symlinkSync,
 } from "fs"
 import { tmpdir } from "os"
-import { join, resolve } from "path"
+import { dirname, join, resolve } from "path"
 
+import { SHELL_SCRATCH_DIRNAME } from "../execution/gate-registry.js"
 import { GitGate } from "./git.js"
-import { INTEGRATION_WORKTREE_DIRNAME } from "./integration-worktree.js"
+import { INTEGRATION_WORKTREE_DIRNAME, worktreeLeafName } from "./integration-worktree.js"
 import {
     RepositoryCommandError,
     isRepositoryCommandTimeout,
@@ -54,10 +55,6 @@ export interface WorktreeManagerOptions {
     linkDepDirs?: boolean
     /** Diagnostic logger (defaults to stderr). */
     onLog?: (line: string) => void
-    /** Return null on create failure so callers may use the shared tree. Default true. */
-    allowSharedFallback?: boolean
-    /** Resolve merge conflicts by retrying with `-X theirs`. Default true. */
-    resolveConflictsWithTheirs?: boolean
     /** Tree with the run branch checked out: story bases and merges happen here. Default repoRoot. */
     integrationRoot?: string
 }
@@ -82,6 +79,7 @@ export type IntegrationRefusalInvariant =
     | "sealed_merge_dirty"
     | "merge_conflict"
     | "host_checkout_dirty"
+    | "write_surface_violation"
 
 export class WorktreeRefusalError extends Error {
     constructor(
@@ -111,7 +109,7 @@ interface PreservedDisposition {
 }
 
 /** Refusal to run a destructive step because recovery material could not be
- * secured first. Never converted into a shared-tree fallback. */
+ * secured first. */
 class RecoveryMaterialError extends Error {}
 
 /**
@@ -133,11 +131,9 @@ export class WorktreeManager {
     private recoverySequence = 0
     private readonly baseDir: string
     private readonly linkDepDirs: boolean
-    private readonly allowSharedFallback: boolean
-    private readonly resolveConflictsWithTheirs: boolean
     private readonly integrationRoot: string
     private readonly log: (line: string) => void
-    private depExcludesReady = false
+    private readonly excludedPatterns = new Set<string>()
     /** One-way run shutdown latch. No worktree may appear after the final
      * cleanup sweep has begun. */
     private shutdownStarted = false
@@ -162,8 +158,6 @@ export class WorktreeManager {
     ) {
         this.baseDir = join(tmpdir(), "baro-worktrees", runId)
         this.linkDepDirs = opts.linkDepDirs ?? true
-        this.allowSharedFallback = opts.allowSharedFallback ?? true
-        this.resolveConflictsWithTheirs = opts.resolveConflictsWithTheirs ?? true
         this.integrationRoot = opts.integrationRoot ?? repoRoot
         this.log =
             opts.onLog ?? ((line) => process.stderr.write(`[worktree] ${line}\n`))
@@ -290,7 +284,7 @@ export class WorktreeManager {
         if (name === INTEGRATION_WORKTREE_DIRNAME) {
             throw new Error("story id collides with the integration worktree directory")
         }
-        return join(this.baseDir, name)
+        return join(this.baseDir, name, worktreeLeafName(this.repoRoot))
     }
 
     /** Seal the manager before factories drain. An already-running create
@@ -301,10 +295,17 @@ export class WorktreeManager {
 
     /**
      * Create a story's worktree off the current run-branch HEAD. Returns
-     * its path, or null on any failure so the caller can fall back to the
-     * shared repo cwd instead of failing the story.
+     * its path, or null once shutdown has begun; any failure throws.
+     *
+     * A story started early on prerequisites' checkpoints gets them merged
+     * onto that HEAD here, and the merge becomes its recorded base: its own
+     * diff stays its own, and the prerequisite's final merge later contains
+     * the same commits, so integrating afterwards is a clean continuation.
      */
-    async create(storyId: string): Promise<string | null> {
+    async create(
+        storyId: string,
+        options: { checkpoints?: readonly { storyId: string; sha: string }[] } = {},
+    ): Promise<string | null> {
         if (this.shutdownStarted) return null
         const path = this.pathOf(storyId)
         const release = await this.gate.acquire()
@@ -334,18 +335,22 @@ export class WorktreeManager {
                 ["worktree", "add", "-b", branch, path, baseSha],
                 { cwd: this.repoRoot },
             )
-            if (this.linkDepDirs) {
-                await this.ensureDepDirsExcluded()
-                this.symlinkDepDirs(path)
-            }
+            const startSha = await this.mergeCheckpoints(
+                storyId,
+                path,
+                options.checkpoints ?? [],
+            ) ?? baseSha
+            if (this.linkDepDirs) this.depLocations(path)
+            await this.ensureWorktreeExcludes()
+            if (this.linkDepDirs) this.symlinkDepDirs(path)
             this.paths.set(storyId, path)
-            this.baseShas.set(storyId, baseSha)
+            this.baseShas.set(storyId, startSha)
             this.createdWorktree = true
             this.log(`created ${branch} at ${path}`)
             return path
         } catch (e) {
-            // Nothing was removed yet, and a shared-tree fallback would drop
-            // the preserved attempt this refusal exists to protect.
+            // Nothing was removed yet; rollback would drop the preserved
+            // attempt this refusal exists to protect.
             if (e instanceof RecoveryMaterialError) throw e
             let rollbackError: unknown = null
             try {
@@ -353,18 +358,13 @@ export class WorktreeManager {
             } catch (cleanupError) {
                 rollbackError = cleanupError
             }
-            const suffix = this.allowSharedFallback
-                ? "; falling back to shared tree"
-                : "; collective mode requires isolation"
             const rollbackSuffix = rollbackError
                 ? `; partial setup cleanup failed (${errMsg(rollbackError)})`
                 : ""
             this.log(
                 `could not create worktree for ${storyId} (${errMsg(e)})` +
-                    `${rollbackSuffix}${suffix}`,
+                    `${rollbackSuffix}; collective mode requires isolation`,
             )
-            // A residual worktree/branch is not a safe shared-tree fallback:
-            // fail closed rather than leave ambiguous story state behind.
             if (rollbackError) {
                 throw new Error(
                     `worktree setup failed for ${storyId}: ${errMsg(e)}; ` +
@@ -379,15 +379,80 @@ export class WorktreeManager {
                     },
                 )
             }
-            // Shared-tree fallback is safe for ordinary setup incompatibility,
-            // but never after a command deadline: the timed-out repository
-            // mutation was killed and this attempt must end terminally.
-            if (isRepositoryCommandTimeout(e)) throw e
-            if (!this.allowSharedFallback) throw e
-            return null
+            throw e
         } finally {
             release()
         }
+    }
+
+    /** HEAD after merging the checkpoints, or null when there were none. A
+     * conflict throws: the story must not start on a base it cannot have. */
+    private async mergeCheckpoints(
+        storyId: string,
+        path: string,
+        checkpoints: readonly { storyId: string; sha: string }[],
+    ): Promise<string | null> {
+        if (checkpoints.length === 0) return null
+        const label = checkpoints
+            .map((checkpoint) => `${checkpoint.storyId}@${checkpoint.sha.slice(0, 12)}`)
+            .join(", ")
+        try {
+            await exec(
+                "git",
+                [
+                    ...(await this.hasCommitterIdentity(path)
+                        ? []
+                        : ["-c", "user.name=baro", "-c", "user.email=baro@localhost"]),
+                    "merge",
+                    "--no-ff",
+                    "--no-edit",
+                    "-m",
+                    `baro: start ${storyId} on checkpoints of ${label}`,
+                    ...checkpoints.map((checkpoint) => checkpoint.sha),
+                ],
+                { cwd: path },
+            )
+        } catch (error) {
+            await execQuiet("git", ["merge", "--abort"], path)
+            throw new Error(
+                `checkpoints ${label} do not merge onto the run branch: ${errMsg(error)}`,
+                { cause: error },
+            )
+        }
+        const { stdout } = await exec("git", ["rev-parse", "HEAD"], { cwd: path })
+        this.log(`started ${storyId} on checkpoints ${label}`)
+        return stdout.trim()
+    }
+
+    private async hasCommitterIdentity(cwd: string): Promise<boolean> {
+        try {
+            const { stdout } = await exec("git", ["config", "user.email"], { cwd })
+            return stdout.trim().length > 0
+        } catch {
+            return false
+        }
+    }
+
+    /**
+     * What a running story would publish as a checkpoint: its committed HEAD
+     * and the paths its commits change since its own base. Uncommitted work is
+     * not part of a checkpoint.
+     */
+    async checkpointCandidate(
+        storyId: string,
+    ): Promise<{ sha: string; changedPaths: string[] } | null> {
+        const path = this.paths.get(storyId)
+        const base = this.baseShas.get(storyId)
+        if (!path || !base) return null
+        const { stdout: head } = await exec("git", ["rev-parse", "HEAD"], { cwd: path })
+        const sha = head.trim()
+        if (sha === base) return { sha, changedPaths: [] }
+        const { stdout } = await exec(
+            "git",
+            ["diff", "--no-renames", "--name-only", "-z", `${base}..${sha}`],
+            { cwd: path },
+        )
+        return { sha, changedPaths: stdout.split("\0").filter(Boolean).sort() }
     }
 
     /**
@@ -453,10 +518,9 @@ export class WorktreeManager {
                 ["worktree", "add", "-b", branch, path, baseSha],
                 { cwd: this.repoRoot },
             )
-            if (this.linkDepDirs) {
-                await this.ensureDepDirsExcluded()
-                this.symlinkDepDirs(path)
-            }
+            if (this.linkDepDirs) this.depLocations(path)
+            await this.ensureWorktreeExcludes()
+            if (this.linkDepDirs) this.symlinkDepDirs(path)
             if (restoreSha) {
                 await this.replayPreservedWork(storyId, path, baseSha, restoreSha)
             }
@@ -809,14 +873,13 @@ export class WorktreeManager {
 
     /**
      * Merge a passed story's branch onto the run branch; false if the story
-     * had no worktree (create() fell back to the shared tree). On merge
-     * failure retries once with `-X theirs` (the merging story wins); throws
-     * — leaving the run branch clean — only when even that fails, so the
-     * caller preserves the branch rather than discarding the work.
+     * has no worktree. A failed merge throws and leaves the run branch clean,
+     * so the caller preserves the branch rather than discarding the work.
      */
     async mergeBack(
         storyId: string,
         candidateSeal?: WorktreeCandidateSeal,
+        heldElsewhere: Readonly<Record<string, string>> = {},
     ): Promise<boolean> {
         const path = this.paths.get(storyId)
         if (!path) return false
@@ -832,6 +895,7 @@ export class WorktreeManager {
             const mergeTarget = candidateSeal
                 ? await this.sealedMergeTarget(storyId, path, candidateSeal)
                 : branch
+            await this.assertSurfaceRespected(storyId, mergeTarget, heldElsewhere)
             const blocked = await this.integrationTreeBlocks(mergeTarget)
             if (blocked.length) {
                 this.markPreserved(storyId)
@@ -865,47 +929,15 @@ export class WorktreeManager {
                     this.markPreserved(storyId)
                     throw error
                 }
-                if (!this.resolveConflictsWithTheirs) {
-                    this.markPreserved(storyId)
-                    // No conflicted path means git refused for another reason;
-                    // calling that a conflict hides the reason git printed.
-                    throw new WorktreeRefusalError(
-                        "merge_conflict",
-                        conflicts.length
-                            ? `story ${storyId} conflicts with already-merged work on [${conflicts.join(", ")}]`
-                            : `story ${storyId} merge-back failed without a conflict: ${gitFailureDetail(error)}`,
-                    )
-                }
-                this.log(
-                    `WARNING: story ${storyId} conflicts with already-merged work` +
-                        (conflicts.length ? ` on [${conflicts.join(", ")}]` : "") +
-                        `; auto-resolving with -X theirs (this story wins)`,
+                this.markPreserved(storyId)
+                // No conflicted path means git refused for another reason;
+                // calling that a conflict hides the reason git printed.
+                throw new WorktreeRefusalError(
+                    "merge_conflict",
+                    conflicts.length
+                        ? `story ${storyId} conflicts with already-merged work on [${conflicts.join(", ")}]`
+                        : `story ${storyId} merge-back failed without a conflict: ${gitFailureDetail(error)}`,
                 )
-                try {
-                    await exec(
-                        "git",
-                        [
-                            "merge",
-                            "--no-ff",
-                            "-X",
-                            "theirs",
-                            "-m",
-                            msg,
-                            mergeTarget,
-                        ],
-                        { cwd: this.integrationRoot },
-                    )
-                    return true
-                } catch (e) {
-                    this.markPreserved(storyId)
-                    await this.abortMerge(storyId)
-                    // Keep the branch out of the cleanup sweep so the
-                    // commits stay recoverable after the run.
-                    if (isRepositoryCommandTimeout(e)) throw e
-                    throw new Error(
-                        `could not merge story ${storyId} even with -X theirs: ${errMsg(e)}`,
-                    )
-                }
             }
         } catch (error) {
             if (isRepositoryCommandTimeout(error)) {
@@ -1118,7 +1150,10 @@ export class WorktreeManager {
             // work in it. Having created nothing is reason enough to remove
             // nothing. baseDir/__run belongs to the run, not to this manager.
             if (!keptDirtyRecovery && this.createdWorktree) {
-                for (const path of this.createdPaths) rmSyncQuiet(path)
+                for (const path of this.createdPaths) {
+                    rmSyncQuiet(path)
+                    rmdirIfEmpty(dirname(path))
+                }
                 this.createdPaths.clear()
                 rmdirIfEmpty(this.baseDir)
             }
@@ -1206,26 +1241,37 @@ export class WorktreeManager {
     }
 
     /**
-     * Package roots (root + nested) mapped to their stack's dep dir; cached
-     * per run. Manifest-driven so monorepo subpackages are found.
+     * Package roots (root + nested) mapped to their stack's dep dir.
+     * Manifest-driven so monorepo subpackages are found. The list only grows:
+     * each new worktree is scanned too, because a manifest an earlier story
+     * merged (a pyproject.toml the first story wrote) must share its dep dir
+     * with every later story instead of each one building its own.
      */
-    private depLocs?: Array<{ rel: string; dir: string }>
-    private depLocations(): Array<{ rel: string; dir: string }> {
-        if (this.depLocs) return this.depLocs
-        const out: Array<{ rel: string; dir: string }> = []
-        const seen = new Set<string>()
+    private readonly depLocs: Array<{ rel: string; dir: string }> = []
+    private readonly depLocKeys = new Set<string>()
+    private scannedRepoRoot = false
+    private depLocations(scanRoot?: string): Array<{ rel: string; dir: string }> {
+        if (!this.scannedRepoRoot) {
+            this.scannedRepoRoot = true
+            this.scanDepLocations(this.repoRoot)
+        }
+        if (scanRoot) this.scanDepLocations(scanRoot)
+        return this.depLocs
+    }
+
+    private scanDepLocations(root: string): void {
         const scan = (rel: string, depth: number): void => {
             let entries: import("fs").Dirent[]
             try {
-                entries = readdirSync(join(this.repoRoot, rel) || this.repoRoot, { withFileTypes: true })
+                entries = readdirSync(join(root, rel) || root, { withFileTypes: true })
             } catch {
                 return
             }
             const record = (dir: string): void => {
                 const key = `${rel}|${dir}`
-                if (!seen.has(key)) {
-                    seen.add(key)
-                    out.push({ rel, dir })
+                if (!this.depLocKeys.has(key)) {
+                    this.depLocKeys.add(key)
+                    this.depLocs.push({ rel, dir })
                 }
             }
             for (const e of entries) {
@@ -1242,20 +1288,29 @@ export class WorktreeManager {
             }
         }
         scan("", SCAN_DEPTH)
-        this.depLocs = out
-        return out
     }
 
     /**
-     * A pattern such as `node_modules/` does not ignore a symlink named
-     * `node_modules`, so an agent's explicit `git add -A` could commit our
-     * shared dependency link and turn the run root into a self-referential
-     * symlink after merge-back. Add exact manager-owned paths to the common
-     * repo-local exclude file (linked worktrees share it). Tracked paths are
-     * unaffected by info/exclude.
+     * Keep manager-owned paths out of every story's commits and changed-content
+     * fingerprint, via the common repo-local exclude file (linked worktrees
+     * share it; tracked paths are unaffected):
+     * - the sanctioned scratch dir, so an agent cleaning it up does not turn
+     *   the evidence it just captured stale, and leftovers never auto-commit;
+     * - shared dependency links: a pattern such as `node_modules/` does not
+     *   ignore a symlink named `node_modules`, so an explicit `git add -A`
+     *   could commit our link and make the run root a self-referential
+     *   symlink after merge-back.
      */
-    private async ensureDepDirsExcluded(): Promise<void> {
-        if (this.depExcludesReady) return
+    private async ensureWorktreeExcludes(): Promise<void> {
+        const patterns = [
+            `/${SHELL_SCRATCH_DIRNAME}/`,
+            ...(this.linkDepDirs
+                ? this.depLocations().map(({ rel, dir }) =>
+                      `/${rel ? `${rel}/` : ""}${dir}`,
+                  )
+                : []),
+        ].filter((pattern) => !this.excludedPatterns.has(pattern))
+        if (patterns.length === 0) return
         const { stdout } = await exec(
             "git",
             ["rev-parse", "--git-path", "info/exclude"],
@@ -1272,17 +1327,14 @@ export class WorktreeManager {
             /* git normally creates it; appendFileSync will create if needed */
         }
         const present = new Set(existing.split("\n").map((line) => line.trim()))
-        const patterns = this.depLocations().map(({ rel, dir }) =>
-            `/${rel ? `${rel}/` : ""}${dir}`,
-        )
         const missing = patterns.filter((pattern) => !present.has(pattern))
         if (missing.length > 0) {
             appendFileSync(
                 excludePath,
-                `\n# baro: shared dependency symlinks\n${missing.join("\n")}\n`,
+                `\n# baro: scratch dir and shared dependency symlinks\n${missing.join("\n")}\n`,
             )
         }
-        this.depExcludesReady = true
+        for (const pattern of patterns) this.excludedPatterns.add(pattern)
     }
 
     private symlinkDepDirs(worktreePath: string): void {
@@ -1572,6 +1624,8 @@ export class WorktreeManager {
         } else {
             this.log(`removed worktree ${path} (${reason})`)
         }
+        // The per-story directory that holds `<repo>/`.
+        if (dirname(dirname(path)) === this.baseDir) rmdirIfEmpty(dirname(path))
         // Also prune when the directory disappeared outside this process;
         // otherwise Git still considers its logical branch checked out.
         await execQuiet("git", ["worktree", "prune"], this.repoRoot)
@@ -1582,10 +1636,42 @@ export class WorktreeManager {
     }
 
     /**
+     * Ownership judged on what actually lands, whichever lane wrote it: the
+     * write-time guards cover only the lanes and tools they hook, and a script
+     * or a one-shot CLI can write anything. A story whose commits change a
+     * path another unintegrated story holds does not merge.
+     */
+    private async assertSurfaceRespected(
+        storyId: string,
+        mergeTarget: string,
+        heldElsewhere: Readonly<Record<string, string>>,
+    ): Promise<void> {
+        if (Object.keys(heldElsewhere).length === 0) return
+        const base = this.baseShas.get(storyId)
+        if (!base) return
+        const { stdout } = await exec(
+            "git",
+            ["diff", "--no-renames", "--name-only", "-z", `${base}..${mergeTarget}`],
+            { cwd: this.integrationRoot },
+        )
+        const touched = stdout
+            .split("\0")
+            .filter((entry) => entry && heldElsewhere[entry] !== undefined)
+            .sort()
+        if (touched.length === 0) return
+        this.markPreserved(storyId)
+        throw new WorktreeRefusalError(
+            "write_surface_violation",
+            `story ${storyId} changes files other unintegrated stories hold: ` +
+                touched.map((file) => `${file} (${heldElsewhere[file]})`).join(", ") +
+                `; it was not merged and stays intact on ${this.branchOf(storyId)}`,
+        )
+    }
+
+    /**
      * Roll back every externally visible part of a failed create(). Maps are
      * cleared first so policy observers fail closed even while git cleanup is
-     * still running. Residual state is treated as an error, never as a valid
-     * shared-tree fallback.
+     * still running. Residual state is treated as an error.
      */
     private async rollbackPartialCreate(
         storyId: string,

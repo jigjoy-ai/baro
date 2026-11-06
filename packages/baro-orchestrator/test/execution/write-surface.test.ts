@@ -53,17 +53,15 @@ describe("the write surface a story is dispatched with", () => {
      * default. Two stories then lost a merge each to files they had no way to
      * know were owned, and nothing in the run said the word "surface".
      */
-    it("is computed by every dispatcher that offers work", () => {
-        for (const file of ["collective-board.ts", "conductor.ts"]) {
-            const source = readFileSync(
-                join(import.meta.dirname, "../../src/execution", file),
-                "utf8",
-            )
-            assert.match(
-                source,
-                /storyWriteSurface\(/u,
-                `${file} dispatches stories without computing a write surface`,
-            )
-        }
+    it("is computed by the dispatcher that offers work", () => {
+        const source = readFileSync(
+            join(import.meta.dirname, "../../src/execution/collective-board.ts"),
+            "utf8",
+        )
+        assert.match(
+            source,
+            /storyWriteSurface\(/u,
+            "collective-board.ts dispatches stories without computing a write surface",
+        )
     })
 })

@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import type { AgenticEnvironment } from "../../src/runtime/mozaik.js"
+import type { CoordinationBus } from "../../src/runtime/coordination.js"
 import type {
     StoryExecOpts,
     StoryExecution,
@@ -90,7 +90,6 @@ async function goalAheadOfHost() {
     const prepared = await iw.prepare()
     const mgr = new WorktreeManager(repo, gate, runId, {
         integrationRoot: prepared.integrationRoot,
-        allowSharedFallback: false,
         linkDepDirs: false,
         onLog: (l) => logs.push(l),
     })
@@ -116,7 +115,7 @@ describe("IntegrationWorktree — prepare + WorktreeManager merge", () => {
         const hostHeadBefore = git(repo, "rev-parse", "HEAD")
 
         const prepared = await iw.prepare()
-        assert.equal(prepared.integrationRoot, integrationWorktreePath(runId))
+        assert.equal(prepared.integrationRoot, integrationWorktreePath(runId, repo))
         assert.equal(prepared.reused, false)
         assert.equal(prepared.hostBranchAtStart, hostBranchBefore)
         assert.equal(prepared.hostHeadAtStart, hostHeadBefore)
@@ -129,7 +128,6 @@ describe("IntegrationWorktree — prepare + WorktreeManager merge", () => {
 
         const mgr = new WorktreeManager(repo, gate, runId, {
             integrationRoot: prepared.integrationRoot,
-            allowSharedFallback: false,
             linkDepDirs: false,
             onLog: (l) => logs.push(l),
         })
@@ -198,7 +196,7 @@ class WritingExecutor implements StoryExecutor {
         request: StorySpawnRequestData,
         _route: StoryRoute,
         cwd: string,
-        environment: AgenticEnvironment,
+        environment: CoordinationBus,
         options: StoryExecOpts,
     ): StoryExecution {
         this.cwds.push(cwd)
@@ -206,7 +204,7 @@ class WritingExecutor implements StoryExecutor {
         const resultSource = { agentId: request.storyId } as never
         options.registerResultAuthority?.(resultSource)
         setImmediate(() => {
-            environment.deliverSemanticEvent(
+            environment.publish(
                 resultSource,
                 StoryResult.create({
                     storyId: request.storyId,
@@ -271,7 +269,6 @@ describe("orchestrate — integration worktree gate", () => {
             cwd: repo,
             runId,
             continueRun,
-            coordinationMode: "legacy",
             publishRemote: false,
             withGit: true,
             withWorktrees: true,
@@ -352,7 +349,6 @@ describe("IntegrationWorktree — host edit doesn't block merge", () => {
         const prepared = await iw.prepare()
         const mgr = new WorktreeManager(repo, gate, runId, {
             integrationRoot: prepared.integrationRoot,
-            allowSharedFallback: false,
             linkDepDirs: false,
             onLog: (l) => logs.push(l),
         })
@@ -480,9 +476,7 @@ describe("IntegrationWorktree — remove", () => {
         const prepared = await iw.prepare()
         const mgr = new WorktreeManager(repo, gate, runId, {
             integrationRoot: prepared.integrationRoot,
-            allowSharedFallback: false,
             linkDepDirs: false,
-            resolveConflictsWithTheirs: false,
             onLog: (l) => logs.push(l),
         })
         const p1 = (await mgr.create("S1"))!
@@ -552,7 +546,7 @@ describe("IntegrationWorktree — prepare reuse", () => {
 
         assert.equal(prepared2.reused, true)
         assert.equal(prepared2.integrationRoot, prepared1.integrationRoot)
-        assert.equal(prepared2.integrationRoot, integrationWorktreePath(runId))
+        assert.equal(prepared2.integrationRoot, integrationWorktreePath(runId, repo))
         assert.equal(
             git(repo, "rev-parse", `refs/heads/${goalBranch}`),
             goalShaBefore,

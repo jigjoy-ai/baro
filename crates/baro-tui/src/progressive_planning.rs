@@ -34,19 +34,12 @@ static ID_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 /// hear, and PlanFragmentAdmitted/Rejected currently reach nothing upstream.
 /// Set the env to a falsy value to get the single-plan startup back.
 #[allow(dead_code)]
-pub(crate) fn progressive_planning_enabled(coordination: &str, explicit_flag: bool) -> bool {
+pub(crate) fn progressive_planning_enabled(explicit_flag: bool) -> bool {
     let env_value = std::env::var(PROGRESSIVE_PLANNING_ENV).ok();
-    progressive_planning_enabled_with_env(coordination, explicit_flag, env_value.as_deref())
+    progressive_planning_enabled_with_env(explicit_flag, env_value.as_deref())
 }
 
-fn progressive_planning_enabled_with_env(
-    coordination: &str,
-    explicit_flag: bool,
-    env_value: Option<&str>,
-) -> bool {
-    if coordination != "collective" {
-        return false;
-    }
+fn progressive_planning_enabled_with_env(explicit_flag: bool, env_value: Option<&str>) -> bool {
     explicit_flag || env_value.map_or(true, truthy_env)
 }
 
@@ -429,21 +422,12 @@ mod tests {
 
     #[test]
     fn the_collective_plans_progressively_unless_told_otherwise() {
-        assert!(progressive_planning_enabled_with_env("collective", true, None));
-        assert!(progressive_planning_enabled_with_env(
-            "collective",
-            false,
-            Some("YES")
-        ));
+        assert!(progressive_planning_enabled_with_env(true, None));
+        assert!(progressive_planning_enabled_with_env(false, Some("YES")));
         // Silence means the default now, not a refusal.
-        assert!(progressive_planning_enabled_with_env("collective", false, None));
-        for (coordination, flag, env) in [
-            ("legacy", true, Some("1")),
-            ("legacy", false, None),
-            ("collective", false, Some("false")),
-            ("collective", false, Some("0")),
-        ] {
-            assert!(!progressive_planning_enabled_with_env(coordination, flag, env));
+        assert!(progressive_planning_enabled_with_env(false, None));
+        for env in ["false", "0"] {
+            assert!(!progressive_planning_enabled_with_env(false, Some(env)));
         }
     }
 
@@ -452,8 +436,8 @@ mod tests {
     /// which has no complete plan to show.
     #[test]
     fn an_interactive_run_may_opt_in_and_watch() {
-        assert!(progressive_planning_enabled_with_env("collective", true, None));
-        assert!(progressive_planning_enabled_with_env("collective", false, Some("1")));
+        assert!(progressive_planning_enabled_with_env(true, None));
+        assert!(progressive_planning_enabled_with_env(false, Some("1")));
     }
 
     #[test]

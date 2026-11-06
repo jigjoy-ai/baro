@@ -6,6 +6,7 @@ import {
     FunctionCallOutputItem,
     ModelMessageItem,
     SemanticEvent,
+    toWire,
 } from "../../../src/runtime/mozaik.js"
 
 import { mapPiEvent } from "../../../src/harness/pi/stream-mapper.js"
@@ -27,15 +28,15 @@ function map(event: Record<string, unknown>): ReturnType<typeof mapPiEvent> {
 }
 
 function json(item: unknown): Record<string, any> {
-    return JSON.parse(JSON.stringify(item)) as Record<string, any>
+    return JSON.parse(JSON.stringify(toWire(item as Parameters<typeof toWire>[0]))) as Record<string, any>
 }
 
 function semantic<T>(
     items: PiItem[],
-    is: (event: SemanticEvent<unknown>) => event is SemanticEvent<T>,
-): SemanticEvent<T> {
+    is: (event: SemanticEvent<string, unknown>) => event is SemanticEvent<string, T>,
+): SemanticEvent<string, T> {
     const item = items.find(
-        (candidate): candidate is SemanticEvent<T> =>
+        (candidate): candidate is SemanticEvent<string, T> =>
             candidate instanceof SemanticEvent && is(candidate),
     )
     assert.ok(item)
@@ -57,9 +58,9 @@ describe("mapPiEvent", () => {
         const item = semantic(result.items, PiSystem.is)
 
         assert.equal(result.sessionId, "pi-session")
-        assert.equal(item.data.agentId, AGENT_ID)
-        assert.equal(item.data.subtype, "session")
-        assert.deepEqual(item.data.raw, event)
+        assert.equal(item.payload.agentId, AGENT_ID)
+        assert.equal(item.payload.subtype, "session")
+        assert.deepEqual(item.payload.raw, event)
     })
 
     it("maps agent_start and turn_start lifecycle events", () => {
@@ -67,8 +68,8 @@ describe("mapPiEvent", () => {
             const result = map({ type: subtype })
             const item = semantic(result.items, PiSystem.is)
 
-            assert.equal(item.data.agentId, AGENT_ID)
-            assert.equal(item.data.subtype, subtype)
+            assert.equal(item.payload.agentId, AGENT_ID)
+            assert.equal(item.payload.subtype, subtype)
         }
     })
 
@@ -76,8 +77,8 @@ describe("mapPiEvent", () => {
         const result = map({ type: "message_start" })
         const item = semantic(result.items, PiTurnEvent.is)
 
-        assert.equal(item.data.agentId, AGENT_ID)
-        assert.equal(item.data.turnType, "message_start")
+        assert.equal(item.payload.agentId, AGENT_ID)
+        assert.equal(item.payload.turnType, "message_start")
     })
 
     it("normalizes message_update subtypes without emitting model messages", () => {
@@ -95,8 +96,8 @@ describe("mapPiEvent", () => {
             })
             const item = semantic(result.items, PiItemEvent.is)
 
-            assert.equal(item.data.agentId, AGENT_ID)
-            assert.equal(item.data.itemType, itemType)
+            assert.equal(item.payload.agentId, AGENT_ID)
+            assert.equal(item.payload.itemType, itemType)
             assert.equal(hasModelMessage(result.items), false)
         }
     })
@@ -116,7 +117,7 @@ describe("mapPiEvent", () => {
 
         assert.ok(message)
         assert.equal(json(message).content[0].text, "Pi says hi")
-        assert.equal(turn.data.turnType, "message_end")
+        assert.equal(turn.payload.turnType, "message_end")
     })
 
     it("maps assistant message_end tool calls to function calls plus lifecycle event", () => {
@@ -146,7 +147,7 @@ describe("mapPiEvent", () => {
             name: "bash",
             arguments: JSON.stringify({ command: "echo hi" }),
         })
-        assert.equal(turn.data.turnType, "message_end")
+        assert.equal(turn.payload.turnType, "message_end")
     })
 
     it("maps user message_end only to a lifecycle event", () => {
@@ -159,7 +160,7 @@ describe("mapPiEvent", () => {
         })
         const turn = semantic(result.items, PiTurnEvent.is)
 
-        assert.equal(turn.data.turnType, "message_end")
+        assert.equal(turn.payload.turnType, "message_end")
         assert.equal(hasModelMessage(result.items), false)
         assert.equal(hasFunctionCall(result.items), false)
     })
@@ -174,8 +175,8 @@ describe("mapPiEvent", () => {
             const result = map({ type })
             const item = semantic(result.items, PiItemEvent.is)
 
-            assert.equal(item.data.agentId, AGENT_ID)
-            assert.equal(item.data.itemType, itemType)
+            assert.equal(item.payload.agentId, AGENT_ID)
+            assert.equal(item.payload.itemType, itemType)
         }
     })
 
@@ -199,7 +200,7 @@ describe("mapPiEvent", () => {
         assert.ok(output)
         assert.equal(json(output).call_id, "call-1")
         assert.equal(json(output).output[0].text, "hello world")
-        assert.equal(item.data.itemType, "tool_result")
+        assert.equal(item.payload.itemType, "tool_result")
     })
 
     it("keeps empty text blocks as empty function outputs", () => {
@@ -254,14 +255,14 @@ describe("mapPiEvent", () => {
         const turnResult = map({ type: "turn_end" })
         const turn = semantic(turnResult.items, PiTurnEvent.is)
 
-        assert.equal(turn.data.agentId, AGENT_ID)
-        assert.equal(turn.data.turnType, "turn_end")
+        assert.equal(turn.payload.agentId, AGENT_ID)
+        assert.equal(turn.payload.turnType, "turn_end")
 
         const agentResult = map({ type: "agent_end" })
         const agent = semantic(agentResult.items, PiSystem.is)
 
-        assert.equal(agent.data.agentId, AGENT_ID)
-        assert.equal(agent.data.subtype, "agent_end")
+        assert.equal(agent.payload.agentId, AGENT_ID)
+        assert.equal(agent.payload.subtype, "agent_end")
     })
 
     it("maps unknown events to PiUnknownEvent", () => {
@@ -269,8 +270,8 @@ describe("mapPiEvent", () => {
         const result = map(event)
         const item = semantic(result.items, PiUnknownEvent.is)
 
-        assert.equal(item.data.agentId, AGENT_ID)
-        assert.equal(item.data.piType, "mystery")
-        assert.deepEqual(item.data.raw, event)
+        assert.equal(item.payload.agentId, AGENT_ID)
+        assert.equal(item.payload.piType, "mystery")
+        assert.deepEqual(item.payload.raw, event)
     })
 })

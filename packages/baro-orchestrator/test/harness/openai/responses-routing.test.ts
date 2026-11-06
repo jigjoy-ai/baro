@@ -11,6 +11,7 @@ import {
     ModelContext,
     ModelMessageItem,
     UserMessageItem,
+    toWire,
 } from "../../../src/runtime/mozaik.js"
 
 // A stand-in for the baro gateway: it serves both OpenAI surfaces and records
@@ -96,10 +97,10 @@ describe("OpenAI-native models use the Responses API on a custom endpoint", () =
 
     const ask = async (name: string): Promise<string> => {
         const model = new GenericOpenAIModel(name, { baseURL, apiKey: "gateway-key" })
-        const context = ModelContext.create("routing").addContextItem(UserMessageItem.create("hello"))
+        const context = ModelContext.create().addContextItem(UserMessageItem.create("hello"))
         const round = await runInferenceRound(context, model)
         const message = round.items.find((item) => item instanceof ModelMessageItem) as ModelMessageItem
-        return message.toJSON().content[0].text as string
+        return toWire(message).content[0].text as string
     }
 
     it("sends gpt-* to /v1/responses with the connection's own key", async () => {
@@ -114,13 +115,13 @@ describe("OpenAI-native models use the Responses API on a custom endpoint", () =
     it("replays encrypted reasoning statelessly across a tool round", async () => {
         hits.length = 0
         const model = new GenericOpenAIModel("gpt-tool-round", { baseURL, apiKey: "gateway-key" })
-        const context = ModelContext.create("routing").addContextItem(UserMessageItem.create("hello"))
+        const context = ModelContext.create().addContextItem(UserMessageItem.create("hello"))
         const round = await runInferenceRound(context, model)
         assert.deepEqual(hits[0]?.body.include, ["reasoning.encrypted_content"])
         assert.equal(hits[0]?.body.store, false)
         // The reasoning item with nothing to replay is dropped; order is kept.
         assert.deepEqual(round.items.map((item) => item.getType()), ["reasoning", "function_call"])
-        await runInferenceRound(context.applyModelOutput(round.items), model)
+        await runInferenceRound(context.addContextItems(round.items), model)
         const replayed = (hits[1]?.body.input as Record<string, unknown>[]).slice(1)
         assert.deepEqual(replayed, [
             { type: "reasoning", id: "rs_1", summary: [], encrypted_content: "sealed" },

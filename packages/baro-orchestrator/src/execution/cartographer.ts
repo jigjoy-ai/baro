@@ -5,13 +5,13 @@
  */
 
 import {
-    BaseObserver,
     FunctionCallItem,
     FunctionCallOutputItem,
     ModelMessageItem,
-    Participant,
     SemanticEvent,
+    toWire,
 } from "../runtime/mozaik.js"
+import { BusMember } from "../runtime/coordination.js"
 
 import {
     AgentResult,
@@ -42,7 +42,7 @@ export interface CartographerOptions {
     emitStreamChunks?: boolean
 }
 
-export class Cartographer extends BaseObserver {
+export class Cartographer extends BusMember {
     private readonly sink: (frame: Frame) => void
     private readonly emitStreamChunks: boolean
 
@@ -53,17 +53,17 @@ export class Cartographer extends BaseObserver {
     }
 
     override async onExternalModelMessage(
-        source: Participant,
+        source: BusMember,
         item: ModelMessageItem,
     ): Promise<void> {
         const agentId = this.extractAgentId(source, item)
-        const json = item.toJSON() as { content: Array<{ text: string }> }
+        const json = toWire(item) as { content: Array<{ text: string }> }
         const text = json.content?.[0]?.text ?? ""
         this.sink({ kind: "model_message", agentId, text })
     }
 
     override async onExternalFunctionCall(
-        source: Participant,
+        source: BusMember,
         item: FunctionCallItem,
     ): Promise<void> {
         const agentId = this.extractAgentId(source, item)
@@ -77,25 +77,25 @@ export class Cartographer extends BaseObserver {
     }
 
     override async onExternalFunctionCallOutput(
-        source: Participant,
+        source: BusMember,
         item: FunctionCallOutputItem,
     ): Promise<void> {
         const agentId = this.extractAgentId(source, item)
-        const json = item.toJSON() as { call_id: string; output: Array<{ text: string }> }
+        const json = toWire(item) as { call_id: string; output: Array<{ text: string }> }
         const output = json.output?.[0]?.text ?? ""
         this.sink({ kind: "tool_result", agentId, callId: json.call_id, output })
     }
 
     override async onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): Promise<void> {
         if (AgentState.is(event)) {
             this.sink({
                 kind: "agent_state",
-                agentId: event.data.agentId,
-                phase: event.data.phase,
-                detail: event.data.detail,
+                agentId: event.payload.agentId,
+                phase: event.payload.phase,
+                detail: event.payload.detail,
             })
             return
         }
@@ -103,8 +103,8 @@ export class Cartographer extends BaseObserver {
         if (AgentUserMessage.is(event)) {
             this.sink({
                 kind: "user_message",
-                agentId: event.data.agentId,
-                text: event.data.text,
+                agentId: event.payload.agentId,
+                text: event.payload.text,
             })
             return
         }
@@ -112,8 +112,8 @@ export class Cartographer extends BaseObserver {
         if (AgentTargetedMessage.is(event)) {
             this.sink({
                 kind: "user_message",
-                agentId: event.data.recipientId,
-                text: event.data.text,
+                agentId: event.payload.recipientId,
+                text: event.payload.text,
             })
             return
         }
@@ -121,13 +121,13 @@ export class Cartographer extends BaseObserver {
         if (AgentResult.is(event)) {
             this.sink({
                 kind: "result",
-                agentId: event.data.agentId,
-                isError: event.data.isError,
-                text: event.data.resultText,
-                durationMs: event.data.durationMs,
-                costUsd: event.data.totalCostUsd,
-                numTurns: event.data.numTurns,
-                sessionId: event.data.sessionId,
+                agentId: event.payload.agentId,
+                isError: event.payload.isError,
+                text: event.payload.resultText,
+                durationMs: event.payload.durationMs,
+                costUsd: event.payload.totalCostUsd,
+                numTurns: event.payload.numTurns,
+                sessionId: event.payload.sessionId,
             })
             return
         }
@@ -135,8 +135,8 @@ export class Cartographer extends BaseObserver {
         if (ClaudeRateLimit.is(event)) {
             this.sink({
                 kind: "rate_limit",
-                agentId: event.data.agentId,
-                raw: event.data.raw,
+                agentId: event.payload.agentId,
+                raw: event.payload.raw,
             })
             return
         }
@@ -144,15 +144,15 @@ export class Cartographer extends BaseObserver {
         if (ClaudeSystem.is(event)) {
             this.sink({
                 kind: "system",
-                agentId: event.data.agentId,
-                subtype: event.data.subtype,
+                agentId: event.payload.agentId,
+                subtype: event.payload.subtype,
             })
             return
         }
 
         if (ClaudeStreamChunk.is(event)) {
             if (this.emitStreamChunks) {
-                this.sink({ kind: "stream_chunk", agentId: event.data.agentId })
+                this.sink({ kind: "stream_chunk", agentId: event.payload.agentId })
             }
             return
         }
@@ -161,7 +161,7 @@ export class Cartographer extends BaseObserver {
             this.sink({
                 kind: "unknown",
                 sourceLabel: source.constructor.name,
-                itemType: event.data.claudeType,
+                itemType: event.payload.claudeType,
             })
             return
         }
@@ -175,7 +175,7 @@ export class Cartographer extends BaseObserver {
     }
 
     private extractAgentId(
-        source: Participant,
+        source: BusMember,
         item: { agentId?: string } | object,
     ): string | null {
         const fromItem = (item as { agentId?: string }).agentId

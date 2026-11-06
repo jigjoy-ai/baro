@@ -1,6 +1,6 @@
 /**
  * SurgeonOpenAI — sibling of `Surgeon` that runs the replan-reasoning
- * call through Mozaik 3.9's native OpenAI inference runner instead of
+ * call through Baro's Mozaik-native OpenAI inference runtime instead of
  * shelling out to `claude --print`.
  *
  * Same bus contract:
@@ -18,19 +18,14 @@
  */
 
 import {
-    BaseObserver,
-    Gpt54,
-    Gpt54Mini,
-    Gpt54Nano,
-    Gpt55,
     ModelContext,
     SemanticEvent,
     SystemMessageItem,
     UserMessageItem,
-    type GenerativeModel,
-    type Participant,
-    type TokenUsage,
-} from "../../runtime/mozaik.js"
+    type TokenUsage, toWire } from "../../runtime/mozaik.js"
+import { pickInferenceModel as pickModel } from "../mozaik/pick-model.js"
+import type { InferenceModel } from "./runtime.js"
+import { BusMember } from "../../runtime/coordination.js"
 
 import type { GatewayBillingCoordinator } from "../../telemetry/billing/index.js"
 import {
@@ -107,28 +102,11 @@ interface SurgeonOpenAITelemetry {
     cost: ModelCostMetrics
 }
 
-function pickModel(name: string): GenerativeModel {
-    switch (name) {
-        case "gpt-5.5":
-            return new Gpt55()
-        case "gpt-5.4":
-            return new Gpt54()
-        case "gpt-5.4-mini":
-            return new Gpt54Mini()
-        case "gpt-5.4-nano":
-            return new Gpt54Nano()
-        default:
-            process.stderr.write(
-                `[pickModel] Using model "${name}" as-is with the OpenAI API.\n`,
-            )
-            return new GenericOpenAIModel(name)
-    }
-}
 
-export class SurgeonOpenAI extends BaseObserver {
+export class SurgeonOpenAI extends BusMember {
     private readonly opts: Required<Pick<SurgeonOpenAIOptions, "maxReplans" | "model">> &
         SurgeonOpenAIOptions
-    private readonly model: GenerativeModel
+    private readonly model: InferenceModel
     private readonly billingCoordinator: GatewayBillingCoordinator | null
 
     private replansEmitted = 0
@@ -165,25 +143,25 @@ export class SurgeonOpenAI extends BaseObserver {
         await Promise.allSettled([...this.pending])
     }
 
-    setLeaseAuthority(authority: Participant): void {
+    setLeaseAuthority(authority: BusMember): void {
         this.sources.setLeaseAuthority(authority)
     }
 
-    setQualityAuthority(authority: Participant): void {
+    setQualityAuthority(authority: BusMember): void {
         this.sources.setQualityAuthority(authority)
     }
 
-    setBlockAuthority(authority: Participant): void {
+    setBlockAuthority(authority: BusMember): void {
         this.sources.setBlockAuthority(authority)
     }
 
-    setCriticAuthority(authority: Participant): void {
+    setCriticAuthority(authority: BusMember): void {
         this.sources.setCriticAuthority(authority)
     }
 
     override async onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): Promise<void> {
         if (this.sources.observeLease(source, event, this.leases, this.opts.runId)) return
         if (!this.sources.accepts(source, event)) return
@@ -218,8 +196,8 @@ export class SurgeonOpenAI extends BaseObserver {
                     return
                 }
                 this.replansEmitted += 1
-                for (const env of this.getEnvironments()) {
-                    env.deliverSemanticEvent(
+                for (const env of this.getBuses()) {
+                    env.publish(
                         this,
                         Replan.create(correlateRecoveryReplan(replan, failure)),
                     )
@@ -276,15 +254,15 @@ export class SurgeonOpenAI extends BaseObserver {
             },
         }
         const event = ModelInvocationMeasured.create(data)
-        for (const env of this.getEnvironments()) {
-            env.deliverSemanticEvent(this, event)
+        for (const env of this.getBuses()) {
+            env.publish(this, event)
         }
     }
 
     private emitRecoveryStarted(failure: StoryResultData): void {
         if (!this.opts.emitRecoveryDecisions || !this.opts.runId) return
-        for (const env of this.getEnvironments()) {
-            env.deliverSemanticEvent(
+        for (const env of this.getBuses()) {
+            env.publish(
                 this,
                 RecoveryEvaluationStarted.create({
                     runId: this.opts.runId,
@@ -301,8 +279,8 @@ export class SurgeonOpenAI extends BaseObserver {
         reason: string,
     ): void {
         if (!this.opts.emitRecoveryDecisions || !this.opts.runId) return
-        for (const env of this.getEnvironments()) {
-            env.deliverSemanticEvent(
+        for (const env of this.getBuses()) {
+            env.publish(
                 this,
                 RecoveryDecision.create({
                     runId: this.opts.runId,
@@ -334,7 +312,7 @@ export class SurgeonOpenAI extends BaseObserver {
             this.opts.escalationRoute,
             this.critiques.forStory(failure.storyId),
         )
-        const context = ModelContext.create("surgeon")
+        const context = ModelContext.create()
             .addContextItem(SystemMessageItem.create(SURGEON_SYSTEM_PROMPT))
             .addContextItem(UserMessageItem.create(userPrompt))
 
@@ -364,7 +342,7 @@ export class SurgeonOpenAI extends BaseObserver {
             let assistantText = ""
             for (const item of round.items) {
                 if (item.type === "message") {
-                    const json = item.toJSON() as { content: Array<{ text: string }> }
+                    const json = toWire(item) as { content: Array<{ text: string }> }
                     assistantText += json.content?.[0]?.text ?? ""
                 }
             }

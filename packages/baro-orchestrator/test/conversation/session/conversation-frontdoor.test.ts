@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
-import { AgenticEnvironment } from "../../../src/runtime/mozaik.js"
+import { CoordinationBus } from "../../../src/runtime/coordination.js"
 
 import {
     FrontDoorConversationCompleted,
@@ -146,7 +146,7 @@ describe("pre-PRD conversation front door", () => {
                 prompt = value
             }),
         })
-        const environment = new AgenticEnvironment("frontdoor-authority-test")
+        const environment = new CoordinationBus("frontdoor-authority-test")
         const host = new ConversationTurnHost({ sessionId: "session-authority" })
         const conversation = new ConversationIntakeParticipant({
             sessionId: "session-authority",
@@ -174,7 +174,7 @@ describe("pre-PRD conversation front door", () => {
         await waitUntil(() => scans === 1)
 
         const attacker = source("forged-repository-scout")
-        environment.deliverSemanticEvent(scout, RepositoryContextProvided.create({
+        environment.publish(scout, RepositoryContextProvided.create({
             schemaVersion: 1,
             sessionId: "session-authority",
             requestId: request.requestId,
@@ -185,7 +185,7 @@ describe("pre-PRD conversation front door", () => {
             scoutId: "wrong-scout-label",
             brief: validBrief("f", "wrong-label.ts"),
         }))
-        environment.deliverSemanticEvent(attacker, RepositoryContextProvided.create({
+        environment.publish(attacker, RepositoryContextProvided.create({
             schemaVersion: 1,
             sessionId: "session-authority",
             requestId: request.requestId,
@@ -196,7 +196,7 @@ describe("pre-PRD conversation front door", () => {
             scoutId: "repository-scout",
             brief: validBrief("f", "forged.ts"),
         }))
-        environment.deliverSemanticEvent(attacker, FrontDoorConversationCompleted.create({
+        environment.publish(attacker, FrontDoorConversationCompleted.create({
             schemaVersion: 1,
             sessionId: "session-authority",
             requestId: request.requestId,
@@ -405,7 +405,7 @@ function validBrief(fill: string, path: string): RepositoryBriefV1 {
 }
 
 function bindAndJoin(
-    environment: AgenticEnvironment,
+    environment: CoordinationBus,
     host: ConversationTurnHost,
     conversation: ConversationIntakeParticipant,
     scout: RepositoryScoutParticipant,
@@ -421,7 +421,7 @@ function bindAndJoin(
 }
 
 function leaveAll(
-    environment: AgenticEnvironment,
+    environment: CoordinationBus,
     host: ConversationTurnHost,
     conversation: ConversationIntakeParticipant,
     scout: RepositoryScoutParticipant,
@@ -429,7 +429,6 @@ function leaveAll(
     scout.leave(environment)
     conversation.leave(environment)
     host.leave(environment)
-    environment.stop()
 }
 
 function deferred<T>(): {

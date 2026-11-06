@@ -6,12 +6,12 @@
  */
 
 import {
-    BaseObserver,
     FunctionCallItem,
     FunctionCallOutputItem,
-    Participant,
     SemanticEvent,
+    toWire,
 } from "../runtime/mozaik.js"
+import { BusMember } from "../runtime/coordination.js"
 
 import type { MemoryStore } from "@baro/memory"
 
@@ -112,13 +112,13 @@ export interface MemoryLibrarianOptions {
     }
 }
 
-export class MemoryLibrarian extends BaseObserver {
+export class MemoryLibrarian extends BusMember {
     private readonly opts: Required<Omit<MemoryLibrarianOptions, "collective">> &
         Pick<MemoryLibrarianOptions, "collective">
     /** Call ids are producer-local, not globally unique across parallel
      * participants. The outer identity map preserves those namespaces. */
     private readonly pending = new Map<
-        Participant,
+        BusMember,
         Map<string, PendingCall>
     >()
     private readonly inFlight = new Set<string>()
@@ -126,7 +126,7 @@ export class MemoryLibrarian extends BaseObserver {
         string,
         StoryResultAuthorityCorrelation
     >()
-    private leaseAuthority: Participant | null = null
+    private leaseAuthority: BusMember | null = null
     private store: MemoryStore | null = null
     private initPromise: Promise<void> | null = null
     private initAttempts = 0
@@ -154,7 +154,7 @@ export class MemoryLibrarian extends BaseObserver {
         }
     }
 
-    setLeaseAuthority(authority: Participant): void {
+    setLeaseAuthority(authority: BusMember): void {
         if (this.leaseAuthority && this.leaseAuthority !== authority) {
             throw new Error("MemoryLibrarian lease authority is already bound")
         }
@@ -201,9 +201,9 @@ export class MemoryLibrarian extends BaseObserver {
         }
     }
 
-    /** Always returns memory guidance when the store is available. Legacy
-     * agents retain the CLI; collective agents receive only authenticated,
-     * automatically indexed findings and capability-bound sharing guidance. */
+    /** Always returns memory guidance when the store is available. Collective
+     * agents receive only authenticated, automatically indexed findings and
+     * capability-bound sharing guidance. */
     async gatherContext(storyId: string, hints: readonly string[] = []): Promise<string | null> {
         const store = await this.ensureStore()
         if (!store) return null
@@ -225,9 +225,6 @@ export class MemoryLibrarian extends BaseObserver {
         const cachedPaths = this.opts.collective
             ? []
             : await store.getCachedPaths()
-        const legacyCliPath = !this.opts.collective && this.opts.sessionPath
-            ? jsonQuotedShellArgument(this.opts.sessionPath)
-            : null
 
         const parts: string[] = []
 
@@ -240,24 +237,6 @@ export class MemoryLibrarian extends BaseObserver {
             parts.push("Do not write to shared memory through a separate transport.")
             parts.push("Share explicit findings through the lease-capable `agent-collab note`")
             parts.push("channel described in the main task prompt.")
-            parts.push("")
-        } else if (legacyCliPath) {
-            parts.push("Use these commands via Bash to check what's available:")
-            parts.push("")
-            parts.push("\t# Find relevant context from other agents")
-            parts.push(`\tnode ~/.baro/bin/baro-memory.mjs query "JWT authentication" --path ${legacyCliPath}`)
-            parts.push("")
-            parts.push("\t# List files already read by other agents")
-            parts.push(`\tnode ~/.baro/bin/baro-memory.mjs cache list --path ${legacyCliPath}`)
-            parts.push("")
-            parts.push("\t# Get cached file content (no disk read needed)")
-            parts.push(`\tnode ~/.baro/bin/baro-memory.mjs cache get src/auth.ts --path ${legacyCliPath}`)
-            parts.push("")
-            parts.push("\t# Store a finding for other agents")
-            parts.push(`\tnode ~/.baro/bin/baro-memory.mjs store "found X" --tool Read --file src/foo.ts --path ${legacyCliPath}`)
-            parts.push("")
-            parts.push("IMPORTANT: Check cached files BEFORE reading from disk.")
-            parts.push("If a file is cached, use `baro-memory cache get` instead of Read.")
             parts.push("")
         } else {
             parts.push("Verified exploration-tool evidence is indexed in this process.")
@@ -297,7 +276,7 @@ export class MemoryLibrarian extends BaseObserver {
         return result
     }
 
-    override async onExternalFunctionCall(source: Participant, item: FunctionCallItem): Promise<void> {
+    override async onExternalFunctionCall(source: BusMember, item: FunctionCallItem): Promise<void> {
         const tool = explorationTool(item.name)
         if (!tool) return
         const agentId = (source as unknown as { agentId?: string }).agentId
@@ -325,12 +304,12 @@ export class MemoryLibrarian extends BaseObserver {
         })
     }
 
-    override async onExternalFunctionCallOutput(source: Participant, item: FunctionCallOutputItem): Promise<void> {
+    override async onExternalFunctionCallOutput(source: BusMember, item: FunctionCallOutputItem): Promise<void> {
         let callId: string
         let outputTexts: string[]
 
         try {
-            const json = item.toJSON() as Record<string, unknown>
+            const json = toWire(item) as Record<string, unknown>
             callId = json.call_id as string
             const output = json.output as Array<{ text?: string }> | undefined
             outputTexts = (output ?? [])
@@ -392,8 +371,8 @@ export class MemoryLibrarian extends BaseObserver {
         }
 
         if (pending.tool === "Read" || pending.tool === "Grep") {
-            for (const env of this.getEnvironments()) {
-                env.deliverSemanticEvent(this, Knowledge.create({
+            for (const env of this.getBuses()) {
+                env.publish(this, Knowledge.create({
                     sourceAgentId: pending.agentId,
                     tags: [pending.tool.toLowerCase()],
                     summary: `${pending.tool} ${filePath || ""}`,
@@ -404,32 +383,32 @@ export class MemoryLibrarian extends BaseObserver {
         }
     }
 
-    override async onExternalEvent(source: Participant, event: SemanticEvent<unknown>): Promise<void> {
+    override async onExternalEvent(source: BusMember, event: SemanticEvent<string, unknown>): Promise<void> {
         const collective = this.opts.collective
         if (collective && WorkLeaseGranted.is(event)) {
             if (
                 source !== this.leaseAuthority ||
-                event.data.runId !== collective.runId
+                event.payload.runId !== collective.runId
             ) return
-            const storyId = event.data.request.storyId
+            const storyId = event.payload.request.storyId
             const current = this.activeLeases.get(storyId)
             if (
                 current &&
-                (event.data.generation < current.generation ||
-                    (event.data.generation === current.generation &&
-                        event.data.leaseId !== current.leaseId))
+                (event.payload.generation < current.generation ||
+                    (event.payload.generation === current.generation &&
+                        event.payload.leaseId !== current.leaseId))
             ) return
             if (
                 current &&
-                event.data.generation === current.generation &&
-                event.data.leaseId === current.leaseId
+                event.payload.generation === current.generation &&
+                event.payload.leaseId === current.leaseId
             ) return
             if (current) this.dropPendingForCorrelation(current)
             this.activeLeases.set(storyId, {
                 runId: collective.runId,
                 storyId,
-                leaseId: event.data.leaseId,
-                generation: event.data.generation,
+                leaseId: event.payload.leaseId,
+                generation: event.payload.generation,
             })
             this.inFlight.add(storyId)
             log(`Story ${storyId} started (${this.inFlight.size} active)`)
@@ -438,14 +417,14 @@ export class MemoryLibrarian extends BaseObserver {
         if (collective && WorkLeaseReleased.is(event)) {
             if (
                 source !== this.leaseAuthority ||
-                event.data.runId !== collective.runId
+                event.payload.runId !== collective.runId
             ) return
-            const current = this.activeLeases.get(event.data.storyId)
-            if (current?.leaseId !== event.data.leaseId) return
+            const current = this.activeLeases.get(event.payload.storyId)
+            if (current?.leaseId !== event.payload.leaseId) return
             this.dropPendingForCorrelation(current)
-            this.activeLeases.delete(event.data.storyId)
-            this.inFlight.delete(event.data.storyId)
-            log(`Story ${event.data.storyId} done (${this.inFlight.size} active)`)
+            this.activeLeases.delete(event.payload.storyId)
+            this.inFlight.delete(event.payload.storyId)
+            log(`Story ${event.payload.storyId} done (${this.inFlight.size} active)`)
             if (this.inFlight.size === 0) logStats()
             return
         }
@@ -453,21 +432,21 @@ export class MemoryLibrarian extends BaseObserver {
         // StorySpawned/StoryResult payloads are forgeable bus observations.
         if (collective) return
         if (StorySpawned.is(event)) {
-            this.inFlight.add(event.data.storyId)
-            log(`Story ${event.data.storyId} started (${this.inFlight.size} active)`)
+            this.inFlight.add(event.payload.storyId)
+            log(`Story ${event.payload.storyId} started (${this.inFlight.size} active)`)
             return
         }
         if (StoryResult.is(event)) {
-            this.inFlight.delete(event.data.storyId)
-            log(event.data.suspension
-                ? `Story ${event.data.storyId} suspended for dependency block ${event.data.suspension.blockId} (${this.inFlight.size} active)`
-                : `Story ${event.data.storyId} done (${this.inFlight.size} active)`)
+            this.inFlight.delete(event.payload.storyId)
+            log(event.payload.suspension
+                ? `Story ${event.payload.storyId} suspended for dependency block ${event.payload.suspension.blockId} (${this.inFlight.size} active)`
+                : `Story ${event.payload.storyId} done (${this.inFlight.size} active)`)
             if (this.inFlight.size === 0) logStats()
         }
     }
 
     private collectiveCorrelation(
-        source: Participant,
+        source: BusMember,
         storyId: string,
     ): StoryResultAuthorityCorrelation | null {
         const collective = this.opts.collective
@@ -494,7 +473,7 @@ export class MemoryLibrarian extends BaseObserver {
         }
     }
 
-    private deletePending(source: Participant, callId: string): void {
+    private deletePending(source: BusMember, callId: string): void {
         const calls = this.pending.get(source)
         if (!calls) return
         calls.delete(callId)
@@ -528,15 +507,4 @@ function sameCorrelation(
         left.leaseId === right.leaseId &&
         left.generation === right.generation
     )
-}
-
-/** Render one JSON-style double-quoted shell argument. JSON escaping handles
- * quotes/backslashes; the extra escapes prevent expansion inside Bash double
- * quotes. Control characters fail closed rather than advertising a command
- * whose argv could not faithfully represent the configured path. */
-function jsonQuotedShellArgument(value: string): string | null {
-    if (/[\u0000-\u001f\u007f]/u.test(value)) return null
-    return JSON.stringify(value)
-        .replace(/\$/g, "\\$")
-        .replace(/`/g, "\\`")
 }

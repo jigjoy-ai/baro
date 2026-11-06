@@ -1,4 +1,5 @@
-import type { Participant, SemanticEvent } from "../runtime/mozaik.js"
+import type { SemanticEvent } from "../runtime/mozaik.js"
+import type { BusMember } from "../runtime/coordination.js"
 
 import {
     Critique,
@@ -36,9 +37,9 @@ export interface AcceptanceGateOptions extends TerminalTurnAuthorityOptions {
      * verdict. These never launch implementation work. Default: 2. */
     maxReverificationAttempts?: number
     /** Optional object-identity authority for lease events. */
-    leaseAuthority?: Participant
+    leaseAuthority?: BusMember
     /** Optional object-identity authority for Critique events. */
-    critiqueAuthority?: Participant
+    critiqueAuthority?: BusMember
 }
 
 interface Correlation {
@@ -80,7 +81,7 @@ export class AcceptanceGate extends SerializedObserver {
     >()
     private readonly pending = new Map<string, PendingEvaluation>()
     private readonly settledEvaluationIds = new Set<string>()
-    private completionAuthority: Participant | null = null
+    private completionAuthority: BusMember | null = null
     private readonly maxReverificationAttempts: number
 
     constructor(private readonly opts: AcceptanceGateOptions) {
@@ -105,7 +106,7 @@ export class AcceptanceGate extends SerializedObserver {
         this.targets = opts.targets
     }
 
-    setCompletionAuthority(authority: Participant): void {
+    setCompletionAuthority(authority: BusMember): void {
         this.completionAuthority = authority
     }
 
@@ -117,7 +118,7 @@ export class AcceptanceGate extends SerializedObserver {
                 this.opts.leaseAuthority &&
                 context.source !== this.opts.leaseAuthority
             ) return
-            this.onLease(event.data)
+            this.onLease(event.payload)
             return
         }
 
@@ -138,7 +139,7 @@ export class AcceptanceGate extends SerializedObserver {
                 this.opts.critiqueAuthority &&
                 context.source !== this.opts.critiqueAuthority
             ) return
-            this.onCritique(event.data)
+            this.onCritique(event.payload)
             return
         }
 
@@ -147,18 +148,18 @@ export class AcceptanceGate extends SerializedObserver {
                 this.opts.outcomeAuthority &&
                 !this.opts.outcomeAuthority.matchesResult(
                     context.source,
-                    event.data,
+                    event.payload,
                 )
             ) return
             // A dependency suspension only proves that the worker quiesced.
             // It is neither an implementation candidate nor a quality result.
-            if (event.data.suspension) return
-            this.onStoryResult(event.data)
+            if (event.payload.suspension) return
+            this.onStoryResult(event.payload)
             return
         }
 
         if (StoryQualityTimedOut.is(event) && context.internal) {
-            this.onTimedOut(event.data)
+            this.onTimedOut(event.payload)
             return
         }
 
@@ -167,7 +168,7 @@ export class AcceptanceGate extends SerializedObserver {
                 this.completionAuthority &&
                 context.source !== this.completionAuthority
             ) return
-            if (event.data.runId && event.data.runId !== this.opts.runId) return
+            if (event.payload.runId && event.payload.runId !== this.opts.runId) return
             this.stop()
         }
     }
@@ -205,7 +206,7 @@ export class AcceptanceGate extends SerializedObserver {
     }
 
     private onTerminalTurn(
-        event: SemanticEvent<unknown>,
+        event: SemanticEvent<string, unknown>,
         input: CriticInput,
     ): void {
         const { agentId, isError, resultText, terminalId } = input
@@ -573,7 +574,7 @@ function snapshotCritique(data: CritiqueData): CritiqueData {
 }
 
 function terminalFingerprint(
-    event: SemanticEvent<unknown>,
+    event: SemanticEvent<string, unknown>,
     input: CriticInput,
 ): string | null {
     return input.terminalId

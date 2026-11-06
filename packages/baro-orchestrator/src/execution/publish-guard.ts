@@ -10,8 +10,14 @@ import { delimiter, join, resolve } from "node:path"
 
 /**
  * Stories deliver commits in their worktree only; publishing belongs to the
- * user. The function must stay self-contained: hook-bridge.ts serializes its
- * source into the Claude lane's hook script.
+ * user, and the repository's shared state (config, refs other than the story's
+ * own commits, reflogs, other worktrees, remotes) is not a story's to change:
+ * a story could otherwise plant a hook the orchestrator runs as the user,
+ * delete the recovery branch of a failed attempt, or expire the reflog that
+ * would bring it back. Returns the refusal, or null.
+ *
+ * Self-contained on purpose: hook-bridge.ts and the git wrapper of the CLI
+ * lanes serialize this function's source.
  */
 export function publishCommandRefusal(command: string): string | null {
     const segments = String(command)
@@ -22,10 +28,12 @@ export function publishCommandRefusal(command: string): string | null {
         const tokens = segment
             .split(/\s+/u)
             .map((token) => token.replace(/^['"]|['"]$/gu, ""))
-        const refuse = () =>
+        const publish = () =>
             `publish commands are denied in story lanes: ${segment}`
-        if (tokens.some((token) => token.includes("api.github.com"))) {
-            return refuse()
+        const shared = () =>
+            `commands that change the repository's shared state are denied in story lanes: ${segment} (for a commit identity, pass it per command: git -c user.name=... -c user.email=... commit)`
+        if (tokens.some((token) => token.toLowerCase().includes("api.github.com"))) {
+            return publish()
         }
         let i = 0
         while (
@@ -38,19 +46,50 @@ export function publishCommandRefusal(command: string): string | null {
             i++
         }
         const executable = (tokens[i] ?? "").split("/").pop()
-        if (executable === "gh") return refuse()
+        if (executable === "gh") return publish()
         if (executable !== "git") continue
         i++
         while (i < tokens.length && tokens[i]!.startsWith("-")) {
             const option = tokens[i]!
+            // An alias expands inside git, past any check on the command line.
+            if (option === "--config-env" || option.startsWith("--config-env=")) return shared()
+            if (option === "-c" && /^alias\./iu.test(tokens[i + 1] ?? "")) return shared()
             i +=
-                ["-C", "-c", "--git-dir", "--work-tree", "--namespace"].includes(
+                ["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"].includes(
                     option,
                 )
                     ? 2
                     : 1
         }
-        if (tokens[i] === "push") return refuse()
+        const sub = tokens[i] ?? ""
+        const rest = tokens.slice(i + 1)
+        const has = (...flags: string[]) =>
+            rest.some((arg) => flags.some((flag) => arg === flag || arg.startsWith(`${flag}=`)))
+        if (["push", "send-pack"].includes(sub)) return publish()
+        if (["update-ref", "gc", "prune", "filter-branch", "filter-repo", "replace"].includes(sub)) {
+            return shared()
+        }
+        // A scratch checkout (`git worktree add .baro-scratch/...`) is the
+        // sanctioned remedy, and shell containment judges where it lands;
+        // removing, moving or pruning worktrees reaches other stories'.
+        if (sub === "worktree" && !["add", "list"].includes(rest[0] ?? "")) return shared()
+        if (sub === "config") {
+            const reads = ["--get", "--get-all", "--get-regexp", "--list", "-l", "--get-urlmatch", "--show-origin", "--show-scope"]
+            if (!rest.some((arg) => reads.includes(arg) || arg === "get" || arg === "list")) return shared()
+        }
+        if (sub === "remote") {
+            const readOnly = rest.length === 0 || ["-v", "--verbose", "show", "get-url"].includes(rest[0]!)
+            if (!readOnly) return shared()
+        }
+        if (sub === "reflog" && rest.length > 0 && !["show", "list", "exists"].includes(rest[0]!)) {
+            return shared()
+        }
+        if (sub === "symbolic-ref" && rest.filter((arg) => !arg.startsWith("-")).length >= 2) {
+            return shared()
+        }
+        if (sub === "branch" && has("-d", "-D", "--delete", "-f", "--force", "-m", "-M", "--move", "-c", "-C", "--copy", "--set-upstream-to", "-u")) {
+            return shared()
+        }
     }
     return null
 }
@@ -95,25 +134,26 @@ export function materializePublishGuardBin(
         `#!/bin/sh\ncmd="gh $*"\n${refuse}\n`,
         { mode: 0o755 },
     )
+    // The same policy the Claude hook and the native lane apply, not a
+    // narrower shell re-implementation of it.
     writeFileSync(
         join(dir, "git"),
         [
-            "#!/bin/sh",
-            'sub=""',
-            "skip=0",
-            'for a in "$@"; do',
-            '    if [ "$skip" = 1 ]; then skip=0; continue; fi',
-            '    case "$a" in',
-            "        -C|-c|--git-dir|--work-tree|--namespace) skip=1 ;;",
-            "        -*) ;;",
-            '        *) sub="$a"; break ;;',
-            "    esac",
-            "done",
-            'if [ "$sub" = push ]; then',
-            '    cmd="git $*"',
-            ...refuse.split("\n").map((line) => `    ${line}`),
-            "fi",
-            `exec ${shQuote(realGit)} "$@"`,
+            "#!/usr/bin/env node",
+            "const { spawnSync } = require(\"node:child_process\")",
+            "const { appendFileSync } = require(\"node:fs\")",
+            "const __name = (fn) => fn",
+            `const publishCommandRefusal = ${publishCommandRefusal.toString()}`,
+            "const args = process.argv.slice(2)",
+            "const command = [\"git\", ...args].join(\" \")",
+            "const refusal = publishCommandRefusal(command)",
+            "if (refusal) {",
+            `    try { appendFileSync(${JSON.stringify(join(dir, GUARD_REFUSALS_FILE))}, JSON.stringify({ command, reason: refusal }) + "\\n") } catch {}`,
+            "    process.stderr.write(refusal + \"\\n\")",
+            "    process.exit(1)",
+            "}",
+            `const result = spawnSync(${JSON.stringify(realGit)}, args, { stdio: "inherit" })`,
+            "process.exit(result.status === null ? 1 : result.status)",
             "",
         ].join("\n"),
         { mode: 0o755 },

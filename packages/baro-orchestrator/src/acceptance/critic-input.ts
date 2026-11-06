@@ -22,27 +22,27 @@ export function criticReplayKey(
 }
 
 /** Compatibility bridge: Claude/OpenAI retain AgentResult; one-shot CLIs use the neutral event. */
-export function criticInput(event: SemanticEvent<unknown>): CriticInput | null {
+export function criticInput(event: SemanticEvent<string, unknown>): CriticInput | null {
     if (AgentTurnCompleted.is(event)) {
         return {
-            ...event.data,
-            terminalId: explicitTerminalId(event.data.terminalId),
+            ...event.payload,
+            terminalId: explicitTerminalId(event.payload.terminalId),
         }
     }
     if (AgentResult.is(event)) {
-        const explicit = explicitTerminalId(event.data.terminalId)
+        const explicit = explicitTerminalId(event.payload.terminalId)
         const hasLegacyIdentity =
-            Boolean(event.data.sessionId) || event.data.numTurns !== null
+            Boolean(event.payload.sessionId) || event.payload.numTurns !== null
         return {
-            agentId: event.data.agentId,
-            isError: event.data.isError,
-            resultText: event.data.resultText,
+            agentId: event.payload.agentId,
+            isError: event.payload.isError,
+            resultText: event.payload.resultText,
             canContinue: true,
             terminalId:
                 explicit ??
                 (hasLegacyIdentity
                     ? createHash("sha256")
-                          .update(JSON.stringify(event.data))
+                          .update(JSON.stringify(event.payload))
                           .digest("hex")
                     : null),
         }

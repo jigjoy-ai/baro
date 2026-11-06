@@ -1,9 +1,8 @@
 import {
-    BaseObserver,
     FunctionCallItem,
-    Participant,
     SemanticEvent,
 } from "../../runtime/mozaik.js"
+import { BusMember } from "../../runtime/coordination.js"
 
 import {
     AgentState,
@@ -35,7 +34,7 @@ const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "NotebookEdit", "edit_file"])
  * Emits: story_start, story_suspended, story_complete, story_error,
  * story_retry, routed, story_merged, merge_failed.
  */
-export class StoryLifecycleForwarder extends BaseObserver {
+export class StoryLifecycleForwarder extends BusMember {
     private startedStories = new Set<string>()
     private retryCounts = new Map<string, number>()
     /** storyId → retry budget from its spawn request, so story_error reports the real max. */
@@ -65,24 +64,24 @@ export class StoryLifecycleForwarder extends BaseObserver {
     }
 
     override async onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): Promise<void> {
         if (WorkLeaseReleased.is(event)) {
-            if (!this.acceptsLeaseSource(source, event.data.runId)) return
+            if (!this.acceptsLeaseSource(source, event.payload.runId)) return
             if (
                 this.isCollective() &&
                 !this.leases.matchesLease(
-                    event.data.storyId,
-                    event.data.runId,
-                    event.data.leaseId,
+                    event.payload.storyId,
+                    event.payload.runId,
+                    event.payload.leaseId,
                 )
             ) return
-            const key = integrationKey(event.data.runId, event.data.leaseId)
+            const key = integrationKey(event.payload.runId, event.payload.leaseId)
             if (key) this.pendingIntegration.delete(key)
-            if (event.data.reason !== "integrated") {
-                this.filesByStory.delete(event.data.storyId)
-                this.startedStories.delete(event.data.storyId)
+            if (event.payload.reason !== "integrated") {
+                this.filesByStory.delete(event.payload.storyId)
+                this.startedStories.delete(event.payload.storyId)
             }
             this.leases.observe(
                 event,
@@ -91,7 +90,7 @@ export class StoryLifecycleForwarder extends BaseObserver {
             return
         }
         if (WorkLeaseGranted.is(event)) {
-            if (!this.acceptsLeaseSource(source, event.data.runId)) return
+            if (!this.acceptsLeaseSource(source, event.payload.runId)) return
             this.leases.observe(
                 event,
                 this.collectiveAuthorities?.runId,
@@ -99,35 +98,35 @@ export class StoryLifecycleForwarder extends BaseObserver {
             return
         }
         if (AgentState.is(event)) {
-            if (!this.acceptsActiveTerminalSource(source, event.data.agentId)) {
+            if (!this.acceptsActiveTerminalSource(source, event.payload.agentId)) {
                 return
             }
-            this.handleAgentState(event.data)
+            this.handleAgentState(event.payload)
             return
         }
         if (StorySpawnRequest.is(event)) {
-            if (!this.acceptsSpawnSource(source, event.data)) return
-            this.retryBudget.set(event.data.storyId, event.data.retries)
+            if (!this.acceptsSpawnSource(source, event.payload)) return
+            this.retryBudget.set(event.payload.storyId, event.payload.retries)
             return
         }
         if (StoryResult.is(event)) {
-            if (!this.acceptsStoryResult(source, event.data)) return
-            this.handleStoryResult(event.data)
+            if (!this.acceptsStoryResult(source, event.payload)) return
+            this.handleStoryResult(event.payload)
             return
         }
         if (StoryRouted.is(event)) {
-            if (!this.acceptsSpawnSource(source, event.data)) return
+            if (!this.acceptsSpawnSource(source, event.payload)) return
             emit({
                 type: "routed",
-                id: event.data.storyId,
-                backend: event.data.backend,
-                model: event.data.model,
+                id: event.payload.storyId,
+                backend: event.payload.backend,
+                model: event.payload.model,
             })
             return
         }
         if (StoryMerged.is(event)) {
-            if (!this.acceptsRepositoryEvent(source, event.data)) return
-            const key = integrationKey(event.data.runId, event.data.leaseId)
+            if (!this.acceptsRepositoryEvent(source, event.payload)) return
+            const key = integrationKey(event.payload.runId, event.payload.leaseId)
             const pending = key ? this.pendingIntegration.get(key) : undefined
             if (pending) {
                 this.pendingIntegration.delete(key!)
@@ -135,30 +134,30 @@ export class StoryLifecycleForwarder extends BaseObserver {
             }
             emit({
                 type: "story_merged",
-                id: event.data.storyId,
-                mode: event.data.mode,
+                id: event.payload.storyId,
+                mode: event.payload.mode,
             })
             return
         }
         if (StoryMergeFailed.is(event)) {
-            if (!this.acceptsRepositoryEvent(source, event.data)) return
-            const key = integrationKey(event.data.runId, event.data.leaseId)
+            if (!this.acceptsRepositoryEvent(source, event.payload)) return
+            const key = integrationKey(event.payload.runId, event.payload.leaseId)
             const pending = key ? this.pendingIntegration.get(key) : undefined
             if (pending) {
                 this.pendingIntegration.delete(key!)
-                this.filesByStory.delete(event.data.storyId)
+                this.filesByStory.delete(event.payload.storyId)
                 emit({
                     type: "story_error",
-                    id: event.data.storyId,
-                    error: event.data.error,
+                    id: event.payload.storyId,
+                    error: event.payload.error,
                     attempt: pending.attempts,
-                    max_retries: this.retryBudget.get(event.data.storyId) ?? pending.attempts,
+                    max_retries: this.retryBudget.get(event.payload.storyId) ?? pending.attempts,
                 })
             }
             emit({
                 type: "merge_failed",
-                id: event.data.storyId,
-                error: event.data.error,
+                id: event.payload.storyId,
+                error: event.payload.error,
             })
             return
         }
@@ -169,7 +168,7 @@ export class StoryLifecycleForwarder extends BaseObserver {
     // remember its first-touch kind so story_complete can report real
     // per-story file counts instead of a hardcoded 0.
     override async onExternalFunctionCall(
-        source: Participant,
+        source: BusMember,
         item: FunctionCallItem,
     ): Promise<void> {
         const isCreate = CREATE_TOOLS.has(item.name)
@@ -268,7 +267,7 @@ export class StoryLifecycleForwarder extends BaseObserver {
         return this.collectiveFailClosed || this.collectiveAuthorities !== null
     }
 
-    private acceptsLeaseSource(source: Participant, runId: string): boolean {
+    private acceptsLeaseSource(source: BusMember, runId: string): boolean {
         if (!this.isCollective()) return true
         const authorities = this.collectiveAuthorities
         return (
@@ -279,7 +278,7 @@ export class StoryLifecycleForwarder extends BaseObserver {
     }
 
     private acceptsStoryResult(
-        source: Participant,
+        source: BusMember,
         data: StoryResultData,
     ): boolean {
         if (!this.isCollective()) {
@@ -294,7 +293,7 @@ export class StoryLifecycleForwarder extends BaseObserver {
     }
 
     private acceptsSpawnSource(
-        source: Participant,
+        source: BusMember,
         data: {
             storyId: string
             runId?: string
@@ -324,7 +323,7 @@ export class StoryLifecycleForwarder extends BaseObserver {
     }
 
     private acceptsRepositoryEvent(
-        source: Participant,
+        source: BusMember,
         data: { storyId: string; runId?: string; leaseId?: string },
     ): boolean {
         if (!this.isCollective()) {
@@ -352,7 +351,7 @@ export class StoryLifecycleForwarder extends BaseObserver {
     }
 
     private acceptsActiveTerminalSource(
-        source: Participant,
+        source: BusMember,
         storyId: string,
     ): boolean {
         if (!this.isCollective()) return true
@@ -390,8 +389,8 @@ export class StoryLifecycleForwarder extends BaseObserver {
 
 export interface CollectiveStoryLifecycleAuthorities {
     runId: string
-    broker: Participant
-    repository: Participant
+    broker: BusMember
+    repository: BusMember
     outcomeAuthority: StoryOutcomeAuthority
 }
 

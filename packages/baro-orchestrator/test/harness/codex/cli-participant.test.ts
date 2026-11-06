@@ -160,22 +160,22 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, o
                 env.events.some(
                     (event) =>
                         AgentState.is(event) &&
-                        event.data.agentId === "codex-agent" &&
-                        event.data.phase === "running",
+                        event.payload.agentId === "codex-agent" &&
+                        event.payload.phase === "running",
                 ),
             )
             assert.ok(
                 env.events.some(
                     (event) =>
                         CodexSystem.is(event) &&
-                        event.data.subtype === "thread.started",
+                        event.payload.subtype === "thread.started",
                 ),
             )
             assert.ok(
                 env.events.some(
                     (event) =>
                         CodexTurnEvent.is(event) &&
-                        event.data.phase === "completed",
+                        event.payload.phase === "completed",
                 ),
             )
         })
@@ -260,7 +260,7 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, o
                 env.events.some(
                     (event) =>
                         CodexTurnEvent.is(event) &&
-                        event.data.phase === "completed",
+                        event.payload.phase === "completed",
                 ),
             )
         })

@@ -91,16 +91,16 @@ describe("ReverifiedCommitExecutor", () => {
             assert.ok(terminalIndex >= 0 && terminalIndex < resultIndex)
             const terminal = env.events[terminalIndex]
             assert.ok(AgentResult.is(terminal))
-            assert.equal(terminal.data.isError, false)
-            assert.match(terminal.data.resultText ?? "", /committing f93f741abcde/)
+            assert.equal(terminal.payload.isError, false)
+            assert.match(terminal.payload.resultText ?? "", /committing f93f741abcde/)
             const result = env.events[resultIndex]
             assert.ok(StoryResult.is(result))
             assert.deepEqual(
                 {
-                    success: result.data.success,
-                    attempts: result.data.attempts,
-                    leaseId: result.data.leaseId,
-                    generation: result.data.generation,
+                    success: result.payload.success,
+                    attempts: result.payload.attempts,
+                    leaseId: result.payload.leaseId,
+                    generation: result.payload.generation,
                 },
                 { success: true, attempts: 0, leaseId: "lease-2", generation: 2 },
             )

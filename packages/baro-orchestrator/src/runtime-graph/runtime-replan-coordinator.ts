@@ -121,7 +121,7 @@ export class RuntimeReplanCoordinator {
                 ...decision.applied,
                 currentGraphVersion: this.graphVersionValue,
             })
-            this.decisions.set(event.data.proposalId, {
+            this.decisions.set(event.payload.proposalId, {
                 fingerprint: decision.fingerprint,
                 event,
                 origin: decisionOriginOf(decision, durable.planning),
@@ -285,7 +285,7 @@ export class RuntimeReplanCoordinator {
                 dynamicStories,
                 policyStories,
                 fingerprint,
-                event.data,
+                event.payload,
                 origin,
                 state.planningState ?? state.prd.runtimeGraph?.planning,
                 protocolForRun(state.prd, this.opts.runId),
@@ -325,12 +325,12 @@ export class RuntimeReplanCoordinator {
     ): RuntimeReplanDecisionEvent {
         if (RuntimeReplanApplied.is(event)) {
             return RuntimeReplanApplied.create({
-                ...event.data,
+                ...event.payload,
                 currentGraphVersion: this.graphVersionValue,
             })
         }
         return RuntimeReplanRejected.create({
-            ...event.data,
+            ...event.payload,
             currentGraphVersion: this.graphVersionValue,
         })
     }
@@ -350,7 +350,7 @@ export class RuntimeReplanCoordinator {
             if (!RuntimeReplanApplied.is(decision.event)) continue
             appliedDecisions.push({
                 fingerprint: decision.fingerprint,
-                applied: structuredClone(decision.event.data),
+                applied: structuredClone(decision.event.payload),
                 ...(decision.origin ? { origin: decision.origin } : {}),
             })
         }
@@ -376,7 +376,7 @@ export class RuntimeReplanCoordinator {
         for (const decision of this.decisions.values()) {
             if (!RuntimeReplanApplied.is(decision.event)) continue
             if (decision.origin === "planner") continue
-            applieds.push(decision.event.data)
+            applieds.push(decision.event.payload)
         }
         return applieds.sort(
             (left, right) =>

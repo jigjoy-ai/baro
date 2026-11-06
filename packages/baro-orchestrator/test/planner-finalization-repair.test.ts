@@ -1,11 +1,8 @@
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
-import { AgenticEnvironment, BaseObserver } from "../src/runtime/mozaik.js"
-import type {
-    AgenticEnvironment as Env,
-    Participant,
-} from "../src/runtime/mozaik.js"
+import { CoordinationBus, BusMember } from "../src/runtime/coordination.js"
+import type { CoordinationBus as Env } from "../src/runtime/coordination.js"
 import {
     AgentResult,
     PlanFragmentAdmitted,
@@ -142,7 +139,7 @@ const finalPrd = (userStories: readonly unknown[]): string =>
 const EMPTY_TAIL_PRD = finalPrd([])
 const OWNED_TAIL_PRD = finalPrd([OWNER_TAIL_STORY])
 
-class StubFeed extends BaseObserver {
+class StubFeed extends BusMember {
     readonly opened: PlanningOpenCommand[] = []
     readonly fragments: PlanFragmentCommand[] = []
     readonly completions: PlanCompleteCommand[] = []
@@ -172,8 +169,8 @@ class StubFeed extends BaseObserver {
                     remainingPaths: [],
                 },
             })
-            for (const environment of this.getEnvironments()) {
-                environment.deliverSemanticEvent(this, rejected)
+            for (const environment of this.getBuses()) {
+                environment.publish(this, rejected)
             }
             return
         }
@@ -187,8 +184,8 @@ class StubFeed extends BaseObserver {
             replay: false,
             droppedEdges: [],
         })
-        for (const environment of this.getEnvironments()) {
-            environment.deliverSemanticEvent(this, admitted)
+        for (const environment of this.getBuses()) {
+            environment.publish(this, admitted)
         }
     }
 
@@ -217,7 +214,7 @@ interface ArmedPlan {
  * sent so a test can read the repair text verbatim. No process, no provider.
  */
 class ScriptedPlannerParticipant
-    extends BaseObserver
+    extends BusMember
     implements InteractiveModelParticipant<unknown>
 {
     readonly done: Promise<unknown>
@@ -259,8 +256,8 @@ class ScriptedPlannerParticipant
                     this.plan.publishError = error
                 }
             }
-            this.env?.deliverSemanticEvent(
-                this as unknown as Participant,
+            this.env?.publish(
+                this as unknown as BusMember,
                 AgentResult.create({
                     agentId: this.agentId,
                     terminalId: `${this.agentId}:turn-${turn}`,
@@ -358,7 +355,7 @@ async function runSession(input: {
         prompts,
     }
     armed = plan
-    const env = new AgenticEnvironment("planner-finalization-repair")
+    const env = new CoordinationBus("planner-finalization-repair")
     const feed = new StubFeed()
     feed.refuseTailTimes = input.refuseTailTimes ?? 0
     feed.join(env)

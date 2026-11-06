@@ -1,5 +1,8 @@
 /** @baro/orchestrator — public entry point of the package. */
 
+export { BusMember, CoordinationBus } from "./runtime/coordination.js"
+export { toWire } from "./runtime/mozaik.js"
+
 export {
     AgentTargetedMessage,
     ConversationRequested,
@@ -318,11 +321,7 @@ export {
 export { type StoryRoute, type Backend } from "./market/routing.js"
 export { type StorySpawnRequestData } from "./semantic-events.js"
 
-export {
-    Conductor,
-    type ConductorOptions,
-    type ConductorRunSummary,
-} from "./execution/conductor.js"
+export { type RunSummary } from "./execution/run-summary.js"
 export { ConductorState } from "./semantic-events.js"
 export {
     CoordinationModeSelected,
@@ -353,11 +352,9 @@ export {
     PlanningStreamCompleted,
     PlanningStreamFailed,
     PlanningStreamClosed,
-    ReplanApplied,
     PeerHelpRequested,
     CollaborationNote,
     StoryIntegrationRequested,
-    type CoordinationMode,
     type WorkOfferRetractionRequestedData,
     type WorkOfferRetractionResolvedData,
     type WorkBidData,
@@ -595,7 +592,6 @@ export {
 export {
     Operator,
     type OperatorCommand,
-    type OperatorHooks,
 } from "./execution/operator.js"
 
 export {

@@ -47,21 +47,21 @@ describe("CriticOpenAI", () => {
 
         assert.equal(critiques.length, 3)
         assert.deepEqual(
-            critiques.map((event) => event.data.turn),
+            critiques.map((event) => event.payload.turn),
             [1, 2, 3],
         )
-        assert.equal(critiques[0]!.data.verdict, "fail")
-        assert.equal(critiques[0]!.data.modelUsed, "fake-openai-model")
-        assert.deepEqual(critiques[0]!.data.violatedCriteria, [
+        assert.equal(critiques[0]!.payload.verdict, "fail")
+        assert.equal(critiques[0]!.payload.modelUsed, "fake-openai-model")
+        assert.deepEqual(critiques[0]!.payload.violatedCriteria, [
             "must include tests",
         ])
 
         assert.equal(messages.length, 2)
         assert.deepEqual(
-            messages.map((event) => event.data.metadata.emissionIndex),
+            messages.map((event) => event.payload.metadata.emissionIndex),
             [1, 2],
         )
-        assert.ok(messages.every((event) => event.data.recipientId === "agent-a"))
+        assert.ok(messages.every((event) => event.payload.recipientId === "agent-a"))
     })
 
     it("ignores non-actionable events without evaluating", async () => {
@@ -168,7 +168,7 @@ describe("CriticOpenAI", () => {
             env.events.indexOf(measured[0]!) < env.events.indexOf(critiques[0]!),
         )
 
-        const item = measured[0]!.data
+        const item = measured[0]!.payload
         assert.equal(
             item.invocationId,
             "run-openai-critic:critic:agent-a:1",
@@ -235,7 +235,7 @@ describe("CriticOpenAI", () => {
         const env = captureEnv()
         projector.join(env)
 
-        env.deliverSemanticEvent(
+        env.publish(
             broker,
             WorkLeaseGranted.create({
                 runId,
@@ -252,7 +252,7 @@ describe("CriticOpenAI", () => {
                 },
             }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             worker,
             AgentResult.create({
                 agentId: storyId,
@@ -307,7 +307,7 @@ describe("CriticOpenAI", () => {
 
         // A source that merely claims to be the projector cannot obtain
         // correlation or trigger evaluation.
-        env.deliverSemanticEvent(
+        env.publish(
             attacker,
             AgentTurnCompleted.create({
                 agentId: storyId,
@@ -321,7 +321,7 @@ describe("CriticOpenAI", () => {
         await critic.idle()
         assert.equal(env.events.filter(ModelInvocationMeasured.is).length, 0)
 
-        env.deliverSemanticEvent(
+        env.publish(
             gate,
             StoryQualityReverificationRequested.create({
                 runId,
@@ -342,12 +342,12 @@ describe("CriticOpenAI", () => {
 
         const replay = env.events
             .filter(AgentTurnCompleted.is)
-            .find((event) => event.data.terminalId?.startsWith("reverification:"))
+            .find((event) => event.payload.terminalId?.startsWith("reverification:"))
         assert.ok(replay)
         assert.deepEqual(
             projector.terminalCorrelationFor(
                 storyId,
-                replay.data.terminalId,
+                replay.payload.terminalId,
             ),
             correlation,
         )
@@ -355,10 +355,10 @@ describe("CriticOpenAI", () => {
 
         const measured = env.events.filter(ModelInvocationMeasured.is)
         assert.equal(measured.length, 1)
-        assert.equal(measured[0]!.data.runId, runId)
-        assert.equal(measured[0]!.data.storyId, storyId)
-        assert.equal(measured[0]!.data.leaseId, correlation.leaseId)
-        assert.equal(measured[0]!.data.generation, correlation.generation)
+        assert.equal(measured[0]!.payload.runId, runId)
+        assert.equal(measured[0]!.payload.storyId, storyId)
+        assert.equal(measured[0]!.payload.leaseId, correlation.leaseId)
+        assert.equal(measured[0]!.payload.generation, correlation.generation)
         assert.equal(env.events.filter(Critique.is).length, 1)
     })
 
@@ -388,15 +388,15 @@ describe("CriticOpenAI", () => {
         const measured = env.events.filter(ModelInvocationMeasured.is)
         const critiques = env.events.filter(Critique.is)
         assert.equal(measured.length, 1)
-        assert.equal(measured[0]!.data.status, "succeeded")
+        assert.equal(measured[0]!.payload.status, "succeeded")
         assert.deepEqual(
-            measured[0]!.data.tokens.total,
+            measured[0]!.payload.tokens.total,
             knownMetric(3, "provider_response"),
         )
         assert.equal(critiques.length, 1)
-        assert.equal(critiques[0]!.data.verdict, "fail")
-        assert.equal(critiques[0]!.data.status, "inconclusive")
-        assert.match(critiques[0]!.data.reasoning, /no JSON object found/)
+        assert.equal(critiques[0]!.payload.verdict, "fail")
+        assert.equal(critiques[0]!.payload.status, "inconclusive")
+        assert.match(critiques[0]!.payload.reasoning, /no JSON object found/)
     })
 
     it("reports provider failures and timeouts once without invented zeros", async () => {
@@ -438,18 +438,18 @@ describe("CriticOpenAI", () => {
             const critiques = env.events.filter(Critique.is)
             const messages = env.events.filter(AgentTargetedMessage.is)
             assert.equal(measured.length, 1, item.name)
-            assert.equal(measured[0]!.data.status, item.status, item.name)
+            assert.equal(measured[0]!.payload.status, item.status, item.name)
             assert.deepEqual(
-                measured[0]!.data.tokens.inputTotal,
+                measured[0]!.payload.tokens.inputTotal,
                 unknownMetric(item.reason),
                 item.name,
             )
             assert.deepEqual(
-                measured[0]!.data.tokens.total,
+                measured[0]!.payload.tokens.total,
                 unknownMetric(item.reason),
                 item.name,
             )
-            assert.equal(critiques[0]?.data.status, "inconclusive", item.name)
+            assert.equal(critiques[0]?.payload.status, "inconclusive", item.name)
             assert.equal(messages.length, 0, item.name)
         }
     })
@@ -483,9 +483,9 @@ describe("CriticOpenAI", () => {
         assert.equal(env.events.filter(ModelInvocationMeasured.is).length, 0)
         assert.equal(env.events.filter(AgentTargetedMessage.is).length, 0)
         assert.equal(critiques.length, 1)
-        assert.equal(critiques[0]!.data.status, "inconclusive")
-        assert.equal(critiques[0]!.data.verdict, "fail")
-        assert.match(critiques[0]!.data.reasoning, /repository evidence is unavailable/)
+        assert.equal(critiques[0]!.payload.status, "inconclusive")
+        assert.equal(critiques[0]!.payload.verdict, "fail")
+        assert.match(critiques[0]!.payload.reasoning, /repository evidence is unavailable/)
     })
 })
 

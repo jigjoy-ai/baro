@@ -1,4 +1,4 @@
-import type { Participant } from "./mozaik.js"
+import type { BusMember } from "./coordination.js"
 
 import type { AgentTargetedMessageData } from "../semantic-events.js"
 
@@ -16,10 +16,10 @@ export interface TargetedMessageCorrelation {
  * complete active lease capability must then match.
  */
 export function acceptsTargetedMessage(
-    source: Participant,
+    source: BusMember,
     data: AgentTargetedMessageData,
     recipientId: string,
-    authority: Participant | undefined,
+    authority: BusMember | undefined,
     correlation: Readonly<{
         runId?: string
         leaseId?: string

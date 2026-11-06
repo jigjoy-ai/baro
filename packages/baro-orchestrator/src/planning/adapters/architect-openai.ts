@@ -11,9 +11,8 @@ import {
     ModelContext,
     SystemMessageItem,
     UserMessageItem,
-    type GenerativeModel,
-    type Tool,
-} from "../../runtime/mozaik.js"
+    type Tool, toWire } from "../../runtime/mozaik.js"
+import type { InferenceModel } from "../../harness/openai/runtime.js"
 
 import {
     createOpenAIModel,
@@ -105,7 +104,7 @@ export interface RunArchitectOpenAIOptions {
 
 export interface ArchitectOpenAITestRuntime {
     /** Omit to exercise production model selection without provider I/O. */
-    model?: GenerativeModel
+    model?: InferenceModel
     tools: Tool[]
     inferRound: typeof runInferenceRound
 }
@@ -240,7 +239,7 @@ async function runArchitectOpenAIWithinBudget(
     const inferRound = opts.testRuntime?.inferRound ?? runInferenceRound
     setModelTools(model, tools)
 
-    let context = ModelContext.create("architect")
+    let context = ModelContext.create()
         .addContextItem(SystemMessageItem.create(
             opts.outcomeMode
                 ? (opts.outcomeContractMode ?? "complete") === "decision"
@@ -401,7 +400,7 @@ async function runArchitectOpenAIWithinBudget(
                 })
                 context = context.addContextItem(item)
             } else if (item.type === "message") {
-                const json = item.toJSON() as { content: Array<{ text: string }> }
+                const json = toWire(item) as { content: Array<{ text: string }> }
                 const text = json.content?.[0]?.text ?? ""
                 newItems.push({ type: "message", text })
                 context = context.addContextItem(item)
@@ -625,8 +624,8 @@ async function runToolSafely(tool: Tool, argsJson: string): Promise<string> {
     }
 }
 
-/** Duck-typed rather than `instanceof`: older `GenerativeModel`s lacked ToolCallingCapability. */
-function setModelTools(model: GenerativeModel, tools: Tool[]): void {
+/** Duck-typed rather than `instanceof`: older `InferenceModel`s lacked ToolCallingCapability. */
+function setModelTools(model: InferenceModel, tools: Tool[]): void {
     const m = model as unknown as { setTools?: (t: Tool[]) => void }
     if (typeof m.setTools !== "function") {
         throw new Error(

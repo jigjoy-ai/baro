@@ -1,7 +1,7 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 
-import type { AgenticEnvironment } from "../../src/runtime/mozaik.js"
+import type { CoordinationBus } from "../../src/runtime/coordination.js"
 
 import { StoryFactory } from "../../src/market/story-factory.js"
 import type {
@@ -14,13 +14,13 @@ import type { StoryRoute } from "../../src/market/routing.js"
 import {
     AgentResult,
     StoryResult,
-    StorySpawnRequest,
     WorkLeaseGranted,
     type StorySpawnRequestData,
 } from "../../src/semantic-events.js"
 import type { WorktreeManager } from "../../src/integration/worktree.js"
 import { StoryOutcomeAuthority } from "../../src/runtime/story-outcome-authority.js"
 import { joinWithCapture, source, withTempDir } from "../execution/helpers.js"
+import { leasedFactory } from "./lease-fixture.js"
 
 const PRESERVED = "baro-recovery/run/S3/1"
 const RESTORED = { path: "/tmp/wt/S3", head: "f93f741" + "0".repeat(33) }
@@ -38,7 +38,7 @@ class CapturingExecutor implements StoryExecutor {
         req: StorySpawnRequestData,
         _route: StoryRoute,
         cwd: string,
-        _env: AgenticEnvironment,
+        _env: CoordinationBus,
         opts: StoryExecOpts,
     ): StoryExecution {
         this.calls.push({ req, cwd })
@@ -63,16 +63,12 @@ function worktreeDouble(restore: () => Promise<typeof RESTORED | null>) {
     return { manager, createCalls, restoreCalls }
 }
 
-function spawn() {
-    return StorySpawnRequest.create({
-        storyId: "S3",
+function spawnRequest() {
+    return {
         prompt: "Implement S3",
-        model: "sonnet",
-        retries: 0,
-        timeoutSecs: 30,
         recovery: { kind: "infrastructure", reason: "no output for 600s", branch: PRESERVED },
         resume: { preservedBranch: PRESERVED, reverify: true },
-    })
+    } as const
 }
 
 async function settle(): Promise<void> {
@@ -89,7 +85,7 @@ describe("StoryFactory re-verification of an unjudged attempt", () => {
                 async () => RESTORED,
             )
             const gated: string[] = []
-            const factory = new StoryFactory({
+            const { env, lease } = leasedFactory({
                 cwd: dir,
                 executor,
                 worktrees: manager,
@@ -98,9 +94,8 @@ describe("StoryFactory re-verification of an unjudged attempt", () => {
                     return GREEN
                 },
             })
-            const env = joinWithCapture(factory)
 
-            await factory.onExternalEvent(source("conductor"), spawn())
+            await lease("S3", spawnRequest())
             await settle()
 
             assert.deepEqual(restoreCalls, [["S3", PRESERVED]])
@@ -108,10 +103,10 @@ describe("StoryFactory re-verification of an unjudged attempt", () => {
             assert.deepEqual(createCalls, [])
             assert.equal(executor.calls.length, 0, "no agent attempt was spent")
             const terminal = env.events.find(AgentResult.is)
-            assert.match(terminal?.data.resultText ?? "", /PASS {2}npm run build/)
+            assert.match(terminal?.payload.resultText ?? "", /PASS {2}npm run build/)
             const result = env.events.find(StoryResult.is)
-            assert.equal(result?.data.success, true)
-            assert.equal(result?.data.attempts, 0)
+            assert.equal(result?.payload.success, true)
+            assert.equal(result?.payload.attempts, 0)
         })
     })
 
@@ -125,15 +120,14 @@ describe("StoryFactory re-verification of an unjudged attempt", () => {
             await withTempDir("story-factory-reverify-fallback-", async (dir) => {
                 const executor = new CapturingExecutor()
                 const { manager, createCalls } = worktreeDouble(restore)
-                const factory = new StoryFactory({
+                const { env, lease } = leasedFactory({
                     cwd: dir,
                     executor,
                     worktrees: manager,
                     commitGate: async () => gate,
                 })
-                const env = joinWithCapture(factory)
 
-                await factory.onExternalEvent(source("conductor"), spawn())
+                await lease("S3", spawnRequest())
                 await settle()
 
                 assert.deepEqual(createCalls, ["S3"])
@@ -153,7 +147,6 @@ describe("StoryFactory re-verification of an unjudged attempt", () => {
             const { manager } = worktreeDouble(async () => RESTORED)
             const factory = new StoryFactory({
                 cwd: dir,
-                coordinationMode: "collective",
                 runId,
                 workerId: "worker-a",
                 leaseAuthority: broker,
@@ -173,17 +166,23 @@ describe("StoryFactory re-verification of an unjudged attempt", () => {
                     leaseId: "lease-S3-2",
                     workerId: "worker-a",
                     generation: 2,
-                    request: spawn().data,
+                    request: {
+                        storyId: "S3",
+                        model: "sonnet",
+                        retries: 0,
+                        timeoutSecs: 30,
+                        ...spawnRequest(),
+                    },
                 }),
             )
             await settle()
 
             assert.equal(executor.calls.length, 0)
             const result = env.events.find(StoryResult.is)
-            assert.equal(result?.data.success, true)
-            assert.equal(result?.data.runId, runId)
-            assert.equal(result?.data.leaseId, "lease-S3-2")
-            assert.equal(result?.data.generation, 2)
+            assert.equal(result?.payload.success, true)
+            assert.equal(result?.payload.runId, runId)
+            assert.equal(result?.payload.leaseId, "lease-S3-2")
+            assert.equal(result?.payload.generation, 2)
             assert.equal(
                 outcomeAuthority.terminalCorrelationForSource(
                     source("agent"),

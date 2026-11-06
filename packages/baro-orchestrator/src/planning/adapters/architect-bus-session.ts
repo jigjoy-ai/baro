@@ -17,11 +17,9 @@
 import { randomUUID } from "node:crypto"
 
 import {
-    AgenticEnvironment,
-    BaseObserver,
-    type Participant,
     type SemanticEvent,
 } from "../../runtime/mozaik.js"
+import { BusMember, CoordinationBus } from "../../runtime/coordination.js"
 import { AgentResult } from "../../semantic-events.js"
 import { laneAdapterFor } from "../../harness/lane-registry.js"
 import type { InteractiveModelParticipant } from "../../harness/interactive-participant.js"
@@ -102,7 +100,7 @@ export interface ArchitectBusSessionOptions {
     onFinding?: (finding: ScoutFinding) => void
     onProgress?: (line: string) => void
     /** Test seam, and the seam a run-wide environment plugs into. */
-    environment?: AgenticEnvironment
+    environment?: CoordinationBus
 }
 
 export interface ArchitectBusSessionResult {
@@ -117,29 +115,29 @@ export interface ArchitectBusSessionResult {
  * carries one to the other so a scout's question and its answer are part of
  * the run's record, not stderr the log discards.
  */
-class ResearchNarrator extends BaseObserver {
+class ResearchNarrator extends BusMember {
     override onExternalEvent(
-        _source: Participant,
-        event: SemanticEvent<unknown>,
+        _source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): void {
         if (ScoutDispatched.is(event)) {
             emitPlanLine(
-                `scout dispatched: ${event.data.question}` +
-                    (event.data.scope ? ` (scope: ${event.data.scope})` : ""),
+                `scout dispatched: ${event.payload.question}` +
+                    (event.payload.scope ? ` (scope: ${event.payload.scope})` : ""),
             )
             return
         }
         if (ScoutFindingPublished.is(event)) {
             emitPlanLine(
-                `scout ${event.data.ok ? "answered" : "FAILED"}: ` +
-                    `${event.data.question} — ${event.data.answer.slice(0, 400)}`,
+                `scout ${event.payload.ok ? "answered" : "FAILED"}: ` +
+                    `${event.payload.question} — ${event.payload.answer.slice(0, 400)}`,
             )
         }
     }
 }
 
 /** Hands each terminal reply to the session as it lands. */
-class ReplyStream extends BaseObserver {
+class ReplyStream extends BusMember {
     private readonly queue: string[] = []
     private waiter: ((text: string | null) => void) | null = null
     private closed = false
@@ -165,11 +163,11 @@ class ReplyStream extends BaseObserver {
     }
 
     override onExternalEvent(
-        _source: Participant,
-        event: SemanticEvent<unknown>,
+        _source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): void {
-        if (!AgentResult.is(event) || event.data.agentId !== this.agentId) return
-        const text = event.data.isError ? null : event.data.resultText
+        if (!AgentResult.is(event) || event.payload.agentId !== this.agentId) return
+        const text = event.payload.isError ? null : event.payload.resultText
         if (typeof text !== "string") return
         if (this.waiter) {
             this.waiter(text)
@@ -219,7 +217,7 @@ export async function runArchitectBusSession(
 ): Promise<ArchitectBusSessionResult> {
     const sessionId = randomUUID().slice(0, 8)
     const agentId = `architect:${sessionId}`
-    const env = opts.environment ?? new AgenticEnvironment("architect-bus")
+    const env = opts.environment ?? new CoordinationBus("architect-bus")
     const replies = new ReplyStream(agentId)
     const narrator = new ResearchNarrator()
     const lane = laneAdapterFor({
@@ -345,13 +343,13 @@ export async function runArchitectBusSession(
         void architect.abortAndWait()
         replies.leave(env)
         narrator.leave(env)
-        if (architect.getEnvironments().includes(env)) architect.leave(env)
+        if (architect.getBuses().includes(env)) architect.leave(env)
     }
 }
 
 async function runResearch(
     questions: readonly ScoutQuestion[],
-    env: AgenticEnvironment,
+    env: CoordinationBus,
     opts: ArchitectBusSessionOptions,
     onScoutActivity?: () => void,
 ): Promise<ScoutFinding[]> {

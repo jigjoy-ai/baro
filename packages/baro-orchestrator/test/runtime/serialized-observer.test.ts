@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
-import { SemanticEvent } from "../../src/runtime/mozaik.js"
+import { SemanticEvent, UNSTAMPED_PRODUCER } from "../../src/runtime/mozaik.js"
 
 import {
     SerializedObserver,
@@ -47,7 +47,7 @@ class EventReportingObserver extends SerializedObserver {
         failure: SerializedObserverFailure,
     ): void {
         this.publish(
-            new SemanticEvent("managed_participant_failure", {
+            SemanticEvent.create("managed_participant_failure", UNSTAMPED_PRODUCER, {
                 kind: failure.kind,
                 message: failure.error.message,
             }),
@@ -74,8 +74,8 @@ describe("SerializedObserver", () => {
         const env = captureEnv()
         observer.join(env)
 
-        env.deliverSemanticEvent(source("sender"), testEvent("first"))
-        env.deliverSemanticEvent(source("sender"), testEvent("second"))
+        env.publish(source("sender"), testEvent("first"))
+        env.publish(source("sender"), testEvent("second"))
 
         await waitUntil(() => order.length === 1)
         assert.deepEqual(order, ["start:first"])
@@ -107,8 +107,8 @@ describe("SerializedObserver", () => {
         observer.join(env)
 
         const bad = testEvent("bad")
-        env.deliverSemanticEvent(source("sender"), bad)
-        env.deliverSemanticEvent(source("sender"), testEvent("good"))
+        env.publish(source("sender"), bad)
+        env.publish(source("sender"), testEvent("good"))
         await observer.idle()
 
         assert.deepEqual(handled, ["good"])
@@ -140,9 +140,9 @@ describe("SerializedObserver", () => {
         const env = captureEnv()
         observer.join(env)
 
-        env.deliverSemanticEvent(source("sender"), testEvent("A1"))
-        env.deliverSemanticEvent(source("sender"), testEvent("A2"))
-        env.deliverSemanticEvent(source("sender"), testEvent("B1"))
+        env.publish(source("sender"), testEvent("A1"))
+        env.publish(source("sender"), testEvent("A2"))
+        env.publish(source("sender"), testEvent("B1"))
 
         const idle = observer.idle()
         await waitUntil(() => started.includes("A1") && started.includes("B1"))
@@ -176,8 +176,8 @@ describe("SerializedObserver", () => {
         observer.join(env)
 
         const bad = testEvent("bad-task")
-        env.deliverSemanticEvent(source("sender"), bad)
-        env.deliverSemanticEvent(source("sender"), testEvent("next-task"))
+        env.publish(source("sender"), bad)
+        env.publish(source("sender"), testEvent("next-task"))
         await observer.idle()
 
         assert.deepEqual(ran, ["bad-task", "next-task"])
@@ -207,7 +207,7 @@ describe("SerializedObserver", () => {
         const env = captureEnv()
         observer.join(env)
 
-        env.deliverSemanticEvent(source("sender"), testEvent("start"))
+        env.publish(source("sender"), testEvent("start"))
         let settled = false
         const idle = observer.idle().then(() => {
             settled = true
@@ -229,7 +229,7 @@ describe("SerializedObserver", () => {
         const env = captureEnv()
         observer.join(env)
 
-        env.deliverSemanticEvent(source("sender"), testEvent("explode"))
+        env.publish(source("sender"), testEvent("explode"))
         await observer.idle()
 
         assert.deepEqual(observer.handled, ["failure:true"])
@@ -237,19 +237,19 @@ describe("SerializedObserver", () => {
             (event) => event.type === "managed_participant_failure",
         )
         assert.ok(report)
-        assert.deepEqual(report.data, {
+        assert.deepEqual(report.payload, {
             kind: "mailbox",
             message: "mailbox exploded",
         })
     })
 })
 
-function testEvent(id: string): SemanticEvent<{ id: string }> {
-    return new SemanticEvent("runtime_test", { id })
+function testEvent(id: string): SemanticEvent<string, { id: string }> {
+    return SemanticEvent.create("runtime_test", UNSTAMPED_PRODUCER, { id })
 }
 
 function eventId(context: SerializedEventContext): string {
-    return (context.event.data as { id?: string }).id ?? context.event.type
+    return (context.event.payload as { id?: string }).id ?? context.event.type
 }
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {

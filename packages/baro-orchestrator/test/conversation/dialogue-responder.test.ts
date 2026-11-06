@@ -8,6 +8,7 @@ import {
     InputTokenDetails,
     OutputTokenDetails,
     TokenUsage,
+    ModelMessageItem,
 } from "../../src/runtime/mozaik.js"
 
 import {
@@ -710,14 +711,7 @@ process.stdin.on("end", () => {
             openaiConnection: { baseURL: "https://compatible.invalid/v1" },
             openaiRunRound: async () => ({
                 items: [
-                    {
-                        type: "message",
-                        toJSON: () => ({
-                            content: [{
-                                text: "{\"message\":\"Ready.\",\"messages\":[]}",
-                            }],
-                        }),
-                    },
+                    ModelMessageItem.rehydrate({ text: "{\"message\":\"Ready.\",\"messages\":[]}" }),
                 ] as never,
                 usage: new TokenUsage(
                     20,
@@ -796,14 +790,7 @@ process.stdin.on("end", () => {
                     phases.push(options.billing?.context.phase ?? "missing")
                     attempts.push(options.billing?.context.attempt ?? null)
                     return {
-                        items: [{
-                            type: "message",
-                            toJSON: () => ({
-                                content: [{
-                                    text: "{\"message\":\"Ready.\",\"messages\":[]}",
-                                }],
-                            }),
-                        }] as never,
+                        items: [ModelMessageItem.rehydrate({ text: "{\"message\":\"Ready.\",\"messages\":[]}" })] as never,
                         usage: new TokenUsage(1, 1, 2),
                         billingInvocationId: null,
                     }

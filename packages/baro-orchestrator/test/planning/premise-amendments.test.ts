@@ -38,7 +38,7 @@ describe("premise amendments", () => {
             },
         })
         const env = joinWithCapture(authority)
-        env.deliverSemanticEvent(source("bridge"), dispute({ obligationId: "O-015" }))
+        env.publish(source("bridge"), dispute({ obligationId: "O-015" }))
 
         assert.match(stored, /## Amendments \(evidence-backed\)/)
         assert.match(stored, /Amendment 1 — O-015/)
@@ -50,8 +50,8 @@ describe("premise amendments", () => {
 
         const amended = env.events.filter(ArchitecturePremiseAmended.is)
         assert.equal(amended.length, 1)
-        assert.equal(amended[0]!.data.obligationId, "O-015")
-        assert.equal(amended[0]!.data.ordinal, 1)
+        assert.equal(amended[0]!.payload.obligationId, "O-015")
+        assert.equal(amended[0]!.payload.ordinal, 1)
     })
 
     it("records one amendment per claim, however many stories rediscover it", async () => {
@@ -64,9 +64,9 @@ describe("premise amendments", () => {
             },
         })
         const env = joinWithCapture(authority)
-        env.deliverSemanticEvent(source("bridge"), dispute())
-        env.deliverSemanticEvent(source("bridge"), dispute({ storyId: "S2" }))
-        env.deliverSemanticEvent(source("bridge"), dispute({ storyId: "S3" }))
+        env.publish(source("bridge"), dispute())
+        env.publish(source("bridge"), dispute({ storyId: "S2" }))
+        env.publish(source("bridge"), dispute({ storyId: "S3" }))
 
         assert.equal(authority.applied.length, 1)
         assert.equal(stored.match(/### Amendment/gu)?.length, 1)
@@ -85,11 +85,11 @@ describe("premise amendments", () => {
             onProgress: (line) => lines.push(line),
         })
         const env = joinWithCapture(authority)
-        env.deliverSemanticEvent(source("bridge"), dispute({ runId: "run-2" }))
+        env.publish(source("bridge"), dispute({ runId: "run-2" }))
         assert.equal(authority.applied.length, 0, "a foreign run cannot amend this contract")
 
         for (const claim of ["claim one", "claim two", "claim three"]) {
-            env.deliverSemanticEvent(source("bridge"), dispute({ claim }))
+            env.publish(source("bridge"), dispute({ claim }))
         }
         assert.equal(authority.applied.length, 2)
         assert.ok(

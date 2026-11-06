@@ -1,4 +1,4 @@
-import { AgenticEnvironment, type Participant } from "../../runtime/mozaik.js"
+import { CoordinationBus, type BusMember } from "../../runtime/coordination.js"
 
 import type { ModelInvocationPhase } from "../../telemetry/model-telemetry.js"
 import type { StoryOutcomeAuthority } from "../../runtime/story-outcome-authority.js"
@@ -20,10 +20,8 @@ import { TokenUsageForwarder } from "./token-usage.js"
 export interface BaroEventForwarders {
     readonly dag: DagForwarder
     readonly progress: ProgressForwarder
-    setLegacyReplanAuthority(authority: Participant): void
-    setRuntimeReplanAuthority(authority: Participant): void
-    setRepositoryAuthority(authority: Participant): void
-    setInterventionAuthority(authority: Participant): void
+    setRuntimeReplanAuthority(authority: BusMember): void
+    setRepositoryAuthority(authority: BusMember): void
     sealCollectivePresentationAuthorities(
         authorities: CollectivePresentationAuthorities,
     ): void
@@ -31,14 +29,14 @@ export interface BaroEventForwarders {
 
 export interface CollectivePresentationAuthorities
     extends CollectiveCoordinationAuthorities {
-    repository: Participant
+    repository: BusMember
     outcomeAuthority: StoryOutcomeAuthority
-    modelTelemetryCollector: Participant
+    modelTelemetryCollector: BusMember
     /** Raw Critic remains a telemetry authority, not a collective UI authority. */
-    critique?: Participant
-    surgeon?: Participant
-    dialogue?: Participant
-    finalizer?: Participant
+    critique?: BusMember
+    surgeon?: BusMember
+    dialogue?: BusMember
+    finalizer?: BusMember
 }
 
 const ALL_MODEL_PHASES: readonly ModelInvocationPhase[] = [
@@ -53,19 +51,15 @@ const ALL_MODEL_PHASES: readonly ModelInvocationPhase[] = [
 ]
 
 export function joinBaroEventForwarders(
-    env: AgenticEnvironment,
-    options: { collective?: boolean } = {},
+    env: CoordinationBus,
 ): BaroEventForwarders {
     const dag = new DagForwarder()
-    const collective = options.collective === true
-    const agentStream = new AgentStreamForwarder(collective)
-    const storyLifecycle = new StoryLifecycleForwarder(collective)
-    const tokenUsage = new TokenUsageForwarder(collective)
-    const progress = new ProgressForwarder(collective)
-    const coordination = new CoordinationForwarder(
-        collective,
-    )
-    const finalization = new FinalizationForwarder(collective)
+    const agentStream = new AgentStreamForwarder(true)
+    const storyLifecycle = new StoryLifecycleForwarder(true)
+    const tokenUsage = new TokenUsageForwarder(true)
+    const progress = new ProgressForwarder(true)
+    const coordination = new CoordinationForwarder(true)
+    const finalization = new FinalizationForwarder(true)
     const forwarders = [
         agentStream,
         storyLifecycle,
@@ -79,19 +73,12 @@ export function joinBaroEventForwarders(
     return {
         dag,
         progress,
-        setLegacyReplanAuthority(authority: Participant): void {
-            dag.setLegacyReplanAuthority(authority)
-            progress.setLegacyReplanAuthority(authority)
-        },
-        setRuntimeReplanAuthority(authority: Participant): void {
+        setRuntimeReplanAuthority(authority: BusMember): void {
             dag.setRuntimeReplanAuthority(authority)
             progress.setRuntimeReplanAuthority(authority)
         },
-        setRepositoryAuthority(authority: Participant): void {
+        setRepositoryAuthority(authority: BusMember): void {
             progress.setRepositoryAuthority(authority)
-        },
-        setInterventionAuthority(authority: Participant): void {
-            coordination.setInterventionAuthority(authority)
         },
         sealCollectivePresentationAuthorities(
             authorities: CollectivePresentationAuthorities,

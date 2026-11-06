@@ -104,6 +104,10 @@ describe("run-architect ArchitectOutcomeV1 mode", () => {
             const argv = readJson<string[]>(capture)
             assert.equal(valueAfter(argv, "--tools"), "Read,Glob,Grep")
             assert.equal(valueAfter(argv, "--permission-mode"), "dontAsk")
+            // dontAsk refuses reads outside the checkout unless they are
+            // approved; the run-4 architect could not read a symlinked SDK.
+            assert.equal(valueAfter(argv, "--allowedTools"), "Read,Glob,Grep")
+            assert.match(valueAfter(argv, "--disallowedTools"), /Read\(~\/\.ssh\/\*\*\)/u)
             assert.ok(argv.includes("--safe-mode"))
             assert.ok(argv.includes("--no-session-persistence"))
             assert.ok(argv.includes("--json-schema"))
@@ -514,7 +518,9 @@ describe("run-architect ArchitectOutcomeV1 mode", () => {
             assert.equal(run.code, 0, run.stderr)
             assert.equal(readFileSync(resultFile, "utf8"), DECISION_DOCUMENT)
             const argv = readJson<string[]>(capture)
-            assert.ok(argv.includes("bypassPermissions"))
+            // The architect only returns its document: read-only, always.
+            assert.equal(argv.includes("bypassPermissions"), false)
+            assert.equal(argv[argv.indexOf("--tools") + 1], "Read,Glob,Grep")
             assert.equal(argv.includes("--json-schema"), false)
             assert.doesNotMatch(valueAfter(argv, "--system-prompt"), /PRE-ACCEPTANCE VALIDATION/)
         })

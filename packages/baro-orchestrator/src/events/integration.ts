@@ -36,6 +36,9 @@ export interface StoryIntegrationRequestedData {
     candidateFingerprintRequired?: boolean
     /** Changed-content fingerprint accepted by Critic for this exact lease. */
     candidateFingerprint?: string
+    /** Paths other unintegrated stories hold right now (path → owner),
+     * claims included; the merge refuses a diff that touches one. */
+    heldElsewhere?: Record<string, string>
 }
 
 export const StoryIntegrationRequested =

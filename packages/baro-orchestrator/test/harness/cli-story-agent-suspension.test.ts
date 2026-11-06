@@ -4,10 +4,9 @@ import { join } from "node:path"
 import { describe, it } from "node:test"
 
 import {
-    BaseObserver,
-    type Participant,
     type SemanticEvent,
 } from "../../src/runtime/mozaik.js"
+import { BusMember } from "../../src/runtime/coordination.js"
 
 import { AgentState, StoryResult } from "../../src/semantic-events.js"
 import { CodexStoryAgent } from "../../src/harness/codex/story-agent.js"
@@ -75,9 +74,9 @@ describe("CLI StoryAgent cooperative suspension", () => {
                 assert.equal(invocationCount(fixture), 1)
                 const results = terminalResults(env, storyId)
                 assert.equal(results.length, 1)
-                assert.equal(results[0]?.data.success, false)
-                assert.equal(results[0]?.data.error, null)
-                assert.deepEqual(results[0]?.data.suspension, {
+                assert.equal(results[0]?.payload.success, false)
+                assert.equal(results[0]?.payload.error, null)
+                assert.deepEqual(results[0]?.payload.suspension, {
                     kind: "dependency",
                     blockId,
                 })
@@ -119,7 +118,7 @@ describe("CLI StoryAgent cooperative suspension", () => {
                 assert.equal(invocationCount(fixture), 1)
                 const results = terminalResults(env, storyId)
                 assert.equal(results.length, 1)
-                assert.equal(results[0]?.data.suspension, undefined)
+                assert.equal(results[0]?.payload.suspension, undefined)
                 agent.leave(env)
             })
         })
@@ -287,7 +286,7 @@ describe("one-shot CLI process ownership provenance", () => {
                 )
                 assert.equal(
                     (agent as unknown as {
-                        spec: { terminalTurnAuthority?: Participant }
+                        spec: { terminalTurnAuthority?: BusMember }
                     }).spec.terminalTurnAuthority,
                     undefined,
                 )
@@ -351,7 +350,7 @@ describe("one-shot CLI process ownership provenance", () => {
                     )
                     assert.equal(
                         (agent as unknown as {
-                            spec: { terminalTurnAuthority?: Participant }
+                            spec: { terminalTurnAuthority?: BusMember }
                         }).spec.terminalTurnAuthority,
                         undefined,
                     )
@@ -494,19 +493,19 @@ async function assertRetryBackoffWake(
     const env = captureEnv()
     let waitingSeen = false
     let suspension: Promise<unknown> | null = null
-    const hook = new (class extends BaseObserver {
+    const hook = new (class extends BusMember {
         private fired = false
 
         override onExternalEvent(
-            source: Participant,
-            event: SemanticEvent<unknown>,
+            source: BusMember,
+            event: SemanticEvent<string, unknown>,
         ): void {
             if (
                 this.fired ||
                 source !== agent ||
                 !AgentState.is(event) ||
-                event.data.agentId !== storyId ||
-                event.data.phase !== "waiting"
+                event.payload.agentId !== storyId ||
+                event.payload.phase !== "waiting"
             ) return
             this.fired = true
             waitingSeen = true
@@ -555,7 +554,7 @@ async function assertRetryBackoffWake(
         const results = terminalResults(env, storyId)
         assert.equal(results.length, 1)
         if (wake === "hard-timeout") {
-            assert.deepEqual(results[0]?.data.failure, {
+            assert.deepEqual(results[0]?.payload.failure, {
                 kind: "infrastructure",
                 code: "command_timeout",
             })
@@ -614,7 +613,7 @@ setInterval(() => {}, 1000);
 function terminalResults(env: CapturedEnvironment, storyId: string) {
     return env.events
         .filter(StoryResult.is)
-        .filter((event) => event.data.storyId === storyId)
+        .filter((event) => event.payload.storyId === storyId)
 }
 
 function fixturePid(fixture: BlockingHarness): number | null {

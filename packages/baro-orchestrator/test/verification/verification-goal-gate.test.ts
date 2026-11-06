@@ -22,10 +22,10 @@ const SUSPENSION_MS = 4 * 60 * 60_000
 
 function createHost(prd: PrdFile | null = null): {
     host: VerificationGoalGateHost
-    events: SemanticEvent<unknown>[]
+    events: SemanticEvent<string, unknown>[]
     pushes: (string | null)[]
 } {
-    const events: SemanticEvent<unknown>[] = []
+    const events: SemanticEvent<string, unknown>[] = []
     const pushes: (string | null)[] = []
     let phase = "running"
     return {
@@ -79,10 +79,10 @@ function passingVerification(verificationId: string): RunVerificationCompletedDa
     }
 }
 
-function pendingVerificationId(events: readonly SemanticEvent<unknown>[]): string {
+function pendingVerificationId(events: readonly SemanticEvent<string, unknown>[]): string {
     const requested = events.find(RunVerificationRequested.is)
     assert.ok(requested)
-    return requested.data.verificationId
+    return requested.payload.verificationId
 }
 
 describe("VerificationGoalGate awake watchdogs", () => {
@@ -110,7 +110,7 @@ describe("VerificationGoalGate awake watchdogs", () => {
         clock.advance(1)
         const timedOut = events.filter(RunVerificationTimedOut.is)
         assert.equal(timedOut.length, 1)
-        assert.deepEqual(timedOut[0]!.data, {
+        assert.deepEqual(timedOut[0]!.payload, {
             runId: "run-awake-gate",
             verificationId,
             timeoutMs: VERIFICATION_TIMEOUT_MS,
@@ -242,11 +242,11 @@ describe("VerificationGoalGate awake watchdogs", () => {
         clock.advance(1)
         const timedOut = events.filter(GoalCompletionCheckTimedOut.is)
         assert.equal(timedOut.length, 1)
-        assert.deepEqual(timedOut[0]!.data, {
+        assert.deepEqual(timedOut[0]!.payload, {
             runId: "run-awake-gate",
-            checkId: requested.data.checkId,
-            contractId: requested.data.contractId,
-            verificationId: requested.data.verificationId,
+            checkId: requested.payload.checkId,
+            contractId: requested.payload.contractId,
+            verificationId: requested.payload.verificationId,
             timeoutMs: GOAL_COMPLETION_TIMEOUT_MS,
         })
     })

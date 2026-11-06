@@ -3,7 +3,7 @@ import { readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, it } from "node:test"
 
-import type { AgenticEnvironment } from "../src/runtime/mozaik.js"
+import type { CoordinationBus } from "../src/runtime/coordination.js"
 
 import { orchestrate } from "../src/orchestrate.js"
 import type { PlanningFeed } from "../src/execution/planning-feed.js"
@@ -39,7 +39,7 @@ class GatedExecutor implements StoryExecutor {
         request: StorySpawnRequestData,
         _route: StoryRoute,
         _cwd: string,
-        environment: AgenticEnvironment,
+        environment: CoordinationBus,
         options: StoryExecOpts,
     ): StoryExecution {
         this.started.push(request.storyId)
@@ -47,7 +47,7 @@ class GatedExecutor implements StoryExecutor {
         const resultSource = { agentId: request.storyId } as never
         options.registerResultAuthority?.(resultSource)
         void this.released.then(() => {
-            environment.deliverSemanticEvent(
+            environment.publish(
                 resultSource,
                 StoryResult.create({
                     runId: request.runId,
@@ -83,7 +83,6 @@ describe("orchestrate progressive planning", () => {
                 runId,
                 prdPath,
                 cwd: dir,
-                coordinationMode: "collective",
                 progressivePlanningId: planningId,
                 publishRemote: false,
                 withGit: false,
@@ -151,7 +150,6 @@ describe("orchestrate progressive planning", () => {
                 runId,
                 prdPath,
                 cwd: dir,
-                coordinationMode: "collective",
                 progressivePlanningId: planningId,
                 publishRemote: false,
                 withGit: false,
@@ -169,7 +167,7 @@ describe("orchestrate progressive planning", () => {
                         started.push(request.storyId)
                         const source = { agentId: request.storyId } as never
                         options.registerResultAuthority?.(source)
-                        setImmediate(() => environment.deliverSemanticEvent(
+                        setImmediate(() => environment.publish(
                             source,
                             StoryResult.create({
                                 runId: request.runId,

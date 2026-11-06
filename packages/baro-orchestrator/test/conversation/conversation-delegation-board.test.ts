@@ -56,23 +56,23 @@ describe("CollectiveBoard conversational delegation", () => {
             await startBoard(env, runId)
 
             const proposal = conversationProposal(runId, "delegation-1", 1)
-            env.deliverSemanticEvent(impersonator, proposal)
+            env.publish(impersonator, proposal)
             await board.idle()
             assert.equal(env.events.filter(RuntimeReplanApplied.is).length, 0)
             assert.equal(env.events.filter(RuntimeReplanRejected.is).length, 0)
 
-            env.deliverSemanticEvent(dialogue, proposal)
+            env.publish(dialogue, proposal)
             const applied = await waitFor(env.events, RuntimeReplanApplied.is)
-            assert.equal(applied.data.sourceStoryId, "@conversation")
+            assert.equal(applied.payload.sourceStoryId, "@conversation")
             assert.equal(
-                applied.data.leaseId,
-                `conversation:${proposal.data.proposalId}`,
+                applied.payload.leaseId,
+                `conversation:${proposal.payload.proposalId}`,
             )
-            assert.equal(applied.data.generation, 0)
-            assert.deepEqual(applied.data.mutation.removedStoryIds, [])
-            assert.deepEqual(applied.data.mutation.modifiedDeps, {})
-            assert.equal(applied.data.mutation.addedStories[0]?.retries, 1)
-            assert.equal(applied.data.mutation.addedStories[0]?.model, undefined)
+            assert.equal(applied.payload.generation, 0)
+            assert.deepEqual(applied.payload.mutation.removedStoryIds, [])
+            assert.deepEqual(applied.payload.mutation.modifiedDeps, {})
+            assert.equal(applied.payload.mutation.addedStories[0]?.retries, 1)
+            assert.equal(applied.payload.mutation.addedStories[0]?.model, undefined)
 
             const persisted = readPrd(prdPath)
             const delegated = persisted.userStories.find((story) => story.id === "S2")
@@ -87,21 +87,21 @@ describe("CollectiveBoard conversational delegation", () => {
                 2,
             )
             const delegatedContext = contexts.find(
-                (event) => event.data.storyId === "S2",
+                (event) => event.payload.storyId === "S2",
             )
             assert.ok(delegatedContext)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("context"),
                 WorkContextProvided.create({
                     runId,
-                    requestId: delegatedContext.data.requestId,
+                    requestId: delegatedContext.payload.requestId,
                     storyId: "S2",
                     context: null,
                 }),
             )
             const offer = await waitFor(env.events, WorkOffered.is)
-            assert.equal(offer.data.request.storyId, "S2")
-            assert.equal(offer.data.request.graphVersion, 2)
+            assert.equal(offer.payload.request.storyId, "S2")
+            assert.equal(offer.payload.request.graphVersion, 2)
             assert.equal(
                 env.events.filter(WorkLeaseGranted.is).length,
                 0,
@@ -110,22 +110,22 @@ describe("CollectiveBoard conversational delegation", () => {
 
             // Durable idempotency replays the decision but never schedules or
             // persists the delegated story a second time.
-            env.deliverSemanticEvent(dialogue, proposal)
+            env.publish(dialogue, proposal)
             await waitForCount(env.events, RuntimeReplanApplied.is, 2)
             assert.equal(readPrd(prdPath).userStories.filter((s) => s.id === "S2").length, 1)
             assert.equal(env.events.filter(WorkContextRequested.is).length, 2)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 dialogue,
                 ConversationDelegationProposed.create({
-                    ...proposal.data,
+                    ...proposal.payload,
                     reason: "same id, different content",
                 }),
             )
             let rejected = await waitFor(env.events, RuntimeReplanRejected.is)
-            assert.equal(rejected.data.code, "proposal_id_conflict")
+            assert.equal(rejected.payload.code, "proposal_id_conflict")
 
-            env.deliverSemanticEvent(
+            env.publish(
                 dialogue,
                 conversationProposal(runId, "stale-delegation", 1),
             )
@@ -134,9 +134,9 @@ describe("CollectiveBoard conversational delegation", () => {
                 RuntimeReplanRejected.is,
                 2,
             ))[1]!
-            assert.equal(rejected.data.code, "stale_graph_version")
+            assert.equal(rejected.payload.code, "stale_graph_version")
 
-            env.deliverSemanticEvent(
+            env.publish(
                 dialogue,
                 conversationProposal(runId, "over-dynamic-limit", 2, "S3"),
             )
@@ -145,7 +145,7 @@ describe("CollectiveBoard conversational delegation", () => {
                 RuntimeReplanRejected.is,
                 3,
             ))[2]!
-            assert.equal(rejected.data.code, "dynamic_story_limit")
+            assert.equal(rejected.payload.code, "dynamic_story_limit")
             assert.deepEqual(readPrd(prdPath).userStories.map((story) => story.id), [
                 "S1",
                 "S2",
@@ -169,7 +169,7 @@ describe("CollectiveBoard conversational delegation", () => {
             const env = joinWithCapture(board)
             await startBoard(env, runId)
 
-            const base = conversationProposal(runId, "narrow-proposal", 1).data
+            const base = conversationProposal(runId, "narrow-proposal", 1).payload
             const hostile = {
                 ...base,
                 removedStoryIds: ["S1"],
@@ -182,19 +182,19 @@ describe("CollectiveBoard conversational delegation", () => {
                     route: "attacker-route",
                 })),
             } as ConversationDelegationProposedData
-            env.deliverSemanticEvent(
+            env.publish(
                 dialogue,
                 ConversationDelegationProposed.create(hostile),
             )
             await board.idle()
             assert.equal(env.events.filter(RuntimeReplanApplied.is).length, 0)
             assert.match(
-                env.events.filter(ConductorState.is).at(-1)?.data.detail ?? "",
+                env.events.filter(ConductorState.is).at(-1)?.payload.detail ?? "",
                 /malformed conversation proposal/,
             )
 
             const tooWideMessageId = "message-too-wide"
-            env.deliverSemanticEvent(
+            env.publish(
                 dialogue,
                 ConversationDelegationProposed.create({
                     ...base,
@@ -273,11 +273,11 @@ async function startBoard(
     env: CapturedEnvironment,
     runId: string,
 ): Promise<void> {
-    env.deliverSemanticEvent(
+    env.publish(
         source("operator"),
         RunStartRequest.create({ reason: "test" }),
     )
-    env.deliverSemanticEvent(
+    env.publish(
         source("repository"),
         RunPrepared.create({ runId, baseSha: null }),
     )
@@ -288,16 +288,16 @@ function readPrd(path: string): PrdFile {
     return JSON.parse(readFileSync(path, "utf8")) as PrdFile
 }
 
-async function waitFor<T extends SemanticEvent<unknown>>(
-    events: SemanticEvent<unknown>[],
-    guard: (event: SemanticEvent<unknown>) => event is T,
+async function waitFor<T extends SemanticEvent<string, unknown>>(
+    events: SemanticEvent<string, unknown>[],
+    guard: (event: SemanticEvent<string, unknown>) => event is T,
 ): Promise<T> {
     return (await waitForCount(events, guard, 1))[0]!
 }
 
-async function waitForCount<T extends SemanticEvent<unknown>>(
-    events: SemanticEvent<unknown>[],
-    guard: (event: SemanticEvent<unknown>) => event is T,
+async function waitForCount<T extends SemanticEvent<string, unknown>>(
+    events: SemanticEvent<string, unknown>[],
+    guard: (event: SemanticEvent<string, unknown>) => event is T,
     count: number,
 ): Promise<T[]> {
     const deadline = Date.now() + 5_000

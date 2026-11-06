@@ -1,11 +1,11 @@
-import { BaseObserver, Participant, SemanticEvent } from "../../runtime/mozaik.js"
+import { SemanticEvent } from "../../runtime/mozaik.js"
+import { BusMember } from "../../runtime/coordination.js"
 
 import {
     LevelCompleted,
     LevelStarted,
     RecoveryStarted,
     Replan,
-    ReplanApplied,
     RuntimeReplanApplied,
     type LevelCompletedData,
     type LevelStartedData,
@@ -20,25 +20,13 @@ import { emit } from "../../tui-protocol.js"
  * BaroEvents: replan, level_started, level_completed, recovery_started.
  * (Their `activity`/`progress` mirrors live in ProgressForwarder.)
  */
-export class DagForwarder extends BaseObserver {
-    private legacyReplanAuthority: Participant | null = null
-    private runtimeReplanAuthority: Participant | null = null
-    private coordinationAuthority: Participant | null = null
+export class DagForwarder extends BusMember {
+    private runtimeReplanAuthority: BusMember | null = null
+    private coordinationAuthority: BusMember | null = null
     private readonly seenRuntimeProposals = new Set<string>()
     private latestRuntimeGraphVersion = 0
 
-    setLegacyReplanAuthority(authority: Participant): void {
-        if (
-            this.legacyReplanAuthority &&
-            this.legacyReplanAuthority !== authority
-        ) {
-            throw new Error("DAG forwarder legacy replan authority is already bound")
-        }
-        this.legacyReplanAuthority = authority
-        this.bindCoordinationAuthority(authority)
-    }
-
-    setRuntimeReplanAuthority(authority: Participant): void {
+    setRuntimeReplanAuthority(authority: BusMember): void {
         if (
             this.runtimeReplanAuthority &&
             this.runtimeReplanAuthority !== authority
@@ -50,50 +38,45 @@ export class DagForwarder extends BaseObserver {
     }
 
     override async onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): Promise<void> {
         if (Replan.is(event)) {
-            // Raw legacy and collective replans are proposals, not graph state.
-            return
-        }
-        if (ReplanApplied.is(event)) {
-            if (source !== this.legacyReplanAuthority) return
-            this.handleReplan(event.data)
+            // Raw replans are proposals, not graph state.
             return
         }
         if (RuntimeReplanApplied.is(event)) {
             if (
                 source !== this.runtimeReplanAuthority ||
-                this.seenRuntimeProposals.has(event.data.proposalId) ||
-                (event.data.currentGraphVersion !== undefined &&
-                    event.data.graphVersion < event.data.currentGraphVersion) ||
-                event.data.graphVersion <= this.latestRuntimeGraphVersion
+                this.seenRuntimeProposals.has(event.payload.proposalId) ||
+                (event.payload.currentGraphVersion !== undefined &&
+                    event.payload.graphVersion < event.payload.currentGraphVersion) ||
+                event.payload.graphVersion <= this.latestRuntimeGraphVersion
             ) return
-            this.seenRuntimeProposals.add(event.data.proposalId)
+            this.seenRuntimeProposals.add(event.payload.proposalId)
             this.latestRuntimeGraphVersion =
-                event.data.currentGraphVersion ?? event.data.graphVersion
-            this.handleRuntimeReplan(event.data)
+                event.payload.currentGraphVersion ?? event.payload.graphVersion
+            this.handleRuntimeReplan(event.payload)
             return
         }
         if (LevelStarted.is(event)) {
             if (source !== this.coordinationAuthority) return
-            this.handleLevelStarted(event.data)
+            this.handleLevelStarted(event.payload)
             return
         }
         if (LevelCompleted.is(event)) {
             if (source !== this.coordinationAuthority) return
-            this.handleLevelCompleted(event.data)
+            this.handleLevelCompleted(event.payload)
             return
         }
         if (RecoveryStarted.is(event)) {
             if (source !== this.coordinationAuthority) return
-            this.handleRecoveryStarted(event.data)
+            this.handleRecoveryStarted(event.payload)
             return
         }
     }
 
-    private bindCoordinationAuthority(authority: Participant): void {
+    private bindCoordinationAuthority(authority: BusMember): void {
         if (
             this.coordinationAuthority &&
             this.coordinationAuthority !== authority
@@ -101,16 +84,6 @@ export class DagForwarder extends BaseObserver {
             throw new Error("DAG forwarder coordination authority is already bound")
         }
         this.coordinationAuthority = authority
-    }
-
-    private handleReplan(item: ReplanData): void {
-        this.emitReplan(
-            item.source,
-            item.reason,
-            item.addedStories,
-            item.removedStoryIds,
-            item.modifiedDeps,
-        )
     }
 
     private handleRuntimeReplan(item: RuntimeReplanAppliedData): void {

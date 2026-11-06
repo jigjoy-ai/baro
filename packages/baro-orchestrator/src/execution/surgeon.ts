@@ -3,7 +3,7 @@
  *
  * Observes terminal story failures (StoryResultItem with success=false
  * after all retries exhausted) and emits ReplanItem-s that the
- * Conductor applies at the next level boundary.
+ * Board applies as recovery decisions.
  *
  * Two evaluation strategies:
  *
@@ -22,11 +22,11 @@
  *     smaller stories, or insert a missing prerequisite).
  *
  * Library-grade: doesn't import PRD types directly. The Surgeon
- * receives PRD context as a generic `() => PrdSnapshot` callback so
- * the Conductor stays the only PRD-aware piece of code.
+ * receives PRD context as a generic `() => PrdSnapshot` callback.
  */
 
-import { BaseObserver, Participant, SemanticEvent } from "../runtime/mozaik.js"
+import { SemanticEvent } from "../runtime/mozaik.js"
+import { BusMember } from "../runtime/coordination.js"
 
 import {
     Critique,
@@ -66,12 +66,12 @@ export class CritiqueLog {
 
     constructor(private readonly keep = 3) {}
 
-    record(event: SemanticEvent<unknown>): void {
+    record(event: SemanticEvent<string, unknown>): void {
         if (!Critique.is(event)) return
-        const list = this.byStory.get(event.data.agentId) ?? []
-        list.push(event.data)
+        const list = this.byStory.get(event.payload.agentId) ?? []
+        list.push(event.payload)
         if (list.length > this.keep) list.shift()
-        this.byStory.set(event.data.agentId, list)
+        this.byStory.set(event.payload.agentId, list)
     }
 
     forStory(storyId: string): readonly CritiqueData[] {
@@ -81,7 +81,7 @@ export class CritiqueLog {
 
 /**
  * Lightweight read-only view of the PRD that Surgeon needs to reason.
- * The Conductor (or the orchestrate() wiring) provides this snapshot;
+ * The orchestrate() wiring provides this snapshot;
  * Surgeon doesn't import PrdFile/PrdStory itself.
  */
 export interface PrdSnapshot {

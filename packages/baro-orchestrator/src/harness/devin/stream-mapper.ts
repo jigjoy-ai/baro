@@ -18,7 +18,7 @@ export type MappedDevinItem =
     | ModelMessageItem
     | FunctionCallItem
     | FunctionCallOutputItem
-    | SemanticEvent<unknown>
+    | SemanticEvent<string, unknown>
 
 const TERMINAL_TOOL_STATUSES = new Set(["completed", "failed"])
 

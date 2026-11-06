@@ -4,6 +4,7 @@ import {
     FunctionCallItem,
     FunctionCallOutputItem,
     ModelMessageItem,
+    toWire,
 } from "../../../src/runtime/mozaik.js"
 
 import { mapClaudeEvent } from "../../../src/harness/claude/stream-mapper.js"
@@ -25,7 +26,7 @@ function map(event: Record<string, unknown>) {
 }
 
 function json(item: unknown): any {
-    return JSON.parse(JSON.stringify(item))
+    return JSON.parse(JSON.stringify(toWire(item as Parameters<typeof toWire>[0])))
 }
 
 function assertModelMessage(item: unknown): ModelMessageItem {
@@ -55,9 +56,9 @@ describe("mapClaudeEvent", () => {
 
         assert.equal(result.sessionId, "claude-session")
         assert.ok(ClaudeSystem.is(item as ReturnType<typeof ClaudeSystem.create>))
-        assert.equal(item.data.agentId, AGENT_ID)
-        assert.equal(item.data.subtype, "init")
-        assert.deepEqual(item.data.raw, event)
+        assert.equal(item.payload.agentId, AGENT_ID)
+        assert.equal(item.payload.subtype, "init")
+        assert.deepEqual(item.payload.raw, event)
     })
 
     it("maps rate limit events", () => {
@@ -70,8 +71,8 @@ describe("mapClaudeEvent", () => {
 
         assert.equal(result.sessionId, null)
         assert.ok(ClaudeRateLimit.is(item as ReturnType<typeof ClaudeRateLimit.create>))
-        assert.equal(item.data.agentId, AGENT_ID)
-        assert.deepEqual(item.data.raw, event)
+        assert.equal(item.payload.agentId, AGENT_ID)
+        assert.deepEqual(item.payload.raw, event)
     })
 
     it("maps stream chunk events", () => {
@@ -83,8 +84,8 @@ describe("mapClaudeEvent", () => {
         const item = result.items[0]
 
         assert.ok(ClaudeStreamChunk.is(item as ReturnType<typeof ClaudeStreamChunk.create>))
-        assert.equal(item.data.agentId, AGENT_ID)
-        assert.deepEqual(item.data.raw, event)
+        assert.equal(item.payload.agentId, AGENT_ID)
+        assert.deepEqual(item.payload.raw, event)
     })
 
     it("maps user string content to AgentUserMessage", () => {
@@ -95,8 +96,8 @@ describe("mapClaudeEvent", () => {
         const item = result.items[0]
 
         assert.ok(AgentUserMessage.is(item as ReturnType<typeof AgentUserMessage.create>))
-        assert.equal(item.data.agentId, AGENT_ID)
-        assert.equal(item.data.text, "please inspect README")
+        assert.equal(item.payload.agentId, AGENT_ID)
+        assert.equal(item.payload.text, "please inspect README")
     })
 
     it("maps user tool_result blocks to function call outputs", () => {
@@ -166,15 +167,15 @@ describe("mapClaudeEvent", () => {
         assert.equal(result.sessionId, "claude-session")
         assert.ok(AgentResult.is(item as ReturnType<typeof AgentResult.create>))
         assert.equal(item.type, "claude_result")
-        assert.equal(item.data.agentId, AGENT_ID)
-        assert.equal(item.data.subtype, "success")
-        assert.equal(item.data.sessionId, "claude-session")
-        assert.equal(item.data.isError, true)
-        assert.equal(item.data.resultText, "done with caveats")
-        assert.deepEqual(item.data.usage, usage)
-        assert.equal(item.data.totalCostUsd, 0.0123)
-        assert.equal(item.data.numTurns, 3)
-        assert.equal(item.data.durationMs, 4567)
+        assert.equal(item.payload.agentId, AGENT_ID)
+        assert.equal(item.payload.subtype, "success")
+        assert.equal(item.payload.sessionId, "claude-session")
+        assert.equal(item.payload.isError, true)
+        assert.equal(item.payload.resultText, "done with caveats")
+        assert.deepEqual(item.payload.usage, usage)
+        assert.equal(item.payload.totalCostUsd, 0.0123)
+        assert.equal(item.payload.numTurns, 3)
+        assert.equal(item.payload.durationMs, 4567)
     })
 
     it("maps unknown event types to ClaudeUnknownEvent", () => {
@@ -186,8 +187,8 @@ describe("mapClaudeEvent", () => {
         const item = result.items[0]
 
         assert.ok(ClaudeUnknownEvent.is(item as ReturnType<typeof ClaudeUnknownEvent.create>))
-        assert.equal(item.data.agentId, AGENT_ID)
-        assert.equal(item.data.claudeType, "new_claude_event")
-        assert.deepEqual(item.data.raw, event)
+        assert.equal(item.payload.agentId, AGENT_ID)
+        assert.equal(item.payload.claudeType, "new_claude_event")
+        assert.deepEqual(item.payload.raw, event)
     })
 })

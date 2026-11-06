@@ -29,7 +29,6 @@ export type AwakeBudgetName =
     | "architect-obligations"
     | "architect-round"
     | "board-soft-deadline"
-    | "conductor-soft-deadline"
     | "verification-gate"
     | "goal-completion-gate"
     | "goal-review"

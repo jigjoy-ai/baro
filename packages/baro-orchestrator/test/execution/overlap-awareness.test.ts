@@ -2,10 +2,9 @@ import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
 import {
-    AgenticEnvironment,
-    BaseObserver,
     FunctionCallItem,
 } from "../../src/runtime/mozaik.js"
+import { BusMember, CoordinationBus } from "../../src/runtime/coordination.js"
 import { Coordination } from "../../src/events/collaboration.js"
 import { StoryResult } from "../../src/semantic-events.js"
 import { noticesForOverlap } from "../../src/execution/overlap-awareness.js"
@@ -40,7 +39,7 @@ describe("overlap awareness policy", () => {
     })
 })
 
-class FakeAgent extends BaseObserver {
+class FakeAgent extends BusMember {
     constructor(readonly agentId: string) {
         super()
     }
@@ -51,7 +50,7 @@ describe("OverlapAwarenessRunner closes Sentry's circuit", () => {
     // consumed it, so the first either agent heard of the other was at the
     // merge — after both had paid for the work.
     function harness() {
-        const env = new AgenticEnvironment("overlap")
+        const env = new CoordinationBus("overlap")
         const sentry = new Sentry({})
         sentry.join(env)
         const runner = new OverlapAwarenessRunner({
@@ -61,9 +60,9 @@ describe("OverlapAwarenessRunner closes Sentry's circuit", () => {
         runner.join(env)
 
         const delivered: Array<{ recipientId: string; text: string }> = []
-        const real = env.deliverSemanticEvent.bind(env)
-        env.deliverSemanticEvent = (source, event) => {
-            const data = (event as { data?: { recipientId?: string } }).data
+        const real = env.publish.bind(env)
+        env.publish = (source, event) => {
+            const data = (event as { payload?: { recipientId?: string } }).payload
             if (data?.recipientId && (event as { type?: string }).type === "agent_targeted_message") {
                 delivered.push(data as never)
             }
@@ -78,7 +77,7 @@ describe("OverlapAwarenessRunner closes Sentry's circuit", () => {
                 agent.join(env)
                 agents.set(agentId, agent)
             }
-            env.deliverFunctionCall(
+            env.publishFunctionCall(
                 agent,
                 FunctionCallItem.rehydrate({
                     callId: `c-${agentId}-${path}`,
@@ -115,7 +114,7 @@ describe("OverlapAwarenessRunner closes Sentry's circuit", () => {
         const h = harness()
         const impostor = new FakeAgent("impostor")
         impostor.join(h.env)
-        h.env.deliverSemanticEvent(
+        h.env.publish(
             impostor,
             Coordination.create({
                 fromAgentId: "S3",
@@ -131,7 +130,7 @@ describe("OverlapAwarenessRunner closes Sentry's circuit", () => {
     it("stays quiet toward an agent that already finished", () => {
         const h = harness()
         h.write("S3", "a.go")
-        h.env.deliverSemanticEvent(
+        h.env.publish(
             h.sentry,
             StoryResult.create({
                 storyId: "S7", runId: "run-1", success: true,

@@ -1,29 +1,28 @@
 /**
  * Mozaik-native inference runtime — the single chokepoint every non-CLI
  * phase (Architect, Planner, Story, Critic, Surgeon) routes per-round
- * inference through. Mozaik's `OpenAICompatibleChatCompletions` speaks
- * Chat Completions against a configurable base URL (the SDK reads
- * OPENAI_API_KEY / OPENAI_BASE_URL, forwarded by baro's Rust layer), so
- * one code path serves real OpenAI and any compatible endpoint. Mozaik
- * owns the ModelContext ⇄ chat-message conversion.
+ * inference through. Mozaik's endpoint mappers turn a ModelContext into a
+ * Chat Completions or Responses request and the reply back into context
+ * items; Baro owns the provider client, so cancellation, transport and
+ * billing extensions apply to the call it actually makes. One code path
+ * serves real OpenAI and any compatible endpoint (OPENAI_API_KEY /
+ * OPENAI_BASE_URL, forwarded by baro's Rust layer).
  */
 
 import { createRequire } from "node:module"
+
+import OpenAI from "openai"
 
 import { streamChatRound, type ChatStreamClient } from "./chat-stream.js"
 
 import {
     ContextItem,
-    Gpt54,
-    Gpt54Mini,
-    Gpt54Nano,
-    Gpt55,
-    InferenceRequest,
-    OpenAICompatibleChatCompletions,
+    OpenAIChatCompletions,
     OpenAIResponses,
     ReasoningItem,
+    supportedModels,
     TokenUsage,
-    type GenerativeModel,
+    type InferenceInput,
     type ModelContext,
     type Tool,
 } from "../../runtime/mozaik.js"
@@ -112,8 +111,9 @@ export function isProviderCallTimeout(
 }
 
 /**
- * Structurally matches Mozaik's (non-exported) `OpenAICompatibleConfig`.
- * When omitted, the SDK reads `OPENAI_API_KEY` / `OPENAI_BASE_URL`.
+ * A per-story endpoint. When omitted, the SDK reads `OPENAI_API_KEY` /
+ * `OPENAI_BASE_URL`. `extraBody` carries provider-only request fields; the
+ * fields Baro sets itself win over it.
  */
 export interface OpenAIConnection {
     baseURL?: string
@@ -131,30 +131,81 @@ export type OpenAIReasoningEffort =
 export interface CreateOpenAIModelOptions {
     /** A non-OpenAI endpoint must use the redirectable generic adapter. */
     readonly connection?: OpenAIConnection
-    /** Applied only to Mozaik-native OpenAI models that support this field. */
+    /** Applied only to OpenAI's own models, which support this field. */
     readonly reasoningEffort?: string
 }
 
-/**
- * Minimal `GenerativeModel` for names Mozaik doesn't ship — forwarded
- * as-is, which makes any OpenAI-compatible endpoint usable via
- * `--story-model <name>`.
- */
-export class GenericOpenAIModel implements GenerativeModel {
-    readonly specification: GenerativeModel["specification"]
-    /** Per-story endpoint: `runInferenceRound` routes to this baseURL/apiKey
-     *  instead of the env default — lets one DAG hit several endpoints. */
+/** What a round needs to know about a model. */
+export interface InferenceModelSpecification {
+    readonly name: string
+    readonly supportReasoningEffort: boolean
+    readonly supportStreaming: boolean
+    readonly contextWindowSize: number
+    readonly maxOutputTokens: number
+    readonly supportFunctionCalling: boolean
+}
+
+/** A model a round runs on: its specification plus the phase's request settings. */
+export interface InferenceModel {
+    readonly specification: InferenceModelSpecification
+    /** Per-story endpoint; the env default when absent. */
     readonly connection?: OpenAIConnection
-    private _tools: Tool[] = []
-    private _reasoningEffort = "medium"
-    private _streaming = false
+    setTools(tools: Tool[]): void
+    getTools(): Tool[]
+    setReasoningEffort(effort: string): void
+    getReasoningEffort(): string
+    setStreaming(streaming: boolean): void
+    getStreaming(): boolean
+}
+
+abstract class ConfigurableModel implements InferenceModel {
+    abstract readonly specification: InferenceModelSpecification
+    private tools: Tool[] = []
+    private streaming = false
+
+    constructor(
+        readonly connection: OpenAIConnection | undefined,
+        private reasoningEffort: string,
+    ) {}
+
+    setTools(tools: Tool[]): void {
+        this.tools = tools
+    }
+
+    getTools(): Tool[] {
+        return this.tools
+    }
+
+    setReasoningEffort(effort: string): void {
+        this.reasoningEffort = effort
+    }
+
+    getReasoningEffort(): string {
+        return this.reasoningEffort
+    }
+
+    setStreaming(streaming: boolean): void {
+        this.streaming = streaming
+    }
+
+    getStreaming(): boolean {
+        return this.streaming
+    }
+}
+
+/**
+ * Any model name, forwarded as-is, which makes any OpenAI-compatible endpoint
+ * usable via `--story-model <name>`. Its effort is kept but never sent: the
+ * specification says it does not support one.
+ */
+export class GenericOpenAIModel extends ConfigurableModel {
+    readonly specification: InferenceModelSpecification
 
     constructor(name: string, connection?: OpenAIConnection) {
-        this.connection = connection
+        super(connection, "medium")
         this.specification = {
             name,
             supportReasoningEffort: false,
-            defaultReasoningEffort: undefined,
             supportStreaming: false,
             contextWindowSize: 128_000,
             // Above anything a healthy phase has produced, below the runaway
@@ -165,45 +216,35 @@ export class GenericOpenAIModel implements GenerativeModel {
             supportFunctionCalling: true,
         }
     }
+}
 
-    setTools(tools: Tool[]): void {
-        this._tools = tools
-    }
+/** One of OpenAI's own models, as Mozaik's catalogue describes it. Reasoning starts at "none". */
+export class NativeOpenAIModel extends ConfigurableModel {
+    readonly specification: InferenceModelSpecification
 
-    getTools(): Tool[] {
-        return this._tools
-    }
-
-    // Effectively no-ops: with `supportReasoningEffort: false` the runtime
-    // sends no reasoning_effort field for a generic chat model.
-    setReasoningEffort(effort: string): void {
-        this._reasoningEffort = effort
-    }
-
-    getReasoningEffort(): string {
-        return this._reasoningEffort
-    }
-
-    setStreaming(streaming: boolean): void {
-        this._streaming = streaming
-    }
-
-    getStreaming(): boolean {
-        return this._streaming
+    constructor(catalogued: (typeof supportedModels)[number]["specification"]) {
+        super(undefined, "none")
+        this.specification = {
+            name: catalogued.name,
+            supportReasoningEffort: catalogued.supportsReasoningEffort,
+            supportStreaming: catalogued.supportsStreaming,
+            contextWindowSize: catalogued.contextWindowSize,
+            maxOutputTokens: catalogued.maxOutputTokens,
+            supportFunctionCalling: catalogued.supportsFunctionCalling,
+        }
     }
 }
 
 /**
  * Shared model selection for Architect and its text-only continuation phase.
- * Recognized OpenAI models use Mozaik's native Responses-capable classes on
- * the default endpoint; redirected endpoints and all other model names remain
- * generic Chat Completions models. Generic models deliberately never receive
- * an unsupported reasoning-effort request field.
+ * OpenAI's catalogued models on the default endpoint keep their reasoning
+ * effort; redirected endpoints and all other names are generic models, which
+ * never receive the unsupported reasoning-effort field.
  */
 export function createOpenAIModel(
     name: string,
     options: CreateOpenAIModelOptions = {},
-): GenerativeModel {
+): InferenceModel {
     if (
         options.connection &&
         (options.connection.baseURL !== undefined ||
@@ -231,21 +272,11 @@ export function createOpenAIModel(
     return model
 }
 
-function nativeOpenAIModel(
-    name: string,
-): Gpt55 | Gpt54 | Gpt54Mini | Gpt54Nano | null {
-    switch (name) {
-        case "gpt-5.5":
-            return new Gpt55()
-        case "gpt-5.4":
-            return new Gpt54()
-        case "gpt-5.4-mini":
-            return new Gpt54Mini()
-        case "gpt-5.4-nano":
-            return new Gpt54Nano()
-        default:
-            return null
-    }
+export function nativeOpenAIModel(name: string): NativeOpenAIModel | null {
+    const catalogued = supportedModels.find(
+        (model) => model.specification.provider === "openai" && model.specification.name === name,
+    )
+    return catalogued ? new NativeOpenAIModel(catalogued.specification) : null
 }
 
 function isOpenAIReasoningEffort(
@@ -267,66 +298,40 @@ export function inferenceFailureMeasurementPublished(error: unknown): boolean {
         : false
 }
 
-// One runtime per distinct endpoint: the vendor SDK client binds key +
-// base URL at construction. The empty key is the default env-driven endpoint.
-const chatRuntimeCache = new Map<string, OpenAICompatibleChatCompletions>()
+// Request and reply mapping are Mozaik's; neither endpoint builds its client until asked to call.
+const chatMapper = new OpenAIChatCompletions().endpointMapper
+const responsesMapper = new OpenAIResponses().endpointMapper
 
-function getChatRuntime(
-    conn?: OpenAIConnection,
-    cache = true,
-): OpenAICompatibleChatCompletions {
-    const key = [
-        conn?.baseURL ?? "",
-        conn?.apiKey ?? "",
-        JSON.stringify(conn?.extraBody ?? {}),
-    ].join("|")
-    if (!cache) {
-        return new OpenAICompatibleChatCompletions({
-            baseURL: conn?.baseURL,
-            apiKey: conn?.apiKey,
-            extraBody: conn?.extraBody,
+/**
+ * One SDK client per endpoint (the client binds key and base URL). A billed
+ * call gets a client without the SDK's hidden HTTP retries: a billing
+ * invocation is one provider attempt, and Baro owns retry policy.
+ */
+const providerClients = new Map<string, OpenAI>()
+
+function providerClient(conn: OpenAIConnection | undefined, billed: boolean): OpenAI {
+    const key = [conn?.baseURL ?? "", conn?.apiKey ?? "", billed ? "billed" : ""].join("|")
+    let client = providerClients.get(key)
+    if (!client) {
+        client = new OpenAI({
+            ...(conn?.baseURL ? { baseURL: conn.baseURL } : {}),
+            ...(conn?.apiKey ? { apiKey: conn.apiKey } : {}),
+            ...(billed ? { maxRetries: 0 } : {}),
         })
+        providerClients.set(key, client)
     }
-    let rt = chatRuntimeCache.get(key)
-    if (!rt) {
-        rt =
-            conn?.baseURL || conn?.apiKey || conn?.extraBody
-                ? new OpenAICompatibleChatCompletions({
-                      baseURL: conn.baseURL,
-                      apiKey: conn.apiKey,
-                      extraBody: conn.extraBody,
-                  })
-                : new OpenAICompatibleChatCompletions()
-        chatRuntimeCache.set(key, rt)
-    }
-    return rt
+    return client
 }
 
-// The env-driven endpoint shares one runtime; a custom endpoint (the baro
-// gateway) gets its own, keyed like the chat runtimes.
-let responsesRuntime: OpenAIResponses | undefined
-const responsesRuntimeCache = new Map<string, OpenAIResponses>()
-function getResponsesRuntime(conn?: OpenAIConnection): OpenAIResponses {
-    if (!conn?.baseURL && !conn?.apiKey) {
-        if (!responsesRuntime) responsesRuntime = new OpenAIResponses()
-        return responsesRuntime
+function inferenceInput(model: InferenceModel, context: ModelContext): InferenceInput {
+    return {
+        model: model.specification.name,
+        context,
+        tools: model.getTools(),
+        ...(model.specification.supportReasoningEffort
+            ? { reasoningEffort: model.getReasoningEffort() }
+            : {}),
     }
-    const key = `${conn.baseURL ?? ""}|${conn.apiKey ?? ""}`
-    const cached = responsesRuntimeCache.get(key)
-    if (cached) return cached
-    // Mozaik's Responses adapter only builds an env-configured client, and
-    // throws without OPENAI_API_KEY. Borrow the SDK client a connection-bound
-    // chat runtime constructs; the request/response mapping is the adapter's.
-    const client = (getChatRuntime(
-        { baseURL: conn.baseURL, apiKey: conn.apiKey },
-        false,
-    ) as unknown as { client: unknown }).client
-    const rt = Object.assign(
-        Object.create(OpenAIResponses.prototype) as OpenAIResponses,
-        { client },
-    )
-    responsesRuntimeCache.set(key, rt)
-    return rt
 }
 
 // OpenAI-native families (gpt-*, o-series, chatgpt-*) use the Responses API on
@@ -349,16 +354,16 @@ function usesResponsesApi(name: string): boolean {
  */
 export async function runInferenceRound(
     context: ModelContext,
-    model: GenerativeModel,
+    model: InferenceModel,
     options: InferenceRoundOptions = {},
 ): Promise<InferenceRound> {
-    const conn = (model as Partial<GenericOpenAIModel>).connection
-    const name = model.specification?.name ?? ""
+    const conn = model.connection
+    const name = model.specification.name
     const endpointBaseUrl = conn?.baseURL ?? process.env.OPENAI_BASE_URL
     const endpointApiKey = conn?.apiKey ?? process.env.OPENAI_API_KEY
-    // Construct the Mozaik request before allocating billing correlation so a
-    // local validation error cannot leave an invocation orphaned in the feed.
-    const request = new InferenceRequest(model, context)
+    // Build the request before allocating billing correlation so a local
+    // error cannot leave an invocation orphaned in the feed.
+    const input = inferenceInput(model, context)
     const dispatch = options.billing?.coordinator.prepareDispatch(
         endpointBaseUrl,
         endpointApiKey,
@@ -376,18 +381,19 @@ export async function runInferenceRound(
             usesResponsesApi(name)
                 ? dispatch
                     ? await inferResponsesWithExtension(
-                          getResponsesRuntime(conn),
-                          request,
+                          conn,
+                          input,
                           dispatch.requestExtension,
                           options.signal,
                       )
                     : await inferResponsesRound(
-                          getResponsesRuntime(conn),
-                          request,
+                          conn,
+                          input,
                           options.signal,
                       )
                 : await inferChatRound(
-                      request,
+                      input,
+                      model.specification.maxOutputTokens,
                       {
                           ...conn,
                           ...(Object.keys(extraBody).length > 0
@@ -441,25 +447,25 @@ export async function runInferenceRound(
 }
 
 async function inferChatRound(
-    request: InferenceRequest,
+    input: InferenceInput,
+    maxOutputTokens: number,
     connection: OpenAIConnection,
     billed: boolean,
     signal?: AbortSignal,
     onActivity?: () => void,
-) {
-    const runtime = getChatRuntime(connection, !billed)
-    if (billed) disableOpenAiSdkRetries(runtime)
-
-    const internals = runtime as unknown as ChatRuntimeInternals
-    assertChatRuntimeInternals(internals)
+): Promise<InferredRound> {
+    const client = providerClient(connection, billed)
     const body = withOutputCeiling(
-        withParallelToolCalls(internals.buildRequest(request)),
-        request,
+        withParallelToolCalls({
+            ...(connection.extraBody ?? {}),
+            ...chatMapper.toRequest(input),
+        }),
+        maxOutputTokens,
     )
 
     if (nativeStreamingEnabled()) {
         const streamed = await streamChatRound(
-            internals.client as unknown as ChatStreamClient,
+            client as unknown as ChatStreamClient,
             body,
             {
                 ...(signal ? { signal } : {}),
@@ -474,13 +480,14 @@ async function inferChatRound(
         }
     }
 
-    const response = await internals.client.chat.completions.create(body, {
-        ...(signal ? { signal } : {}),
-        ...uncappedTransport(),
-    })
+    const response = await client.chat.completions.create(
+        body as unknown as OpenAI.ChatCompletionCreateParamsNonStreaming,
+        { ...(signal ? { signal } : {}), ...uncappedTransport() },
+    )
+    const mapped = chatMapper.toResponse(response)
     return {
-        contextItems: internals.extractContextItems(response),
-        tokenUsage: internals.extractTokenUsage(response),
+        contextItems: mapped.items,
+        tokenUsage: mapped.tokenUsage,
         truncated: finishedAtCeiling(response),
     }
 }
@@ -519,9 +526,11 @@ export function nativeStreamingEnabled(): boolean {
  * round's deadline, the phase's budget and the idle watchdog remain; what goes
  * is the transport's opinion about how long an answer may take.
  */
-function uncappedTransport(): { fetchOptions: { dispatcher: unknown } } | Record<string, never> {
+function uncappedTransport(): Pick<OpenAI.RequestOptions, "fetchOptions"> {
     const dispatcher = noTimeoutDispatcher()
-    return dispatcher ? { fetchOptions: { dispatcher } } : {}
+    return dispatcher
+        ? { fetchOptions: { dispatcher } as OpenAI.RequestOptions["fetchOptions"] }
+        : {}
 }
 
 let cachedDispatcher: unknown
@@ -553,7 +562,7 @@ export const __testUncappedTransport = uncappedTransport
 /**
  * Ask for what the round is already able to receive.
  *
- * Mozaik 3.12 never sends `parallel_tool_calls`, though its response reader
+ * Mozaik's chat mapper never sends `parallel_tool_calls`, though its reply mapping
  * turns every `tool_calls` entry into its own item and our loop runs them all.
  * OpenAI defaults it on; an OpenAI-compatible endpoint need not, and a live
  * GLM-5.2 Architect emitted exactly one call in each of sixty rounds — sixty
@@ -585,49 +594,11 @@ function withParallelToolCalls(
  */
 function withOutputCeiling(
     body: Record<string, unknown>,
-    request: InferenceRequest,
+    ceiling: number,
 ): Record<string, unknown> {
     if (body.max_tokens !== undefined) return body
-    const ceiling = (
-        request.model as { specification?: { maxOutputTokens?: number } }
-    ).specification?.maxOutputTokens
-    if (typeof ceiling !== "number" || ceiling <= 0) return body
+    if (ceiling <= 0) return body
     return { ...body, max_tokens: ceiling }
-}
-
-interface ProviderRequestOptions {
-    signal?: AbortSignal
-}
-
-interface ChatRuntimeInternals {
-    client: {
-        chat: {
-            completions: {
-                create(
-                    body: Record<string, unknown>,
-                    options?: ProviderRequestOptions,
-                ): Promise<unknown>
-            }
-        }
-    }
-    buildRequest(input: InferenceRequest): Record<string, unknown>
-    extractContextItems(response: unknown): ContextItem[]
-    extractTokenUsage(response: unknown): TokenUsage | undefined
-}
-
-function assertChatRuntimeInternals(
-    internals: ChatRuntimeInternals,
-): void {
-    if (
-        !internals.client?.chat?.completions ||
-        typeof internals.buildRequest !== "function" ||
-        typeof internals.extractContextItems !== "function" ||
-        typeof internals.extractTokenUsage !== "function"
-    ) {
-        throw new Error(
-            "Mozaik Chat Completions runtime cannot attach provider cancellation",
-        )
-    }
 }
 
 function billingExtraBody(
@@ -642,46 +613,58 @@ function billingExtraBody(
         : safeConfigured
 }
 
-/**
- * Mozaik 3.12 does not yet expose request extensions on its Responses
- * adapter. Reuse its own request construction and response mapping while
- * inserting the one gateway-only field at this single interception point.
- */
+/** One gateway-only field rides on an otherwise ordinary Responses call. */
 async function inferResponsesWithExtension(
-    runtime: OpenAIResponses,
-    request: InferenceRequest,
+    connection: OpenAIConnection | undefined,
+    input: InferenceInput,
     extension: GatewayBillingDispatch["requestExtension"],
     signal?: AbortSignal,
 ): Promise<InferredRound> {
-    const internals = responseInternals(runtime)
-    disableOpenAiSdkRetries(runtime)
-    const response = await internals.client.responses.create(
+    const response = await providerClient(connection, true).responses.create(
         {
-            ...responsesBody(internals, request),
+            ...responsesBody(input),
             ...extension,
-        },
+        } as unknown as OpenAI.Responses.ResponseCreateParamsNonStreaming,
         { ...(signal ? { signal } : {}), ...uncappedTransport() },
     )
-    return {
-        contextItems: replayableResponseItems(internals, response),
-        tokenUsage: internals.extractTokenUsage(response),
-    }
+    return replayableRound(response)
+}
+
+async function inferResponsesRound(
+    connection: OpenAIConnection | undefined,
+    input: InferenceInput,
+    signal?: AbortSignal,
+): Promise<InferredRound> {
+    const response = await providerClient(connection, false).responses.create(
+        responsesBody(input) as unknown as OpenAI.Responses.ResponseCreateParamsNonStreaming,
+        { ...(signal ? { signal } : {}), ...uncappedTransport() },
+    )
+    return replayableRound(response)
 }
 
 /**
- * Baro's own Responses mapping for reasoning, until Mozaik 4 owns it. Mozaik
- * 3.12 never asks for the encrypted reasoning and rehydrates the item with the
- * wire's raw `content: []`, which then throws from `toJSON()` when the next
- * round serializes the context. Stateless replay (`store: false` plus the
- * encrypted content) hands the model its own reasoning back across tool
- * rounds without depending on anything the provider stored.
+ * Stateless reasoning replay: `store: false` plus the encrypted content hands
+ * the model its own reasoning back across tool rounds without depending on
+ * anything the provider stored. Each replayed item goes back exactly as the
+ * provider sent it (its id included), which Mozaik's mapper does not keep.
  */
-function responsesBody(
-    internals: ResponsesRuntimeInternals,
-    request: InferenceRequest,
-): Record<string, unknown> {
+const reasoningWire = new WeakMap<ReasoningItem, Record<string, unknown>>()
+
+function responsesBody(input: InferenceInput): Record<string, unknown> {
+    const request = responsesMapper.toRequest(input) as Record<string, unknown>
+    const replayed = input.context
+        .getItems()
+        .filter((item): item is ReasoningItem => item instanceof ReasoningItem)
+        .map((item) => reasoningWire.get(item))
+    let next = 0
+    const requestInput = Array.isArray(request.input)
+        ? (request.input as Array<{ type?: unknown }>).map((entry) =>
+              entry.type === "reasoning" ? replayed[next++] ?? entry : entry,
+          )
+        : request.input
     return {
-        ...internals.buildRequest(request),
+        ...request,
+        input: requestInput,
         include: ["reasoning.encrypted_content"],
         store: false,
     }
@@ -694,17 +677,14 @@ interface WireReasoning {
     encrypted_content?: unknown
 }
 
-function replayableResponseItems(
-    internals: ResponsesRuntimeInternals,
-    response: unknown,
-): ContextItem[] {
+function replayableRound(response: unknown): InferredRound {
     const output = (response as { output?: unknown }).output
     const wire = Array.isArray(output) ? (output as WireReasoning[]) : []
-    const mapped = internals.extractContextItems({
+    const mapped = responsesMapper.toResponse({
         ...(response as object),
         output: wire.filter((item) => item?.type !== "reasoning"),
     })
-    const replayable = mapped[Symbol.iterator]()
+    const replayable = mapped.items[Symbol.iterator]()
     const items: ContextItem[] = []
     for (const item of wire) {
         if (item?.type === "reasoning") {
@@ -712,11 +692,10 @@ function replayableResponseItems(
             if (reasoning) items.push(reasoning)
             continue
         }
-        // Output types the adapter does not map come back as holes.
         const next = replayable.next().value as ContextItem | undefined
         if (next) items.push(next)
     }
-    return items
+    return { contextItems: items, tokenUsage: mapped.tokenUsage }
 }
 
 /** An item without encrypted content has nothing to replay and is left out. */
@@ -729,82 +708,13 @@ function replayableReasoning(wire: WireReasoning): ReasoningItem | null {
         encryptedContent: wire.encrypted_content,
         summary: [],
     })
-    const json = {
+    reasoningWire.set(item, {
         type: "reasoning",
         ...(typeof wire.id === "string" ? { id: wire.id } : {}),
         summary: Array.isArray(wire.summary) ? wire.summary : [],
         encrypted_content: wire.encrypted_content,
-    }
-    item.toJSON = () => json
+    })
     return item
-}
-
-async function inferResponsesRound(
-    runtime: OpenAIResponses,
-    request: InferenceRequest,
-    signal?: AbortSignal,
-): Promise<InferredRound> {
-    const internals = responseInternals(runtime)
-    const response = await internals.client.responses.create(
-        responsesBody(internals, request),
-        { ...(signal ? { signal } : {}), ...uncappedTransport() },
-    )
-    return {
-        contextItems: replayableResponseItems(internals, response),
-        tokenUsage: internals.extractTokenUsage(response),
-    }
-}
-
-interface ResponsesRuntimeInternals {
-    client: {
-        responses: {
-            create(
-                body: Record<string, unknown>,
-                options?: ProviderRequestOptions,
-            ): Promise<unknown>
-        }
-    }
-    buildRequest(input: InferenceRequest): Record<string, unknown>
-    extractContextItems(response: unknown): ContextItem[]
-    extractTokenUsage(response: unknown): TokenUsage | undefined
-}
-
-function responseInternals(
-    runtime: OpenAIResponses,
-): ResponsesRuntimeInternals {
-    const internals = runtime as unknown as ResponsesRuntimeInternals
-    if (
-        !internals.client?.responses ||
-        typeof internals.buildRequest !== "function" ||
-        typeof internals.extractContextItems !== "function" ||
-        typeof internals.extractTokenUsage !== "function"
-    ) {
-        throw new Error(
-            "Mozaik Responses runtime cannot attach trusted request controls",
-        )
-    }
-    return internals
-}
-
-/**
- * A billing invocation is one provider attempt. Baro owns higher-level retry
- * policy and allocates a fresh invocation ID for each explicit reconnect; the
- * OpenAI SDK's hidden HTTP retries would otherwise reuse one ID for multiple
- * upstream calls. Mozaik 3.12 keeps the SDK client private, so this adapter is
- * deliberately fail-closed and covered by a version-pinned integration test.
- */
-function disableOpenAiSdkRetries(
-    runtime: OpenAICompatibleChatCompletions | OpenAIResponses,
-): void {
-    const internals = runtime as unknown as {
-        client?: { maxRetries?: number }
-    }
-    if (!internals.client || typeof internals.client.maxRetries !== "number") {
-        throw new Error(
-            "Mozaik OpenAI runtime cannot enforce one HTTP attempt per billing invocation",
-        )
-    }
-    internals.client.maxRetries = 0
 }
 
 function inferenceFailureAttribution(

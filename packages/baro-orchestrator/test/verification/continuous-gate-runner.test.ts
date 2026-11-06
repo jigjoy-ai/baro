@@ -15,8 +15,8 @@ const RED: GateCommandOutcome[] = [
 function harness(gates: () => Promise<readonly GateCommandOutcome[]>) {
     const delivered: Array<{ recipientId: string; text: string }> = []
     const environment = {
-        deliverSemanticEvent(_source: unknown, event: { data: unknown }) {
-            delivered.push(event.data as { recipientId: string; text: string })
+        publish(_source: unknown, event: { payload: unknown }) {
+            delivered.push(event.payload as { recipientId: string; text: string })
         },
     }
     let runs = 0
@@ -29,7 +29,7 @@ function harness(gates: () => Promise<readonly GateCommandOutcome[]>) {
             return await gates()
         },
     })
-    ;(runner as unknown as { getEnvironments(): unknown[] }).getEnvironments = () => [environment]
+    ;(runner as unknown as { getBuses(): unknown[] }).getBuses = () => [environment]
     const write = (agentId: string) =>
         runner.onExternalFunctionCall(
             { agentId } as never,
@@ -47,8 +47,8 @@ function harness(gates: () => Promise<readonly GateCommandOutcome[]>) {
 function harnessWithPlan(plan: VerifyPlan) {
     const delivered: Array<{ recipientId: string; text: string }> = []
     const environment = {
-        deliverSemanticEvent(_source: unknown, event: { data: unknown }) {
-            delivered.push(event.data as { recipientId: string; text: string })
+        publish(_source: unknown, event: { payload: unknown }) {
+            delivered.push(event.payload as { recipientId: string; text: string })
         },
     }
     const runner = new ContinuousGateRunner({
@@ -57,7 +57,7 @@ function harnessWithPlan(plan: VerifyPlan) {
         settleMs: 5,
         plan,
     })
-    ;(runner as unknown as { getEnvironments(): unknown[] }).getEnvironments = () => [environment]
+    ;(runner as unknown as { getBuses(): unknown[] }).getBuses = () => [environment]
     const write = (agentId: string) =>
         runner.onExternalFunctionCall(
             { agentId } as never,
@@ -212,7 +212,9 @@ describe("the gate runs when it is worth running, not constantly", () => {
         }
         const h = harnessWithPlan(plan)
         h.write("S1")
-        await settle(200)
+        // A real verifyBuild run; it takes ~0.6 s on a loaded machine.
+        const deadline = Date.now() + 10_000
+        while (h.delivered.length === 0 && Date.now() < deadline) await settle(25)
         assert.equal(h.delivered.length, 1)
         const text = h.delivered[0]!.text
         assert.match(text, /PASS {2}node noop/u)

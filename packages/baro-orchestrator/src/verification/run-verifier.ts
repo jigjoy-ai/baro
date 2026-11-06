@@ -1,4 +1,5 @@
-import type { Participant, SemanticEvent } from "../runtime/mozaik.js"
+import type { SemanticEvent } from "../runtime/mozaik.js"
+import type { BusMember } from "../runtime/coordination.js"
 
 import { StoryResult, StorySpawned } from "../events/execution.js"
 import {
@@ -10,6 +11,7 @@ import {
     type RunVerificationRetryClassifiedData,
     type VerificationCommandEvidence,
 } from "../semantic-events.js"
+import { materializeBeforeGate } from "../integration/dependency-materializer.js"
 import { classifyFailureTail } from "./failure-classifier.js"
 import {
     SerializedObserver,
@@ -57,7 +59,7 @@ export class RunVerifier extends SerializedObserver {
     private readonly active = new Map<string, AbortController>()
     private readonly runningStories = new Set<string>()
     private readonly verify: (cwd: string, signal: AbortSignal) => Promise<VerifyResult>
-    private requestAuthority: Participant | null = null
+    private requestAuthority: BusMember | null = null
     /**
      * What verifyBuild actually decided, per command label, for the
      * verification in flight. The gate is the only place that knows which
@@ -74,8 +76,11 @@ export class RunVerifier extends SerializedObserver {
             opts.storyExecutorsActive ?? (() => this.runningStories.size > 0)
         this.verify =
             opts.verify ??
-            ((cwd, signal) =>
-                verifyBuild(cwd, {
+            (async (cwd, signal) => {
+                await materializeBeforeGate(opts.hostRepoRoot, cwd, (line) =>
+                    process.stderr.write(`[run-verifier] ${line}\n`),
+                )
+                return await verifyBuild(cwd, {
                     plan: mergeVerifyPlans(
                         baselinePlan,
                         createFinalPlan(cwd),
@@ -85,10 +90,11 @@ export class RunVerifier extends SerializedObserver {
                     storyExecutorsActive,
                     onRetryDecision: (info) =>
                         void this.retryDecisions.set(info.command, info),
-                }))
+                })
+            })
     }
 
-    setRequestAuthority(authority: Participant): void {
+    setRequestAuthority(authority: BusMember): void {
         if (this.requestAuthority && this.requestAuthority !== authority) {
             throw new Error("run verifier request authority is already bound")
         }
@@ -100,28 +106,28 @@ export class RunVerifier extends SerializedObserver {
     ): Promise<void> {
         const { event, source } = context
         if (StorySpawned.is(event)) {
-            this.runningStories.add(event.data.storyId)
+            this.runningStories.add(event.payload.storyId)
             return
         }
         if (StoryResult.is(event)) {
-            this.runningStories.delete(event.data.storyId)
+            this.runningStories.delete(event.payload.storyId)
             return
         }
         if (
             RunVerificationTimedOut.is(event) &&
-            event.data.runId === this.opts.runId
+            event.payload.runId === this.opts.runId
         ) {
             if (!this.requestAuthority || source !== this.requestAuthority) return
-            this.active.get(event.data.verificationId)?.abort(
+            this.active.get(event.payload.verificationId)?.abort(
                 new Error(
-                    `verification timed out after ${Math.ceil(event.data.timeoutMs / 1_000)}s`,
+                    `verification timed out after ${Math.ceil(event.payload.timeoutMs / 1_000)}s`,
                 ),
             )
             return
         }
         if (
             !RunVerificationRequested.is(event) ||
-            event.data.runId !== this.opts.runId
+            event.payload.runId !== this.opts.runId
         ) {
             return
         }
@@ -129,14 +135,14 @@ export class RunVerifier extends SerializedObserver {
         // requests must be ignored rather than cached under a predictable id.
         if (!this.requestAuthority || source !== this.requestAuthority) return
 
-        const cached = this.completed.get(event.data.verificationId)
+        const cached = this.completed.get(event.payload.verificationId)
         if (cached) {
             this.emit(RunVerificationCompleted.create(cached))
             return
         }
-        if (this.handled.has(event.data.verificationId)) return
+        if (this.handled.has(event.payload.verificationId)) return
 
-        const { verificationId } = event.data
+        const { verificationId } = event.payload
         this.handled.add(verificationId)
         const controller = new AbortController()
         this.active.set(verificationId, controller)
@@ -240,9 +246,9 @@ export class RunVerifier extends SerializedObserver {
         this.emit(RunVerificationCompleted.create(data))
     }
 
-    private emit(event: SemanticEvent<unknown>): void {
-        for (const env of this.getEnvironments()) {
-            env.deliverSemanticEvent(this, event)
+    private emit(event: SemanticEvent<string, unknown>): void {
+        for (const env of this.getBuses()) {
+            env.publish(this, event)
         }
     }
 }

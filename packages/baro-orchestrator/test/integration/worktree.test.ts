@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, it } from "node:test"
 import assert from "node:assert/strict"
 import { execFileSync } from "node:child_process"
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs"
+import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync, mkdirSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { basename, dirname, join } from "node:path"
 
 import { GitGate } from "../../src/integration/git.js"
 import {
@@ -263,28 +263,9 @@ describe("WorktreeManager — isolation (#50)", () => {
 })
 
 describe("WorktreeManager — conflict", () => {
-    it("same-line conflict auto-resolves with -X theirs (merging story wins) and warns", async () => {
-        const p1 = (await mgr.create("S1"))!
-        const p2 = (await mgr.create("S2"))!
-        commitInWorktree(p1, "a.txt", "S1wins\nline2\nline3\n")
-        commitInWorktree(p2, "a.txt", "S2wins\nline2\nline3\n")
-        await mgr.mergeBack("S1")
-        await mgr.mergeBack("S2")
-
-        const merged = readFileSync(join(repo, "a.txt"), "utf8")
-        assert.ok(merged.includes("S2wins"), "the merging story (S2) won")
-        assert.ok(!merged.includes("<<<<<<<"), "no conflict markers left")
-        assert.equal(git(repo, "status", "--porcelain"), "", "run branch clean")
-        assert.ok(
-            logs.some((l) => l.includes("conflict") && l.includes("S2")),
-            "a conflict warning was surfaced",
-        )
-    })
-
-    it("collective policy preserves the branch and fails instead of choosing a winner", async () => {
+    it("preserves the branch and fails instead of choosing a winner", async () => {
         mgr = new WorktreeManager(repo, gate, runId, {
             onLog: (line) => logs.push(line),
-            resolveConflictsWithTheirs: false,
         })
         const p1 = (await mgr.create("S1"))!
         const p2 = (await mgr.create("S2"))!
@@ -305,7 +286,6 @@ describe("WorktreeManager — conflict", () => {
     it("backs up a conflict and retries the same logical story from latest HEAD", async () => {
         mgr = new WorktreeManager(repo, gate, runId, {
             onLog: (line) => logs.push(line),
-            resolveConflictsWithTheirs: false,
         })
         const p1 = (await mgr.create("S1"))!
         const p2 = (await mgr.create("S2"))!
@@ -356,7 +336,6 @@ describe("WorktreeManager — conflict", () => {
     it("refuses retry preparation when the preserved worktree is dirty", async () => {
         mgr = new WorktreeManager(repo, gate, runId, {
             onLog: (line) => logs.push(line),
-            resolveConflictsWithTheirs: false,
         })
         const p1 = (await mgr.create("S1"))!
         const p2 = (await mgr.create("S2"))!
@@ -466,9 +445,11 @@ describe("WorktreeManager — failed execution recovery", () => {
     it("retains the dirty worktree when the preservation commit fails", async () => {
         const failedPath = (await mgr.create("S1"))!
         writeFileSync(join(failedPath, "partial.txt"), "must not disappear\n")
-        const hook = join(repo, ".git", "hooks", "pre-commit")
-        writeFileSync(hook, "#!/bin/sh\nexit 1\n")
-        chmodSync(hook, 0o755)
+        // A held index lock makes the preservation commit fail. (A failing
+        // pre-commit hook no longer can: the orchestrator's git runs no hooks.)
+        const gitDir = git(failedPath, "rev-parse", "--absolute-git-dir")
+        const lock = join(gitDir, "index.lock")
+        writeFileSync(lock, "")
 
         await assert.rejects(
             () => mgr.cleanupFailed("S1", true),
@@ -482,7 +463,7 @@ describe("WorktreeManager — failed execution recovery", () => {
             "logical branch remains while preservation is unresolved",
         )
 
-        rmSync(hook, { force: true })
+        rmSync(lock, { force: true })
         await mgr.cleanup("S1")
     })
 })
@@ -528,18 +509,146 @@ describe("WorktreeManager — uncommitted safety net", () => {
     })
 })
 
-describe("WorktreeManager — fallback", () => {
-    it("mergeBack returns false for a story that never got a worktree", async () => {
-        const merged = await mgr.mergeBack("never-created")
-        assert.equal(merged, false, "no worktree → no merge, signals shared-tree path")
+describe("WorktreeManager — ownership at integration", () => {
+    it("refuses a merge whose diff touches a file another unintegrated story holds", async () => {
+        // The write-time guards only cover the tools they hook; a script or a
+        // one-shot CLI lane can write any file. Ownership is judged on what lands.
+        const p1 = (await mgr.create("S1"))!
+        commitInWorktree(p1, "mine.ts", "export const mine = 1\n")
+        commitInWorktree(p1, "theirs.ts", "export const stolen = 1\n")
+
+        await assert.rejects(
+            mgr.mergeBack("S1", undefined, { "theirs.ts": "S2" }),
+            (error: Error & { invariant?: string }) =>
+                error.invariant === "write_surface_violation" && /theirs\.ts \(S2\)/.test(error.message),
+        )
+        assert.equal(existsSync(join(repo, "mine.ts")), false, "nothing landed")
+
+        const p3 = (await mgr.create("S3"))!
+        commitInWorktree(p3, "own.ts", "export const own = 1\n")
+        assert.equal(await mgr.mergeBack("S3", undefined, { "theirs.ts": "S2" }), true)
+    })
+})
+
+describe("WorktreeManager — directory names", () => {
+    it("names every story worktree like the user's checkout, and cleans up its parent", async () => {
+        // In the hermes-baro rerun the agents' tests passed in S3/ and failed in
+        // hermes-baro/: a Python package rooted at a hyphenated directory
+        // imports differently. Same name, same behaviour.
+        const path = (await mgr.create("S1"))!
+        assert.equal(basename(path), basename(realpathSync(repo)))
+        assert.equal(basename(dirname(path)), "S1")
+
+        await mgr.cleanup("S1")
+
+        assert.equal(existsSync(dirname(path)), false, "the per-story directory goes too")
+    })
+})
+
+describe("WorktreeManager — checkpoints", () => {
+    it("starts a dependent on a running story's checkpoint and integrates both cleanly in order", async () => {
+        const p1 = (await mgr.create("S1"))!
+        commitInWorktree(p1, "contract.ts", "export interface Parser {}\n")
+        const candidate = await mgr.checkpointCandidate("S1")
+        assert.deepEqual(candidate?.changedPaths, ["contract.ts"])
+
+        const p2 = (await mgr.create("S2", {
+            checkpoints: [{ storyId: "S1", sha: candidate!.sha }],
+        }))!
+        assert.equal(readFileSync(join(p2, "contract.ts"), "utf8"), "export interface Parser {}\n")
+        assert.equal(
+            mgr.creationSha("S2"),
+            git(p2, "rev-parse", "HEAD"),
+            "the merge is the dependent's base, so its own diff stays its own",
+        )
+        commitInWorktree(p2, "board.ts", "import './contract'\n")
+        assert.deepEqual((await mgr.checkpointCandidate("S2"))?.changedPaths, ["board.ts"])
+
+        // S1 keeps working after its checkpoint, then integrates first.
+        commitInWorktree(p1, "parser.ts", "export const parse = () => []\n")
+        assert.equal(await mgr.mergeBack("S1"), true)
+        assert.equal(await mgr.mergeBack("S2"), true)
+
+        for (const file of ["contract.ts", "parser.ts", "board.ts"]) {
+            assert.ok(existsSync(join(repo, file)), `${file} integrated`)
+        }
     })
 
-    it("rolls back a partially-created worktree before shared fallback", async () => {
+    it("refuses to start a dependent on a checkpoint that conflicts with the run branch", async () => {
+        const p1 = (await mgr.create("S1"))!
+        commitInWorktree(p1, "a.txt", "S1's version\n")
+        const { sha } = (await mgr.checkpointCandidate("S1"))!
+        writeFileSync(join(repo, "a.txt"), "integrated meanwhile\n")
+        git(repo, "commit", "-am", "conflicting integration")
+
+        await assert.rejects(
+            mgr.create("S2", { checkpoints: [{ storyId: "S1", sha }] }),
+            /do not merge onto the run branch/,
+        )
+        assert.equal(mgr.activePath("S2"), null)
+        assert.ok(logs.some((line) => line.includes("do not merge onto the run branch")))
+    })
+})
+
+describe("WorktreeManager — scratch dir", () => {
+    it("cleaning up .baro-scratch leaves the captured fingerprint fresh", async () => {
+        // S5 in the hermes-baro run was rejected twice: deleting its scratch
+        // venv after the tests made the evidence it had just captured stale.
+        const path = (await mgr.create("S1"))!
+        writeFileSync(join(path, "feature.txt"), "real work\n")
+        mkdirSync(join(path, ".baro-scratch", "venv"), { recursive: true })
+        writeFileSync(join(path, ".baro-scratch", "venv", "pyvenv.cfg"), "home = /x\n")
+        const target = { cwd: path, baseSha: mgr.creationSha("S1") }
+
+        const captured = await captureCriticRepositoryFingerprint(target)
+        rmSync(join(path, ".baro-scratch"), { recursive: true, force: true })
+
+        assert.equal(await captureCriticRepositoryFingerprint(target), captured)
+    })
+
+    it("never auto-commits scratch leftovers", async () => {
+        const path = (await mgr.create("S1"))!
+        writeFileSync(join(path, "feature.txt"), "real work\n")
+        mkdirSync(join(path, ".baro-scratch"), { recursive: true })
+        writeFileSync(join(path, ".baro-scratch", "probe.log"), "scratch\n")
+
+        await mgr.mergeBack("S1")
+
+        const tracked = git(repo, "ls-files").split("\n")
+        assert.ok(tracked.includes("feature.txt"))
+        assert.ok(!tracked.some((file) => file.startsWith(".baro-scratch")))
+    })
+
+    it("is excluded even when dep dirs are not linked", async () => {
+        const noLinkRunId = uniqueRunId("run-nolink-scratch")
+        const noLink = new WorktreeManager(repo, new GitGate(), noLinkRunId, {
+            linkDepDirs: false,
+            onLog: () => {},
+        })
+        try {
+            const p = (await noLink.create("S1"))!
+            mkdirSync(join(p, ".baro-scratch"), { recursive: true })
+            writeFileSync(join(p, ".baro-scratch", "x"), "1\n")
+            assert.equal(git(p, "status", "--porcelain"), "")
+        } finally {
+            await noLink.cleanupAll()
+            await removeWorktreeRun(repo, noLinkRunId)
+        }
+    })
+})
+
+describe("WorktreeManager — missing worktree", () => {
+    it("mergeBack returns false for a story that never got a worktree", async () => {
+        const merged = await mgr.mergeBack("never-created")
+        assert.equal(merged, false)
+    })
+
+    it("rolls back a partially-created worktree and fails the create", async () => {
         writeFileSync(join(repo, "package.json"), '{"name":"setup-failure"}\n')
         git(repo, "add", "package.json")
         git(repo, "commit", "-m", "add package manifest")
 
-        // Force ensureDepDirsExcluded() to fail after `git worktree add` has
+        // Force ensureWorktreeExcludes() to fail after `git worktree add` has
         // succeeded, exercising the transactional rollback path.
         const rawExcludePath = git(repo, "rev-parse", "--git-path", "info/exclude")
         const excludePath = rawExcludePath.startsWith("/")
@@ -548,10 +657,9 @@ describe("WorktreeManager — fallback", () => {
         rmSync(excludePath, { force: true })
         mkdirSync(excludePath)
 
-        const path = await mgr.create("S1")
+        await assert.rejects(mgr.create("S1"))
         const partialPath = join(worktreeRunRoot(runId), "S1")
 
-        assert.equal(path, null)
         assert.equal(mgr.activePath("S1"), null)
         assert.equal(mgr.creationSha("S1"), null)
         assert.equal(existsSync(partialPath), false)
@@ -559,7 +667,7 @@ describe("WorktreeManager — fallback", () => {
         assert.equal(
             git(repo, "branch", "--list", `baro-wt/${runId}/S1`),
             "",
-            "partial story branch was removed before fallback",
+            "partial story branch was removed",
         )
     })
 })
@@ -769,6 +877,24 @@ describe("WorktreeManager — dependency dir symlink", () => {
         )
     })
 
+    it("shares the dep dir of a manifest an earlier story merged with later stories", async () => {
+        // The hermes-baro run: S1 wrote pyproject.toml, and every later story
+        // built its own venv because the dep dirs were discovered once, at start.
+        const p1 = (await mgr.create("S1"))!
+        commitInWorktree(p1, "pyproject.toml", '[project]\nname = "x"\n')
+        assert.equal(await mgr.mergeBack("S1"), true)
+
+        const p2 = (await mgr.create("S2"))!
+        mkdirSync(join(p2, ".venv", "bin"), { recursive: true })
+        writeFileSync(join(p2, ".venv", "bin", "pytest"), "1\n")
+
+        const p3 = (await mgr.create("S3"))!
+        assert.ok(
+            existsSync(join(p3, ".venv", "bin", "pytest")),
+            "S3 sees the venv S2 built, via the shared .venv",
+        )
+    })
+
     it("skips the symlink when disabled", async () => {
         mkdirSync(join(repo, "node_modules"), { recursive: true })
         const noLinkRunId = uniqueRunId("run-nolink")
@@ -964,7 +1090,7 @@ describe("WorktreeManager — isolated integration tree", () => {
 
     it("refuses a story id that collides with the integration worktree directory", async () => {
         const integrationRoot = await isolatedManager()
-        assert.equal(integrationRoot, integrationWorktreePath(runId))
+        assert.equal(integrationRoot, integrationWorktreePath(runId, repo))
 
         await assert.rejects(
             () => mgr.create(INTEGRATION_WORKTREE_DIRNAME),

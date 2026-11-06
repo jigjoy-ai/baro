@@ -2,14 +2,14 @@ import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
 import {
-    BaseObserver,
     FunctionCallItem,
     ModelContext,
     ModelMessageItem,
     type ContextItem,
-    type GenerativeModel,
     type Tool,
 } from "../../src/runtime/mozaik.js"
+import type { InferenceModel } from "../../src/harness/openai/runtime.js"
+import { BusMember } from "../../src/runtime/coordination.js"
 import { MozaikModelParticipant } from "../../src/harness/mozaik/model-participant.js"
 import {
     AgentResult,
@@ -19,11 +19,12 @@ import {
 import { joinWithCapture } from "./../execution/helpers.js"
 
 /** A model that never speaks — every round is stubbed by the test. */
-function silentModel(): GenerativeModel {
+function silentModel(): InferenceModel {
     return {
-        specification: { name: "test-model" },
+        specification: { name: "test-model", supportReasoningEffort: false },
         setTools: () => {},
-    } as unknown as GenerativeModel
+        getTools: () => [],
+    } as unknown as InferenceModel
 }
 
 function message(text: string): ModelMessageItem {
@@ -115,7 +116,7 @@ describe("a phase that stays open and listens", () => {
 
         const echoed = env.events
             .filter(AgentUserMessage.is)
-            .map((event) => event.data.text)
+            .map((event) => event.payload.text)
         assert.deepEqual(echoed, ["first"])
     })
 })
@@ -137,11 +138,11 @@ describe("a finished turn is something the sessions can hear", () => {
 
         const results = env.events.filter(AgentResult.is)
         assert.deepEqual(
-            results.map((event) => event.data.resultText),
+            results.map((event) => event.payload.resultText),
             ["here is the plan"],
         )
-        assert.equal(results[0]!.data.agentId, "planner")
-        assert.equal(results[0]!.data.isError, false)
+        assert.equal(results[0]!.payload.agentId, "planner")
+        assert.equal(results[0]!.payload.isError, false)
     })
 
     it("stays silent mid-turn, while the model is still calling tools", async () => {
@@ -166,7 +167,7 @@ describe("a finished turn is something the sessions can hear", () => {
         // One turn, one terminal: a session that heard the mid-turn text would
         // treat "publishing S1 now" as the plan.
         assert.deepEqual(
-            env.events.filter(AgentResult.is).map((event) => event.data.resultText),
+            env.events.filter(AgentResult.is).map((event) => event.payload.resultText),
             ["fragment admitted"],
         )
     })
@@ -191,7 +192,7 @@ describe("a finished turn is something the sessions can hear", () => {
         p.sendUserMessage("go")
         await p.done
 
-        const usage = env.events.filter(AgentResult.is)[0]!.data.usage
+        const usage = env.events.filter(AgentResult.is)[0]!.payload.usage
         assert.deepEqual(usage, {
             input_tokens: 1_000,
             output_tokens: 40,
@@ -217,7 +218,7 @@ describe("a peer's finding reaches a session that is still reading", () => {
                 : {}),
         })
 
-    function scout(authority: BaseObserver) {
+    function scout(authority: BusMember) {
         return new MozaikModelParticipant({
             agentId: "scout:s1:Q1",
             model: silentModel(),
@@ -232,7 +233,7 @@ describe("a peer's finding reaches a session that is still reading", () => {
     }
 
     it("hands it to the model as something to read", async () => {
-        const board = new (class extends BaseObserver {})()
+        const board = new (class extends BusMember {})()
         const p = scout(board)
         const seen = stubRounds(p, [[message("answer one")], [message("answer two")]])
         const env = joinWithCapture(p)
@@ -241,7 +242,7 @@ describe("a peer's finding reaches a session that is still reading", () => {
         p.sendUserMessage("Which module owns menu visibility?")
 
         await new Promise((r) => setTimeout(r, 5))
-        env.deliverSemanticEvent(board, note("scout:s1:Q1", true))
+        env.publish(board, note("scout:s1:Q1", true))
         p.closeStdin()
 
         const summary = await p.done
@@ -253,8 +254,8 @@ describe("a peer's finding reaches a session that is still reading", () => {
     })
 
     it("ignores a note from anyone but its own board", async () => {
-        const board = new (class extends BaseObserver {})()
-        const impostor = new (class extends BaseObserver {})()
+        const board = new (class extends BusMember {})()
+        const impostor = new (class extends BusMember {})()
         const p = scout(board)
         stubRounds(p, [[message("answer one")]])
         const env = joinWithCapture(p)
@@ -264,8 +265,8 @@ describe("a peer's finding reaches a session that is still reading", () => {
         p.sendUserMessage("Which module owns menu visibility?")
 
         await new Promise((r) => setTimeout(r, 5))
-        env.deliverSemanticEvent(impostor, note("scout:s1:Q1", true))
-        env.deliverSemanticEvent(board, note("scout:s1:Q2", true))
+        env.publish(impostor, note("scout:s1:Q1", true))
+        env.publish(board, note("scout:s1:Q2", true))
         p.closeStdin()
 
         const summary = await p.done
@@ -602,7 +603,7 @@ describe("a turn that runs out of tools answers, and the session lives on", () =
         assert.equal(summary.lastMessage, "answering with what I have")
         // The turn still published a terminal event — the session heard it.
         assert.equal(
-            env.events.filter(AgentResult.is)[0]!.data.resultText,
+            env.events.filter(AgentResult.is)[0]!.payload.resultText,
             "answering with what I have",
         )
     })

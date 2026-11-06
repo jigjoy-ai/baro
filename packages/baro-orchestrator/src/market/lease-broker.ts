@@ -1,4 +1,5 @@
-import type { Participant, SemanticEvent } from "../runtime/mozaik.js"
+import type { SemanticEvent } from "../runtime/mozaik.js"
+import type { BusMember } from "../runtime/coordination.js"
 import { randomUUID } from "node:crypto"
 
 import {
@@ -46,9 +47,9 @@ import {
 export interface LeaseBrokerOptions {
     runId: string
     /** Optional Board authority; setter form avoids the Board/Broker constructor cycle. */
-    offerAuthority?: Participant
+    offerAuthority?: BusMember
     /** Optional repository authority allowed to publish merge outcomes. */
-    integrationAuthority?: Participant
+    integrationAuthority?: BusMember
     parallel?: number
     intraLevelDelaySecs?: number
     claimTimeoutMs?: number
@@ -77,7 +78,7 @@ interface PendingClaim {
 }
 
 interface RegisteredWorker {
-    source: Participant
+    source: BusMember
     advertisement: WorkerCapabilityAdvertisedData
 }
 
@@ -95,7 +96,7 @@ export class LeaseBroker extends SerializedObserver {
      * themselves. This prevents a first-writer-wins advertisement or claim from
      * impersonating a configured StoryFactory.
      */
-    private readonly workerAuthorities = new Map<string, Participant>()
+    private readonly workerAuthorities = new Map<string, BusMember>()
     private readonly offers = new Map<string, WorkOfferedData>()
     private readonly earlyClaims = new Map<string, WorkClaimedData>()
     private readonly workers = new Map<string, RegisteredWorker>()
@@ -124,10 +125,10 @@ export class LeaseBroker extends SerializedObserver {
     private nextGrantAt = 0
     private grantTimer: ReturnType<typeof setTimeout> | null = null
     private stopped = false
-    private offerAuthority: Participant | null
-    private integrationAuthority: Participant | null
-    private qualityAuthority: Participant | null = null
-    private blockAuthority: Participant | null = null
+    private offerAuthority: BusMember | null
+    private integrationAuthority: BusMember | null
+    private qualityAuthority: BusMember | null = null
+    private blockAuthority: BusMember | null = null
 
     constructor(opts: LeaseBrokerOptions) {
         super()
@@ -146,7 +147,7 @@ export class LeaseBroker extends SerializedObserver {
     }
 
     /** Bind the only Board allowed to publish work offers. */
-    setOfferAuthority(authority: Participant): void {
+    setOfferAuthority(authority: BusMember): void {
         if (this.offerAuthority && this.offerAuthority !== authority) {
             throw new Error("lease broker offer authority is already bound")
         }
@@ -154,7 +155,7 @@ export class LeaseBroker extends SerializedObserver {
     }
 
     /** Bind the only repository participant allowed to settle merge outcomes. */
-    setIntegrationAuthority(authority: Participant): void {
+    setIntegrationAuthority(authority: BusMember): void {
         if (
             this.integrationAuthority &&
             this.integrationAuthority !== authority
@@ -165,7 +166,7 @@ export class LeaseBroker extends SerializedObserver {
     }
 
     /** Bind the only participant allowed to fail a lease on quality policy. */
-    setQualityAuthority(authority: Participant): void {
+    setQualityAuthority(authority: BusMember): void {
         if (this.qualityAuthority && this.qualityAuthority !== authority) {
             throw new Error("lease broker quality authority is already bound")
         }
@@ -173,7 +174,7 @@ export class LeaseBroker extends SerializedObserver {
     }
 
     /** Bind the only Board allowed to suspend a lease on a dependency. */
-    setBlockAuthority(authority: Participant): void {
+    setBlockAuthority(authority: BusMember): void {
         if (this.blockAuthority && this.blockAuthority !== authority) {
             throw new Error("lease broker block authority is already bound")
         }
@@ -181,7 +182,7 @@ export class LeaseBroker extends SerializedObserver {
     }
 
     /** Bind one configured worker id to its exact live StoryFactory object. */
-    setWorkerAuthority(workerId: string, authority: Participant): void {
+    setWorkerAuthority(workerId: string, authority: BusMember): void {
         if (!workerId.trim() || workerId !== workerId.trim()) {
             throw new Error("lease broker workerId must be a trimmed, non-empty string")
         }
@@ -195,7 +196,7 @@ export class LeaseBroker extends SerializedObserver {
     protected override handleEvent(context: SerializedEventContext): void {
         const { event } = context
         if (WorkerCapabilityAdvertised.is(event)) {
-            this.onCapability(event.data, context.source)
+            this.onCapability(event.payload, context.source)
             return
         }
         if (WorkOffered.is(event)) {
@@ -203,7 +204,7 @@ export class LeaseBroker extends SerializedObserver {
                 this.offerAuthority !== null &&
                 context.source !== this.offerAuthority
             ) return
-            this.onOffer(event.data)
+            this.onOffer(event.payload)
             return
         }
         if (WorkOfferRetractionRequested.is(event)) {
@@ -211,16 +212,16 @@ export class LeaseBroker extends SerializedObserver {
                 this.offerAuthority !== null &&
                 context.source !== this.offerAuthority
             ) return
-            this.onOfferRetraction(event.data)
+            this.onOfferRetraction(event.payload)
             return
         }
         if (WorkBid.is(event)) {
-            if (this.opts.market) this.onBid(event.data, context.source)
+            if (this.opts.market) this.onBid(event.payload, context.source)
             return
         }
         if (WorkBidWindowClosed.is(event)) {
             if (this.opts.market && context.internal) {
-                this.onBidWindowClosed(event.data)
+                this.onBidWindowClosed(event.payload)
             }
             return
         }
@@ -228,38 +229,38 @@ export class LeaseBroker extends SerializedObserver {
             // In market mode only the Broker's selected bid may claim work.
             // The selected claim is accepted directly and its bus copy is
             // visibility/audit only, so every external claim is a bypass.
-            if (!this.opts.market) this.onClaim(event.data, context.source)
+            if (!this.opts.market) this.onClaim(event.payload, context.source)
             return
         }
         if (WorkBlockAccepted.is(event)) {
-            const lease = this.activeByStory.get(event.data.storyId)
+            const lease = this.activeByStory.get(event.payload.storyId)
             if (
                 this.blockAuthority === null ||
                 context.source !== this.blockAuthority ||
                 lease?.supportsCooperativeSuspend !== true ||
                 !this.workers.has(lease.workerId) ||
                 !this.matchesLeaseGeneration(
-                    event.data.storyId,
-                    event.data.runId,
-                    event.data.leaseId,
-                    event.data.generation,
+                    event.payload.storyId,
+                    event.payload.runId,
+                    event.payload.leaseId,
+                    event.payload.generation,
                 )
             ) return
-            const existing = this.dependencyBlocks.get(event.data.storyId)
+            const existing = this.dependencyBlocks.get(event.payload.storyId)
             if (
-                existing?.leaseId === event.data.leaseId &&
-                existing.generation === event.data.generation &&
-                existing.blockId === event.data.blockId
+                existing?.leaseId === event.payload.leaseId &&
+                existing.generation === event.payload.generation &&
+                existing.blockId === event.payload.blockId
             ) return
-            this.dependencyBlocks.set(event.data.storyId, {
-                leaseId: event.data.leaseId,
-                generation: event.data.generation,
-                blockId: event.data.blockId,
+            this.dependencyBlocks.set(event.payload.storyId, {
+                leaseId: event.payload.leaseId,
+                generation: event.payload.generation,
+                blockId: event.payload.blockId,
             })
             // Execution expiry is no longer meaningful once a durable block
             // was accepted. Replace it with a bounded drain watchdog; expiry
             // remains fail-closed and never releases/cleans a live worktree.
-            this.clearLeaseTimer(event.data.leaseId)
+            this.clearLeaseTimer(event.payload.leaseId)
             this.armLeaseTimer(
                 lease,
                 this.opts.suspensionTimeoutMs ?? 60_000,
@@ -268,23 +269,23 @@ export class LeaseBroker extends SerializedObserver {
             return
         }
         if (WorkSuspended.is(event)) {
-            const lease = this.activeByStory.get(event.data.storyId)
-            const block = this.dependencyBlocks.get(event.data.storyId)
+            const lease = this.activeByStory.get(event.payload.storyId)
+            const block = this.dependencyBlocks.get(event.payload.storyId)
             const worker = lease ? this.workers.get(lease.workerId) : undefined
             if (
                 !lease ||
                 !block ||
                 worker?.source !== context.source ||
                 lease.supportsCooperativeSuspend !== true ||
-                event.data.runId !== this.opts.runId ||
-                event.data.leaseId !== lease.leaseId ||
-                event.data.generation !== lease.generation ||
-                event.data.blockId !== block.blockId ||
-                !validSuspensionSummary(event.data.attempts, event.data.durationSecs)
+                event.payload.runId !== this.opts.runId ||
+                event.payload.leaseId !== lease.leaseId ||
+                event.payload.generation !== lease.generation ||
+                event.payload.blockId !== block.blockId ||
+                !validSuspensionSummary(event.payload.attempts, event.payload.durationSecs)
             ) return
-            this.release(event.data.storyId, "dependency_blocked", {
-                attempts: event.data.attempts,
-                durationSecs: event.data.durationSecs,
+            this.release(event.payload.storyId, "dependency_blocked", {
+                attempts: event.payload.attempts,
+                durationSecs: event.payload.durationSecs,
             })
             return
         }
@@ -293,8 +294,8 @@ export class LeaseBroker extends SerializedObserver {
                 this.integrationAuthority !== null &&
                 context.source !== this.integrationAuthority
             ) return
-            if (!this.matchesLease(event.data.storyId, event.data.runId, event.data.leaseId)) return
-            this.release(event.data.storyId, "integrated")
+            if (!this.matchesLease(event.payload.storyId, event.payload.runId, event.payload.leaseId)) return
+            this.release(event.payload.storyId, "integrated")
             return
         }
         if (StoryMergeFailed.is(event)) {
@@ -302,8 +303,8 @@ export class LeaseBroker extends SerializedObserver {
                 this.integrationAuthority !== null &&
                 context.source !== this.integrationAuthority
             ) return
-            if (!this.matchesLease(event.data.storyId, event.data.runId, event.data.leaseId)) return
-            this.release(event.data.storyId, "integration_failed")
+            if (!this.matchesLease(event.payload.storyId, event.payload.runId, event.payload.leaseId)) return
+            this.release(event.payload.storyId, "integration_failed")
             return
         }
         if (StorySpawnFailed.is(event)) {
@@ -311,11 +312,11 @@ export class LeaseBroker extends SerializedObserver {
                 this.opts.outcomeAuthority &&
                 !this.opts.outcomeAuthority.matchesSpawnFailure(
                     context.source,
-                    event.data,
+                    event.payload,
                 )
             ) return
-            if (!this.matchesLease(event.data.storyId, event.data.runId, event.data.leaseId)) return
-            this.release(event.data.storyId, "spawn_failed")
+            if (!this.matchesLease(event.payload.storyId, event.payload.runId, event.payload.leaseId)) return
+            this.release(event.payload.storyId, "spawn_failed")
             return
         }
         if (StoryResult.is(event)) {
@@ -323,21 +324,21 @@ export class LeaseBroker extends SerializedObserver {
                 this.opts.outcomeAuthority &&
                 !this.opts.outcomeAuthority.matchesResult(
                     context.source,
-                    event.data,
+                    event.payload,
                 )
             ) return
-            const lease = this.activeByStory.get(event.data.storyId)
+            const lease = this.activeByStory.get(event.payload.storyId)
             if (
                 !lease ||
-                event.data.runId !== this.opts.runId ||
-                event.data.leaseId !== lease.leaseId ||
-                event.data.generation !== lease.generation
+                event.payload.runId !== this.opts.runId ||
+                event.payload.leaseId !== lease.leaseId ||
+                event.payload.generation !== lease.generation
             ) return
             // A terminal result is not proof that descendants/tool promises
             // have drained. Only the exact worker's WorkSuspended ACK may
             // release an accepted dependency block.
-            if (this.dependencyBlocks.has(event.data.storyId)) return
-            if (event.data.success) {
+            if (this.dependencyBlocks.has(event.payload.storyId)) return
+            if (event.payload.success) {
                 const completion = this.completionByLeaseId.get(lease.leaseId)
                 if (!completion || completion.executionSucceeded) return
                 completion.executionSucceeded = true
@@ -348,15 +349,15 @@ export class LeaseBroker extends SerializedObserver {
                 this.maybeArmIntegrationTimer(lease, completion)
             } else {
                 if (
-                    isProviderCapacityFailure(event.data) &&
-                    isPermanentCapacityFailure(event.data.failure?.code)
+                    isProviderCapacityFailure(event.payload) &&
+                    isPermanentCapacityFailure(event.payload.failure?.code)
                 ) {
                     this.suppressLeaseRoute(lease)
                 }
                 this.release(
-                    event.data.storyId,
-                    event.data.failure &&
-                    !isSemanticWorkFailure(event.data.failure)
+                    event.payload.storyId,
+                    event.payload.failure &&
+                    !isSemanticWorkFailure(event.payload.failure)
                         ? "operational_failed"
                         : "execution_failed",
                 )
@@ -364,28 +365,28 @@ export class LeaseBroker extends SerializedObserver {
             return
         }
         if (StoryQualityCompleted.is(event)) {
-            const qualityLease = this.activeByStory.get(event.data.storyId)
+            const qualityLease = this.activeByStory.get(event.payload.storyId)
             if (
                 this.qualityAuthority === null ||
                 context.source !== this.qualityAuthority ||
                 qualityLease?.request.requiresQualityReview !== true ||
                 !this.matchesLeaseGeneration(
-                    event.data.storyId,
-                    event.data.runId,
-                    event.data.leaseId,
-                    event.data.generation,
+                    event.payload.storyId,
+                    event.payload.runId,
+                    event.payload.leaseId,
+                    event.payload.generation,
                 )
             ) return
-            if (event.data.status === "passed") {
-                const lease = this.activeByStory.get(event.data.storyId)!
+            if (event.payload.status === "passed") {
+                const lease = this.activeByStory.get(event.payload.storyId)!
                 const completion = this.completionByLeaseId.get(lease.leaseId)
                 if (!completion || completion.qualityPassed) return
                 completion.qualityPassed = true
                 this.maybeArmIntegrationTimer(lease, completion)
             } else {
                 this.release(
-                    event.data.storyId,
-                    event.data.status === "inconclusive"
+                    event.payload.storyId,
+                    event.payload.status === "inconclusive"
                         ? "quality_inconclusive"
                         : "quality_failed",
                 )
@@ -395,23 +396,23 @@ export class LeaseBroker extends SerializedObserver {
         if (
             WorkLeaseExpired.is(event) &&
             context.internal &&
-            this.matchesLease(event.data.storyId, event.data.runId, event.data.leaseId)
+            this.matchesLease(event.payload.storyId, event.payload.runId, event.payload.leaseId)
         ) {
-            if (this.dependencyBlocks.has(event.data.storyId)) {
+            if (this.dependencyBlocks.has(event.payload.storyId)) {
                 // Accepted suspension already asked the harness to abort.
                 // Never release/clean its worktree until the exact worker's
                 // WorkSuspended ACK proves that the process actually quiesced.
                 return
             }
-            this.release(event.data.storyId, "expired")
+            this.release(event.payload.storyId, "expired")
             return
         }
         if (RunCompleted.is(event)) {
             if (
                 (this.offerAuthority !== null &&
                     context.source !== this.offerAuthority) ||
-                (event.data.runId !== undefined &&
-                    event.data.runId !== this.opts.runId)
+                (event.payload.runId !== undefined &&
+                    event.payload.runId !== this.opts.runId)
             ) return
             this.stop()
         }
@@ -531,7 +532,7 @@ export class LeaseBroker extends SerializedObserver {
 
     private onCapability(
         advertisement: WorkerCapabilityAdvertisedData,
-        source: Participant,
+        source: BusMember,
     ): void {
         const authority = this.workerAuthorities.get(advertisement.workerId)
         if (
@@ -550,7 +551,7 @@ export class LeaseBroker extends SerializedObserver {
         })
     }
 
-    private onBid(bid: WorkBidData, source: Participant): void {
+    private onBid(bid: WorkBidData, source: BusMember): void {
         if (
             this.stopped ||
             bid.runId !== this.opts.runId ||
@@ -652,7 +653,7 @@ export class LeaseBroker extends SerializedObserver {
         )
     }
 
-    private isRegisteredBid(bid: WorkBidData, source?: Participant): boolean {
+    private isRegisteredBid(bid: WorkBidData, source?: BusMember): boolean {
         if (
             !bid.bidId ||
             !bid.workerId ||
@@ -683,7 +684,7 @@ export class LeaseBroker extends SerializedObserver {
         if (!byId.has(bid.bidId)) byId.set(bid.bidId, snapshotBid(bid))
     }
 
-    private onClaim(claim: WorkClaimedData, source?: Participant): void {
+    private onClaim(claim: WorkClaimedData, source?: BusMember): void {
         if (
             this.stopped ||
             claim.runId !== this.opts.runId ||
@@ -706,7 +707,7 @@ export class LeaseBroker extends SerializedObserver {
 
     private isRegisteredClaim(
         claim: WorkClaimedData,
-        source: Participant | undefined,
+        source: BusMember | undefined,
     ): boolean {
         if (!source || !claim.workerId || !claim.backend || !claim.model) return false
         const authority = this.workerAuthorities.get(claim.workerId)
@@ -1022,9 +1023,9 @@ export class LeaseBroker extends SerializedObserver {
         this.pending.length = 0
     }
 
-    private emit(event: SemanticEvent<unknown>): void {
-        for (const env of this.getEnvironments()) {
-            env.deliverSemanticEvent(this, event)
+    private emit(event: SemanticEvent<string, unknown>): void {
+        for (const env of this.getBuses()) {
+            env.publish(this, event)
         }
     }
 }

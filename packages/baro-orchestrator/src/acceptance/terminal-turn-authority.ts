@@ -1,4 +1,5 @@
-import type { Participant, SemanticEvent } from "../runtime/mozaik.js"
+import type { SemanticEvent } from "../runtime/mozaik.js"
+import type { BusMember } from "../runtime/coordination.js"
 
 import type { StoryOutcomeAuthority } from "../runtime/story-outcome-authority.js"
 import { AgentResult, AgentTurnCompleted } from "../semantic-events.js"
@@ -9,7 +10,7 @@ export interface TerminalTurnAuthorityOptions {
     /** Collective registry for native AgentResult producers. */
     outcomeAuthority?: StoryOutcomeAuthority
     /** Exact projector allowed to publish normalized CLI terminal turns. */
-    terminalProjectorAuthority?: Participant
+    terminalProjectorAuthority?: BusMember
 }
 
 /**
@@ -22,8 +23,8 @@ export interface TerminalTurnAuthorityOptions {
  * be bound exactly by orchestrate().
  */
 export function isAuthorizedTerminalTurn(
-    source: Participant,
-    event: SemanticEvent<unknown>,
+    source: BusMember,
+    event: SemanticEvent<string, unknown>,
     input: CriticInput,
     authorities: TerminalTurnAuthorityOptions,
 ): boolean {

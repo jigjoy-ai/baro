@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, it } from "node:test"
 
-import type { Participant } from "../../../src/runtime/mozaik.js"
+import type { BusMember } from "../../../src/runtime/coordination.js"
 
 import { OpenCodeStoryAgent } from "../../../src/harness/opencode/story-agent.js"
 import { PROCESS_TREE_CAPABILITIES } from "../../../src/harness/process-tree.js"
@@ -50,7 +50,7 @@ printf '%s\n' \
                 // freshly-created temp binary; this is not the behavior under test.
                 timeoutSecs: FIXTURE_TIMEOUT_SECS,
             })
-            const terminalSources: Participant[] = []
+            const terminalSources: BusMember[] = []
             agent.setTerminalSourceRegistrar((source) => terminalSources.push(source))
 
             const outcome = await agent.run(env)
@@ -63,10 +63,10 @@ printf '%s\n' \
             assert.equal(outcome.finalSummary?.sawStepFinish, true)
             assert.equal(outcome.finalSummary?.toolCallCount, 1)
             assert.ok(event)
-            assert.equal(event.data.storyId, "story-opencode")
-            assert.equal(event.data.success, true)
-            assert.equal(event.data.attempts, 1)
-            assert.equal(event.data.error, null)
+            assert.equal(event.payload.storyId, "story-opencode")
+            assert.equal(event.payload.success, true)
+            assert.equal(event.payload.attempts, 1)
+            assert.equal(event.payload.error, null)
             assert.equal(terminalSources.length, 1)
             assert.equal(terminalSources[0]?.agentId, "story-opencode")
         })
@@ -126,7 +126,7 @@ process.exit(0)
                 const projector = source("projector")
                 const critic = source("critic")
                 const terminalSources: Array<
-                    Participant & { getPhase?(): string }
+                    BusMember & { getPhase?(): string }
                 > = []
                 const originalPrompt =
                     "Implement request cancellation and its race test."
@@ -146,7 +146,7 @@ process.exit(0)
                 })
                 agent.setTerminalSourceRegistrar((participant) => {
                     terminalSources.push(
-                        participant as Participant & { getPhase?(): string },
+                        participant as BusMember & { getPhase?(): string },
                     )
                 })
                 agent.join(env)
@@ -155,7 +155,7 @@ process.exit(0)
                 await waitUntil(
                     () => terminalSources[0]?.getPhase?.() === "done",
                 )
-                env.deliverSemanticEvent(
+                env.publish(
                     projector,
                     AgentTurnCompleted.create({
                         agentId: agent.agentId,
@@ -166,7 +166,7 @@ process.exit(0)
                         canContinue: false,
                     }),
                 )
-                env.deliverSemanticEvent(
+                env.publish(
                     critic,
                     Critique.create({
                         agentId: agent.agentId,
@@ -189,7 +189,7 @@ process.exit(0)
                 await waitUntil(
                     () => terminalSources[1]?.getPhase?.() === "done",
                 )
-                env.deliverSemanticEvent(
+                env.publish(
                     projector,
                     AgentTurnCompleted.create({
                         agentId: agent.agentId,
@@ -200,7 +200,7 @@ process.exit(0)
                         canContinue: false,
                     }),
                 )
-                env.deliverSemanticEvent(
+                env.publish(
                     critic,
                     Critique.create({
                         agentId: agent.agentId,
@@ -296,11 +296,11 @@ printf '%s\n' \
             assert.equal(outcome.finalSummary?.toolCallCount, 0)
             assert.equal(events.length, 1)
             assert.ok(event)
-            assert.equal(event.data.storyId, "story-opencode-retry")
-            assert.equal(event.data.success, false)
-            assert.equal(event.data.attempts, 2)
-            assert.equal(event.data.error, outcome.error)
-            assert.deepEqual(event.data.failure, outcome.failure)
+            assert.equal(event.payload.storyId, "story-opencode-retry")
+            assert.equal(event.payload.success, false)
+            assert.equal(event.payload.attempts, 2)
+            assert.equal(event.payload.error, outcome.error)
+            assert.deepEqual(event.payload.failure, outcome.failure)
         })
     })
 
@@ -346,8 +346,8 @@ process.exit(1)
                 code: "connection_reset",
             })
             assert.ok(event)
-            assert.equal(event.data.attempts, 1)
-            assert.deepEqual(event.data.failure, outcome.failure)
+            assert.equal(event.payload.attempts, 1)
+            assert.deepEqual(event.payload.failure, outcome.failure)
         })
     })
 
@@ -377,7 +377,7 @@ process.exit(1)
                 code: "process_spawn_failed",
             })
             assert.ok(event)
-            assert.deepEqual(event.data.failure, outcome.failure)
+            assert.deepEqual(event.payload.failure, outcome.failure)
         })
     })
 })

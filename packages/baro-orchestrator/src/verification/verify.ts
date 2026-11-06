@@ -22,6 +22,7 @@ import type { VerificationCommandOutput } from "../events/verification.js"
 import { execFileCli } from "../harness/exec-file-cli.js"
 import { activityIdleTimeoutMs } from "../harness/liveness.js"
 import { emit, type BaroEvent } from "../tui-protocol.js"
+import { resolvePytestRunner } from "./python-env.js"
 import { cargoEnvFor } from "./cargo-env.js"
 import { resolveCommandCwd, RETRY_BACKOFF_MS, spawnRunCwd } from "./command-cwd.js"
 import type { VerifyCwdResolver } from "./command-cwd.js"
@@ -136,6 +137,9 @@ export interface VerifyCommandSpec {
     canonicalDeclaredFocus?: "rstest"
     /** Paths that must still resolve beneath command cwd immediately pre-spawn. */
     containedPaths?: readonly VerifyContainedPath[]
+    /** `args` are pytest's; the interpreter is resolved (or provisioned) at
+     * spawn time, because the tree it must run in only exists then. */
+    pytest?: true
     /** Absent means "detected", i.e. run-level. Story-declared tests already
      *  get a retry from their own perimeter loop and must not get a second. */
     readonly origin?: "detected" | "declared"
@@ -1336,8 +1340,22 @@ async function runCmd(
             }
         }
     }
+    let tool = c.tool
+    let args = c.args
+    if (c.pytest) {
+        const runner = await resolvePytestRunner(commandCwd)
+        if ("missing" in runner) {
+            return {
+                status: "skipped",
+                durationMs: Date.now() - startedAt,
+                tail: `pytest could not run: ${runner.missing}`,
+            }
+        }
+        tool = runner.python
+        args = ["-m", "pytest", ...c.args]
+    }
     try {
-        const result = await execFileCli(c.tool, c.args, {
+        const result = await execFileCli(tool, args, {
             cwd: commandCwd,
             ...(c.tool === "cargo" ? { env: cargoEnvFor(hostRepoRoot) } : {}),
             // execFileCli's awake-clock window is the only one that sees

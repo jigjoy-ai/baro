@@ -2,16 +2,14 @@ import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
 import {
-    AgenticEnvironment,
-    BaseObserver,
     FunctionCallItem,
     ModelMessageItem,
     type ContextItem,
-    type GenerativeModel,
     type ModelContext,
-    type Participant,
     type SemanticEvent,
 } from "../../src/runtime/mozaik.js"
+import type { InferenceModel } from "../../src/harness/openai/runtime.js"
+import { BusMember, CoordinationBus } from "../../src/runtime/coordination.js"
 import {
     PlanFragmentAdmitted,
     PlanFragmentProposed,
@@ -50,28 +48,28 @@ const FRAGMENT_STORY = {
 }
 
 /** Admits every proposed fragment, as the Board would on a clean plan. */
-class AlwaysAdmit extends BaseObserver {
+class AlwaysAdmit extends BusMember {
     readonly proposed: string[] = []
     private version = 1
 
     override onExternalEvent(
-        _source: Participant,
-        event: SemanticEvent<unknown>,
+        _source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): void {
         if (!PlanFragmentProposed.is(event)) return
-        this.proposed.push(event.data.fragmentId)
+        this.proposed.push(event.payload.fragmentId)
         const admitted = PlanFragmentAdmitted.create({
-            runId: event.data.runId,
-            planningId: event.data.planningId,
-            fragmentId: event.data.fragmentId,
+            runId: event.payload.runId,
+            planningId: event.payload.planningId,
+            fragmentId: event.payload.fragmentId,
             graphVersion: ++this.version,
-            storyIds: event.data.stories.map(
+            storyIds: event.payload.stories.map(
                 (item) => (item as { id: string }).id,
             ),
             droppedEdges: [],
         })
-        for (const environment of this.getEnvironments()) {
-            environment.deliverSemanticEvent(this, admitted)
+        for (const environment of this.getBuses()) {
+            environment.publish(this, admitted)
         }
     }
 }
@@ -91,7 +89,7 @@ class ScriptedPlanner extends MozaikModelParticipant {
             model: {
                 specification: { name: "scripted" },
                 setTools: () => {},
-            } as unknown as GenerativeModel,
+            } as unknown as InferenceModel,
             systemPrompt: "scripted",
         })
     }
@@ -165,16 +163,16 @@ describe("progressive planning on a lane with no process", () => {
     it("publishes a fragment, reads the host's receipt, and finalizes", async () => {
         const lane = new ScriptedPlannerLane()
         registerLane("fake-native-planner", () => lane)
-        const env = new AgenticEnvironment("planner-bus-native-test")
+        const env = new CoordinationBus("planner-bus-native-test")
         const feed = new PlanningFeed()
         const board = new AlwaysAdmit()
         const completed: unknown[] = []
-        const watcher = new (class extends BaseObserver {
+        const watcher = new (class extends BusMember {
             override onExternalEvent(
-                _source: Participant,
-                event: SemanticEvent<unknown>,
+                _source: BusMember,
+                event: SemanticEvent<string, unknown>,
             ): void {
-                if (PlanningStreamCompleted.is(event)) completed.push(event.data)
+                if (PlanningStreamCompleted.is(event)) completed.push(event.payload)
             }
         })()
         feed.join(env)

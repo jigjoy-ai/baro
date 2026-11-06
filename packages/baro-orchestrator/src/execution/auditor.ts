@@ -8,22 +8,20 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync } from "fs"
 import { dirname } from "path"
 
 import {
-    BaseObserver,
     FunctionCallItem,
     FunctionCallOutputItem,
     ModelMessageItem,
-    Participant,
     ReasoningItem,
     SemanticEvent,
+    toWire,
 } from "../runtime/mozaik.js"
+import { BusMember } from "../runtime/coordination.js"
 
 import { ClaudeStreamChunk } from "../semantic-events.js"
 
-// Auditor never calls `.toJSON()` itself — `JSON.stringify` invokes it
-// per-item where it exists and falls back to enumerable properties for
-// `SemanticEvent`.
+// Entries keep Mozaik 3's wire shape (`toWire`): replay tooling reads `{ type, data }` events.
 type AuditableItem =
-    | SemanticEvent<unknown>
+    | SemanticEvent<string, unknown>
     | ModelMessageItem
     | FunctionCallItem
     | FunctionCallOutputItem
@@ -38,13 +36,13 @@ export interface AuditorOptions {
      */
     skipStreamChunks?: boolean
     /** Event is written iff this returns true. Runs after `skipStreamChunks`. */
-    filter?: (source: Participant, event: AuditableItem) => boolean
+    filter?: (source: BusMember, event: AuditableItem) => boolean
 }
 
-export class Auditor extends BaseObserver {
+export class Auditor extends BusMember {
     private readonly path: string
     private readonly skipStreamChunks: boolean
-    private readonly filter?: (source: Participant, event: AuditableItem) => boolean
+    private readonly filter?: (source: BusMember, event: AuditableItem) => boolean
     /** Per-log one-way correlation key. Raw lease bearers must never become a
      * credential oracle for unsandboxed sibling workers. */
     private readonly leaseFingerprintKey = randomBytes(32)
@@ -69,32 +67,32 @@ export class Auditor extends BaseObserver {
     }
 
     override async onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): Promise<void> {
         this.write(source, event)
     }
 
-    override async onExternalModelMessage(source: Participant, item: ModelMessageItem): Promise<void> {
+    override async onExternalModelMessage(source: BusMember, item: ModelMessageItem): Promise<void> {
         this.write(source, item)
     }
 
-    override async onExternalFunctionCall(source: Participant, item: FunctionCallItem): Promise<void> {
+    override async onExternalFunctionCall(source: BusMember, item: FunctionCallItem): Promise<void> {
         this.write(source, item)
     }
 
     override async onExternalFunctionCallOutput(
-        source: Participant,
+        source: BusMember,
         item: FunctionCallOutputItem,
     ): Promise<void> {
         this.write(source, item)
     }
 
-    override async onExternalReasoning(source: Participant, item: ReasoningItem): Promise<void> {
+    override async onExternalReasoning(source: BusMember, item: ReasoningItem): Promise<void> {
         this.write(source, item)
     }
 
-    private write(source: Participant, item: AuditableItem): void {
+    private write(source: BusMember, item: AuditableItem): void {
         if (this.disabled) return
         if (
             this.skipStreamChunks &&
@@ -107,7 +105,7 @@ export class Auditor extends BaseObserver {
         const entry = {
             ts: new Date().toISOString(),
             source: this.sourceLabel(source),
-            item,
+            item: toWire(item),
         }
         try {
             appendFileSync(this.path, this.serialize(entry) + "\n", {
@@ -148,7 +146,7 @@ export class Auditor extends BaseObserver {
         )
     }
 
-    private sourceLabel(source: Participant): string {
+    private sourceLabel(source: BusMember): string {
         const ctor = source.constructor.name
         const idCandidate = (source as unknown as { agentId?: string }).agentId
         return typeof idCandidate === "string" ? `${ctor}:${idCandidate}` : ctor

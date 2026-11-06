@@ -10,6 +10,7 @@ import {
     type Metric,
     type ModelInvocationMeasuredData,
 } from "../../src/telemetry/model-telemetry.js"
+import { toWire } from "../../src/runtime/mozaik.js"
 import { ModelInvocationMeasured } from "../../src/semantic-events.js"
 
 const unknown = () => unknownMetric("not_reported")
@@ -271,7 +272,7 @@ describe("ModelInvocationMeasured semantic event", () => {
             durationMs: knownMetric(0, "cli_result"),
         })
         const event = ModelInvocationMeasured.create(data)
-        const roundTrip = JSON.parse(JSON.stringify(event)) as {
+        const roundTrip = JSON.parse(JSON.stringify(toWire(event))) as {
             type: string
             data: ModelInvocationMeasuredData
         }

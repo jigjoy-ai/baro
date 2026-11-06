@@ -37,8 +37,8 @@ export class DevinStoryAgent extends OneShotStoryAgent<DevinRunSummary> {
                     targetedMessageCorrelation: correlationOf(spec),
                 }),
             failureSignalFrom: (event) =>
-                DevinSystem.is(event) && event.data.subtype === "failed"
-                    ? event.data.raw
+                DevinSystem.is(event) && event.payload.subtype === "failed"
+                    ? event.payload.raw
                     : undefined,
             // `devin acp` exits 0 after any turn, so success needs positive
             // evidence: the prompt ended normally and a tool call completed.

@@ -200,12 +200,12 @@ describe("runtime replan semantic contract", () => {
         assert.ok(RuntimeReplanRejected.is(rejected))
         assert.deepEqual(
             {
-                runId: applied.data.runId,
-                proposalId: applied.data.proposalId,
-                sourceStoryId: applied.data.sourceStoryId,
-                leaseId: applied.data.leaseId,
-                generation: applied.data.generation,
-                baseGraphVersion: applied.data.baseGraphVersion,
+                runId: applied.payload.runId,
+                proposalId: applied.payload.proposalId,
+                sourceStoryId: applied.payload.sourceStoryId,
+                leaseId: applied.payload.leaseId,
+                generation: applied.payload.generation,
+                baseGraphVersion: applied.payload.baseGraphVersion,
             },
             correlation,
         )
@@ -216,7 +216,7 @@ describe("runtime replan semantic contract", () => {
             model: "standard",
             retries: 1,
             timeoutSecs: 60,
-            graphVersion: applied.data.graphVersion,
+            graphVersion: applied.payload.graphVersion,
         }
         assert.equal(launch.graphVersion, 8)
     })

@@ -9,7 +9,6 @@
     "build": "tsc -p tsconfig.json",
     "dev": "tsc -p tsconfig.json --watch",
     "cli": "tsx scripts/cli.ts",
-    "experiment:ab": "tsx scripts/ab-run.ts",
     "test:billing-e2e": "tsx scripts/test-authoritative-billing-e2e.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --import ./test/env.ts --test --test-concurrency=2 \"test/**/*.test.ts\"",
@@ -18,8 +17,9 @@
   },
   "dependencies": {
     "@baro/memory": "*",
-    "@mozaik-ai/core": "3.12.0",
+    "@mozaik-ai/core": "4.2.0",
     "cross-spawn": "^7.0.6",
+    "openai": "^6.38.0",
     "ws": "^8.21.0"
   },
   "devDependencies": {

@@ -3,10 +3,12 @@
  * fallback) over the shared recovery leaf in execution/surgeon.ts.
  */
 
+import { CLAUDE_READ_ONLY_ARGS } from "./read-only.js"
 import { execFileCli } from "../exec-file-cli.js"
 import { ClaudeStreamResultCollector } from "./stream-result.js"
 
-import { BaseObserver, Participant, SemanticEvent } from "../../runtime/mozaik.js"
+import { SemanticEvent } from "../../runtime/mozaik.js"
+import { BusMember } from "../../runtime/coordination.js"
 
 import { harnessChildEnvironment } from "../environment.js"
 import {
@@ -85,7 +87,7 @@ interface SurgeonLlmTelemetry {
     cost: ModelCostMetrics
 }
 
-export class Surgeon extends BaseObserver {
+export class Surgeon extends BusMember {
     private readonly opts: Required<
         Pick<
             SurgeonOptions,
@@ -124,25 +126,25 @@ export class Surgeon extends BaseObserver {
         await Promise.allSettled([...this.pending])
     }
 
-    setLeaseAuthority(authority: Participant): void {
+    setLeaseAuthority(authority: BusMember): void {
         this.sources.setLeaseAuthority(authority)
     }
 
-    setQualityAuthority(authority: Participant): void {
+    setQualityAuthority(authority: BusMember): void {
         this.sources.setQualityAuthority(authority)
     }
 
-    setBlockAuthority(authority: Participant): void {
+    setBlockAuthority(authority: BusMember): void {
         this.sources.setBlockAuthority(authority)
     }
 
-    setCriticAuthority(authority: Participant): void {
+    setCriticAuthority(authority: BusMember): void {
         this.sources.setCriticAuthority(authority)
     }
 
     override async onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): Promise<void> {
         if (this.sources.observeLease(source, event, this.leases, this.opts.runId)) return
         if (!this.sources.accepts(source, event)) return
@@ -176,8 +178,8 @@ export class Surgeon extends BaseObserver {
                     return
                 }
                 this.replansEmitted += 1
-                for (const env of this.getEnvironments()) {
-                    env.deliverSemanticEvent(
+                for (const env of this.getBuses()) {
+                    env.publish(
                         this,
                         Replan.create(correlateRecoveryReplan(replan, failure)),
                     )
@@ -236,15 +238,15 @@ export class Surgeon extends BaseObserver {
             },
         }
         const event = ModelInvocationMeasured.create(data)
-        for (const env of this.getEnvironments()) {
-            env.deliverSemanticEvent(this, event)
+        for (const env of this.getBuses()) {
+            env.publish(this, event)
         }
     }
 
     private emitRecoveryStarted(failure: StoryResultData): void {
         if (!this.opts.emitRecoveryDecisions || !this.opts.runId) return
-        for (const env of this.getEnvironments()) {
-            env.deliverSemanticEvent(
+        for (const env of this.getBuses()) {
+            env.publish(
                 this,
                 RecoveryEvaluationStarted.create({
                     runId: this.opts.runId,
@@ -261,8 +263,8 @@ export class Surgeon extends BaseObserver {
         reason: string,
     ): void {
         if (!this.opts.emitRecoveryDecisions || !this.opts.runId) return
-        for (const env of this.getEnvironments()) {
-            env.deliverSemanticEvent(
+        for (const env of this.getBuses()) {
+            env.publish(
                 this,
                 RecoveryDecision.create({
                     runId: this.opts.runId,
@@ -315,8 +317,9 @@ export class Surgeon extends BaseObserver {
                     "--include-partial-messages",
                     "--model",
                     this.opts.model,
-                    "--permission-mode",
-                    "bypassPermissions",
+                    // The prompt carries story-authored failure text: the
+                    // Surgeon reads, it never writes or runs anything.
+                    ...CLAUDE_READ_ONLY_ARGS,
                     "--system-prompt",
                     SURGEON_SYSTEM_PROMPT,
                     "-p",

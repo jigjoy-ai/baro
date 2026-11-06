@@ -4,14 +4,13 @@ import { join } from "node:path"
 import { describe, it } from "node:test"
 
 import {
-    AgenticEnvironment,
-    BaseObserver,
     FunctionCallItem,
     ModelMessageItem,
     type ContextItem,
-    type GenerativeModel,
     type ModelContext,
 } from "../../src/runtime/mozaik.js"
+import type { InferenceModel } from "../../src/harness/openai/runtime.js"
+import { BusMember, CoordinationBus } from "../../src/runtime/coordination.js"
 import {
     ScoutFindingPublished,
     type SemanticEvent,
@@ -26,9 +25,9 @@ import type {
 } from "../../src/harness/interactive-participant.js"
 import { withTempDir } from "../execution/helpers.js"
 
-class Capture extends BaseObserver {
-    readonly events: SemanticEvent<unknown>[] = []
-    override onExternalEvent(_source: unknown, event: SemanticEvent<unknown>): void {
+class Capture extends BusMember {
+    readonly events: SemanticEvent<string, unknown>[] = []
+    override onExternalEvent(_source: unknown, event: SemanticEvent<string, unknown>): void {
         this.events.push(event)
     }
 }
@@ -106,7 +105,7 @@ class ScriptedNativeParticipant extends MozaikModelParticipant {
             model: {
                 specification: { name: "scripted" },
                 setTools: () => {},
-            } as unknown as GenerativeModel,
+            } as unknown as InferenceModel,
             systemPrompt: "scripted",
         })
     }
@@ -167,7 +166,7 @@ class EndlessReaderParticipant extends MozaikModelParticipant {
             model: {
                 specification: { name: "scripted" },
                 setTools: () => {},
-            } as unknown as GenerativeModel,
+            } as unknown as InferenceModel,
             systemPrompt: "scripted",
             tools: [
                 {
@@ -249,7 +248,7 @@ class SlowScoutParticipant extends MozaikModelParticipant {
             model: {
                 specification: { name: "scripted" },
                 setTools: () => {},
-            } as unknown as GenerativeModel,
+            } as unknown as InferenceModel,
             systemPrompt: "scripted",
         })
     }
@@ -298,7 +297,7 @@ class SlowScoutLane implements InteractiveLaneAdapter {
 describe("architect bus session", () => {
     it("asks, reads the answers, and repairs a rejected outcome", async () => {
         await withTempDir("baro-architect-bus-", async (dir) => {
-            const env = new AgenticEnvironment("architect-bus-test")
+            const env = new CoordinationBus("architect-bus-test")
             const capture = new Capture()
             capture.join(env)
             const lines: string[] = []
@@ -366,7 +365,7 @@ describe("architect bus session", () => {
     it("completes on a lane with no process, not only on the CLI", async () => {
         await withTempDir("baro-architect-bus-native-", async (dir) => {
             registerLane("fake-native", () => new ScriptedNativeLane())
-            const env = new AgenticEnvironment("architect-bus-native-test")
+            const env = new CoordinationBus("architect-bus-native-test")
             const capture = new Capture()
             capture.join(env)
 
@@ -404,7 +403,7 @@ describe("architect bus session", () => {
     it("stops surveying and asks, when the turn's budget is spent", async () => {
         await withTempDir("baro-architect-bus-budget-", async (dir) => {
             registerLane("fake-reader", () => new EndlessReaderLane())
-            const env = new AgenticEnvironment("architect-bus-budget-test")
+            const env = new CoordinationBus("architect-bus-budget-test")
 
             const result = await runArchitectBusSession({
                 systemPrompt: "You are the architect for this engineering run.",
@@ -437,7 +436,7 @@ describe("architect bus session", () => {
     it("does not call waiting for its own scouts idleness", async () => {
         await withTempDir("baro-architect-bus-idle-", async (dir) => {
             registerLane("fake-slow-scout", () => new SlowScoutLane())
-            const env = new AgenticEnvironment("architect-bus-idle-test")
+            const env = new CoordinationBus("architect-bus-idle-test")
 
             const result = await runArchitectBusSession({
                 systemPrompt: "You are the architect for this engineering run.",

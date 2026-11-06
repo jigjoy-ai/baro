@@ -183,6 +183,11 @@ export type BaroEvent =
           rewired: { id: string; depends_on: string[] }[]
       }
     | { type: "intervention"; id: string; source: string; action: string; reason: string }
+    /** A running story published a checkpoint; `admitted` started on it. */
+    | { type: "checkpoint"; id: string; sha: string; reason: string; admitted: string[] }
+    | { type: "checkpoint_withdrawn"; id: string; sha: string; reason: string; affected: string[] }
+    /** A running story took files beyond its declared writes. */
+    | { type: "paths_claimed"; id: string; granted: string[]; held: { path: string; owner: string }[] }
     | { type: "story_merged"; id: string; mode: "worktree" | "shared-tree" }
     | { type: "merge_failed"; id: string; error: string }
     | { type: "level_started"; ordinal: number; story_ids: string[] }
@@ -235,7 +240,9 @@ export type BaroEvent =
  * external harness — has no other way to tell how long anything took.
  */
 export function emit(event: BaroEvent): void {
-    const line = JSON.stringify({ ts: new Date().toISOString(), ...event }) + "\n"
+    const line = redactCapabilities(
+        JSON.stringify({ ts: new Date().toISOString(), ...event }),
+    ) + "\n"
     const accepted = process.stdout.write(line)
     if (!accepted && pendingDrain === null) {
         pendingDrain = new Promise<void>((resolve) => {
@@ -245,6 +252,18 @@ export function emit(event: BaroEvent): void {
             })
         })
     }
+}
+
+/**
+ * Story agents echo the collaboration command they ran, and it carries the
+ * lease's bearer token. The stream feeds terminals, logs and host apps, so a
+ * token never leaves in it. Works on the serialized line: a JSON-escaped
+ * quote is `\\"`.
+ */
+export function redactCapabilities(line: string): string {
+    return line
+        .replace(/(--token(?:=|\s+))(\\?"|')?[^\s"'\\]+/gu, "$1$2<redacted>")
+        .replace(/(Bearer\s+)[A-Za-z0-9._~+\/=-]+/gu, "$1<redacted>")
 }
 
 /**

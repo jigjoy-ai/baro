@@ -53,23 +53,23 @@ describe("CriticPi", () => {
                     env.events.findIndex(Critique.is),
             )
             assert.deepEqual(
-                critiques.map((event) => event.data.turn),
+                critiques.map((event) => event.payload.turn),
                 [1, 2, 3],
             )
-            assert.equal(critiques[0]!.data.verdict, "fail")
-            assert.equal(critiques[0]!.data.status, "evaluated")
-            assert.equal(critiques[0]!.data.modelUsed, "pi-default")
-            assert.deepEqual(critiques[0]!.data.violatedCriteria, [
+            assert.equal(critiques[0]!.payload.verdict, "fail")
+            assert.equal(critiques[0]!.payload.status, "evaluated")
+            assert.equal(critiques[0]!.payload.modelUsed, "pi-default")
+            assert.deepEqual(critiques[0]!.payload.violatedCriteria, [
                 "must include tests",
             ])
 
             assert.equal(messages.length, 2)
             assert.deepEqual(
-                messages.map((event) => event.data.metadata.emissionIndex),
+                messages.map((event) => event.payload.metadata.emissionIndex),
                 [1, 2],
             )
             assert.ok(
-                messages.every((event) => event.data.recipientId === "agent-a"),
+                messages.every((event) => event.payload.recipientId === "agent-a"),
             )
         })
     })
@@ -91,14 +91,14 @@ describe("CriticPi", () => {
             const messages = env.events.filter(AgentTargetedMessage.is)
 
             assert.equal(critiques.length, 1)
-            assert.equal(critiques[0]!.data.verdict, "fail")
-            assert.equal(critiques[0]!.data.status, "inconclusive")
-            assert.equal(critiques[0]!.data.modelUsed, "fake-pi-model")
+            assert.equal(critiques[0]!.payload.verdict, "fail")
+            assert.equal(critiques[0]!.payload.status, "inconclusive")
+            assert.equal(critiques[0]!.payload.modelUsed, "fake-pi-model")
             assert.match(
-                critiques[0]!.data.reasoning,
+                critiques[0]!.payload.reasoning,
                 /CriticPi LLM call failed: spawn .*missing-pi ENOENT/,
             )
-            assert.deepEqual(critiques[0]!.data.violatedCriteria, [
+            assert.deepEqual(critiques[0]!.payload.violatedCriteria, [
                 "[critic error — could not evaluate]",
             ])
             assert.equal(messages.length, 0)

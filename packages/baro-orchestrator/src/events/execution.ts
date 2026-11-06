@@ -1,7 +1,6 @@
 /** Story execution lifecycle: runs, levels, spawns, results, discovery, recovery. Wire `type` strings are frozen (see ../semantic-events.ts). */
 
 import { defineSemanticEvent } from "./define.js"
-import type { CoordinationMode } from "./market.js"
 import type { RunVerificationEvidence, RunVerificationStatus } from "./verification.js"
 
 // Orchestration control events
@@ -141,27 +140,18 @@ export const RecoveryDecision =
 export interface RunStartedData {
     project: string
     storyCount: number
-    /** Current durable runtime-DAG version. Optional for legacy/replay
-     * compatibility; collective control participants should provide it. */
+    /** Current durable runtime-DAG version. Optional for replay
+     * compatibility; control participants should provide it. */
     graphVersion?: number
     /** Full logical run set; optional for replay compatibility. */
     storyIds?: readonly string[]
     /** Stories already passed before this resume/continue run began. */
     completedStoryIds?: readonly string[]
-    /** Determines whether progress requires authoritative repository merge. */
-    coordinationMode?: CoordinationMode
     /** Execution mode from the intake contract ("focused" | "sequential" | "parallel"), when one was decided. */
     mode?: string
 }
 
 export const RunStarted = defineSemanticEvent<RunStartedData>("run_started")
-
-export interface LevelComputeRequestData {
-    reason: string
-}
-
-export const LevelComputeRequest =
-    defineSemanticEvent<LevelComputeRequestData>("level_compute_request")
 
 export interface LevelStartedData {
     ordinal: number
@@ -183,9 +173,8 @@ export const LevelCompleted =
     defineSemanticEvent<LevelCompletedData>("level_completed")
 
 /**
- * Conductor actually started a recovery level (visibility only; the
- * recovery flow itself stays hook-driven). `attempt` counts recovery
- * levels started in this run, 1-based.
+ * The Board actually started a recovery level (visibility only). `attempt`
+ * counts recovery levels started in this run, 1-based.
  */
 export interface RecoveryStartedData {
     attempt: number
@@ -230,6 +219,10 @@ export interface StorySpawnRequestData {
         reason: string
         branch?: string
     }
+    /** Started before these prerequisites integrated, on the checkpoints
+     * they published: the worktree merges each `sha` onto the run branch,
+     * and the story integrates only after every one of them has. */
+    checkpointBase?: ReadonlyArray<{ readonly storyId: string; readonly sha: string }>
     /** Present only on a re-offer of a host-suspended or unjudged story: the
      * spawn must go through the host-owned resume step so the recorded
      * creation SHA moves with the re-base instead of staying on a stale one. */
@@ -278,11 +271,30 @@ export interface GateRuleAnnouncedData {
     gateId: string
     /** Graph version whose application revised the rule. */
     graphVersion: number
+    /** Orders revisions within one graph version: a runtime path claim
+     * changes surfaces without changing the graph. */
+    surfaceRevision?: number
     surface?: StorySpawnRequestData["surface"]
 }
 
 export const GateRuleAnnounced =
     defineSemanticEvent<GateRuleAnnouncedData>("gate_rule_announced")
+
+export type PathClaimDecision =
+    | { path: string; outcome: "granted"; releasedBy?: string }
+    | { path: string; outcome: "already_owned" }
+    | { path: string; outcome: "held"; ownerStoryId: string }
+    | { path: string; outcome: "refused"; reason: string }
+
+/** A running story took paths beyond its declared writes, or was told who holds them. */
+export interface PathsClaimedData {
+    runId: string
+    storyId: string
+    decisions: PathClaimDecision[]
+}
+
+export const PathsClaimed =
+    defineSemanticEvent<PathsClaimedData>("paths_claimed")
 
 export interface StorySpawnedData {
     storyId: string
@@ -298,7 +310,7 @@ export interface StoryRoutedData {
     storyId: string
     backend: string
     model: string
-    /** Collective-only authority correlation; legacy routing omits it. */
+    /** Lease correlation; absent only when the spawn request carried none. */
     runId?: string
     leaseId?: string
     generation?: number
@@ -452,3 +464,50 @@ export interface StoryInterventionData {
 
 export const StoryIntervention =
     defineSemanticEvent<StoryInterventionData>("story_intervention")
+
+/**
+ * A running story offers a committed part of its work (an interface, fixtures,
+ * a schema) so dependents can start before it integrates. `changedPaths` is
+ * what its commits change since its own base.
+ */
+export interface StoryCheckpointRequestedData {
+    runId: string
+    storyId: string
+    leaseId: string
+    generation: number
+    sha: string
+    changedPaths: string[]
+    reason: string
+}
+
+export const StoryCheckpointRequested =
+    defineSemanticEvent<StoryCheckpointRequestedData>("story_checkpoint_requested")
+
+export interface StoryCheckpointDecidedData {
+    runId: string
+    storyId: string
+    leaseId: string
+    sha: string
+    outcome: "published" | "refused"
+    reason: string
+    /** Dependents admitted on this checkpoint by this decision. */
+    admitted: string[]
+    /** Dependents already running on an earlier checkpoint of this story. */
+    alreadyStarted: string[]
+}
+
+export const StoryCheckpointDecided =
+    defineSemanticEvent<StoryCheckpointDecidedData>("story_checkpoint_decided")
+
+/** The checkpoint no longer describes work that will integrate (its story
+ * failed or lost its lease); `affected` started on it. */
+export interface StoryCheckpointWithdrawnData {
+    runId: string
+    storyId: string
+    sha: string
+    reason: string
+    affected: string[]
+}
+
+export const StoryCheckpointWithdrawn =
+    defineSemanticEvent<StoryCheckpointWithdrawnData>("story_checkpoint_withdrawn")

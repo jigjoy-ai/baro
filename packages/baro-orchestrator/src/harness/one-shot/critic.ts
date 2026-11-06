@@ -4,10 +4,11 @@
  * and telemetry are identical across backends; a subclass supplies only the
  * subprocess invocation and its verdict parser.
  *
- * Library-grade: no imports from prd.ts, story-agent.ts, or conductor.ts.
+ * Library-grade: no imports from prd.ts or story-agent.ts.
  */
 
-import { BaseObserver, Participant, SemanticEvent } from "../../runtime/mozaik.js"
+import { SemanticEvent } from "../../runtime/mozaik.js"
+import { BusMember } from "../../runtime/coordination.js"
 
 import { runnerMeasurement } from "../../telemetry/runner-measurement.js"
 import type { RunnerInvocationObserver } from "../runner-invocation.js"
@@ -65,7 +66,7 @@ export interface OneShotCriticInvocationContext {
     onInvocation: RunnerInvocationObserver
 }
 
-export abstract class OneShotCritic extends BaseObserver {
+export abstract class OneShotCritic extends BusMember {
     private readonly terminalAuthorities: TerminalTurnAuthorityOptions
     private readonly maxEmissionsPerAgent: number
     private readonly targets: ReadonlyMap<string, readonly string[]>
@@ -137,8 +138,8 @@ export abstract class OneShotCritic extends BaseObserver {
     }
 
     override async onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): Promise<void> {
         const input = criticInput(event)
         if (!input) return
@@ -209,8 +210,8 @@ export abstract class OneShotCritic extends BaseObserver {
                 ...(repositoryFingerprint ? { repositoryFingerprint } : {}),
                 ...(staleCommands.length > 0 ? { staleCommands } : {}),
             })
-            for (const env of this.getEnvironments()) {
-                env.deliverSemanticEvent(this, critiqueEvent)
+            for (const env of this.getBuses()) {
+                env.publish(this, critiqueEvent)
             }
 
             if (status === "evaluated" && verdict === "fail" && canContinue) {
@@ -227,8 +228,8 @@ export abstract class OneShotCritic extends BaseObserver {
                             ...(terminalId ? { terminalId } : {}),
                         },
                     })
-                    for (const env of this.getEnvironments()) {
-                        env.deliverSemanticEvent(this, msg)
+                    for (const env of this.getBuses()) {
+                        env.publish(this, msg)
                     }
                 }
             }
@@ -283,8 +284,8 @@ export abstract class OneShotCritic extends BaseObserver {
                     observation,
                 ),
             )
-            for (const env of this.getEnvironments()) {
-                env.deliverSemanticEvent(this, event)
+            for (const env of this.getBuses()) {
+                env.publish(this, event)
             }
         }
     }

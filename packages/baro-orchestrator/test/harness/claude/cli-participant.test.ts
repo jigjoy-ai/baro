@@ -127,22 +127,22 @@ console.log(JSON.stringify({ type: "result", subtype: "success", session_id: "en
                 env.events.some(
                     (event) =>
                         AgentState.is(event) &&
-                        event.data.agentId === "claude-agent" &&
-                        event.data.phase === "running",
+                        event.payload.agentId === "claude-agent" &&
+                        event.payload.phase === "running",
                 ),
             )
             assert.ok(
                 env.events.some(
                     (event) =>
                         ClaudeSystem.is(event) &&
-                        event.data.subtype === "init",
+                        event.payload.subtype === "init",
                 ),
             )
             assert.ok(
                 env.events.some(
                     (event) =>
                         AgentResult.is(event) &&
-                        event.data.resultText === "claude completed",
+                        event.payload.resultText === "claude completed",
                 ),
             )
         })

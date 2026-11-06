@@ -194,16 +194,10 @@ fn review_stories_from_prd(prd: &executor::PrdFile) -> Vec<ReviewStory> {
 }
 
 fn executor_config_from_app(app: &App) -> Result<executor::ExecutorConfig, String> {
-    // Runtime Dialogue is a collective participant. Legacy still uses the
-    // same conversation-first intake and durable GoalEnvelope, but must not
-    // receive a context flag that the legacy orchestrator correctly rejects.
-    let conversation_context = if current_coordination_has_runtime_dialogue() {
-        app.conversation
-            .conversation_context_snapshot(None)
-            .map_err(|error| error.to_string())?
-    } else {
-        None
-    };
+    let conversation_context = app
+        .conversation
+        .conversation_context_snapshot(None)
+        .map_err(|error| error.to_string())?;
     Ok(executor::ExecutorConfig {
         parallel: app.parallel_limit,
         timeout_secs: app.timeout_secs,
@@ -234,18 +228,8 @@ fn executor_config_from_app(app: &App) -> Result<executor::ExecutorConfig, Strin
     })
 }
 
-fn coordination_has_runtime_dialogue(mode: &str) -> bool {
-    mode == "collective"
-}
-
-fn current_coordination_has_runtime_dialogue() -> bool {
-    std::env::var("BARO_COORDINATION").is_ok_and(|mode| coordination_has_runtime_dialogue(&mode))
-}
-
 fn progressive_planning_enabled() -> bool {
-    let coordination =
-        std::env::var("BARO_COORDINATION").unwrap_or_else(|_| "collective".to_string());
-    progressive_planning::progressive_planning_enabled(&coordination, false)
+    progressive_planning::progressive_planning_enabled(false)
 }
 
 enum AppEvent {
@@ -447,12 +431,16 @@ async fn run_main() -> Result<(), Box<dyn std::error::Error>> {
         return run_with_terminal(cli, None).await;
     }
 
+    let (mut cli, _lock) = cli::cli::parse()?;
+
     // Update notice: the network check runs in the JS layer (no HTTP dep
     // here); this reads its cache. Printed AFTER the TUI restores the
     // terminal (below) — the alternate screen purges it.
-    let update_notice = notify_update();
-
-    let (mut cli, _lock) = cli::cli::parse()?;
+    let update_notice = if update_check_enabled(cli.headless, std::env::var_os("CI").is_some()) {
+        notify_update()
+    } else {
+        None
+    };
 
     if !cli.operator && cli.base.is_none() {
         let cwd = std::path::Path::new(&cli.cwd);
@@ -515,22 +503,6 @@ async fn run_main() -> Result<(), Box<dyn std::error::Error>> {
         cli.goal.as_deref().unwrap_or(""),
         &cli.cwd,
     );
-    let coordination_explicit = std::env::var_os("BARO_COORDINATION").is_some()
-        || std::env::args().any(|arg| arg == "--coordination" || arg.starts_with("--coordination="));
-    if cli::cli::falls_back_to_legacy_coordination(
-        cfg!(windows),
-        coordination_explicit,
-        &cli.coordination,
-        &cli.llm,
-        cli.story_llm.as_deref(),
-    ) {
-        eprintln!(
-            "baro: collective coordination cannot supervise CLI story agents on native Windows; \
-             using --coordination legacy (run under WSL for collective)"
-        );
-        cli.coordination = "legacy".to_string();
-    }
-    std::env::set_var("BARO_COORDINATION", &cli.coordination);
     if cli.local_only {
         std::env::set_var("BARO_LOCAL_ONLY", "1");
     }
@@ -646,6 +618,14 @@ fn semver_lt(a: &str, b: &str) -> bool {
         }
     }
     false
+}
+
+/// The update notice and its background npm check are for a person at a
+/// terminal. A headless run is automation (a host such as a Hermes plugin
+/// pins the exact version) and makes no network call of its own; neither
+/// does CI, matching the JS launcher's self-update rules.
+fn update_check_enabled(headless: bool, ci: bool) -> bool {
+    !headless && !ci
 }
 
 /// Read the update cache the JS layer maintains (`~/.baro/update-check.json`)
@@ -4005,8 +3985,8 @@ async fn accept_conversation_response(
     }
 }
 
-/// Only `--with-dialogue` promises someone will answer; `BARO_COORDINATION`
-/// alone enables the dialogue participant but not a human behind it.
+/// Only `--with-dialogue` promises someone will answer; the dialogue
+/// participant alone has no human behind it.
 fn headless_conversation_has_a_peer() -> bool {
     std::env::var("BARO_WITH_DIALOGUE").is_ok_and(|value| value == "1")
 }
@@ -4771,11 +4751,8 @@ fn spawn_executor(
         }
     });
 
-    // Preserve PRD light/standard/heavy classes only for the opt-in collective
-    // market so workers can bid by tier. Legacy intentionally keeps its
-    // historical global Opus default unchanged.
-    let collective = current_coordination_has_runtime_dialogue();
-    let default_model = if config.model_routing && collective {
+    // Preserve PRD light/standard/heavy classes so market workers can bid by tier.
+    let default_model = if config.model_routing {
         None
     } else {
         Some("opus".to_string())
@@ -4957,10 +4934,18 @@ fn message_command_line(id: &str, text: &str, message_id: Option<&str>) -> Strin
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn update_check_skips_headless_and_ci_runs() {
+        assert!(super::update_check_enabled(false, false));
+        assert!(!super::update_check_enabled(true, false));
+        assert!(!super::update_check_enabled(false, true));
+        assert!(!super::update_check_enabled(true, true));
+    }
+
     use clap::Parser;
 
     use super::{
-        apply_primary_provider_choice, coordination_has_runtime_dialogue, delete_prev_word,
+        apply_primary_provider_choice, delete_prev_word,
         fixed_mode_contract, headless_failure_reason, message_command_line,
         mouse_capture_should_be_enabled, preferred_jigjoy_gateway_key,
         preferred_jigjoy_gateway_url, reconcile_jigjoy_phase_overrides, resolve_parallel_limit,
@@ -5241,13 +5226,6 @@ mod tests {
             message_command_line("S2", "run tests", None),
             r#"{"id":"S2","text":"run tests","type":"agent_message"}"#,
         );
-    }
-
-    #[test]
-    fn only_collective_coordination_receives_runtime_dialogue_context() {
-        assert!(coordination_has_runtime_dialogue("collective"));
-        assert!(!coordination_has_runtime_dialogue("legacy"));
-        assert!(!coordination_has_runtime_dialogue(""));
     }
 
     #[test]

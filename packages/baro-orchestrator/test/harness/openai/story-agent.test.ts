@@ -10,8 +10,7 @@ import {
     FunctionCallItem,
     ModelMessageItem,
     type ModelContext,
-    type Tool,
-} from "../../../src/runtime/mozaik.js"
+    type Tool, toWire } from "../../../src/runtime/mozaik.js"
 
 import { OpenAIStoryAgent } from "../../../src/harness/openai/story-agent.js"
 import {
@@ -58,17 +57,17 @@ describe("OpenAIStoryAgent", () => {
 
             const outcomePromise = agent.run(env)
             const [terminal] = await waitForCount(env.events, AgentResult.is, 1)
-            assert.ok(terminal?.data.terminalId)
+            assert.ok(terminal?.payload.terminalId)
 
             // This is deliberately much longer than the legacy quiet window.
             await delay(25)
             assert.equal(env.events.some(StoryResult.is), false)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 critic,
                 Critique.create({
                     agentId: agent.id,
-                    terminalId: terminal.data.terminalId,
+                    terminalId: terminal.payload.terminalId,
                     verdict: "pass",
                     reasoning: "all acceptance criteria pass",
                     violatedCriteria: [],
@@ -114,12 +113,12 @@ describe("OpenAIStoryAgent", () => {
 
             const outcomePromise = agent.run(env)
             const [terminal] = await waitForCount(env.events, AgentResult.is, 1)
-            assert.ok(terminal?.data.terminalId)
-            env.deliverSemanticEvent(
+            assert.ok(terminal?.payload.terminalId)
+            env.publish(
                 critic,
                 Critique.create({
                     agentId: agent.id,
-                    terminalId: terminal.data.terminalId,
+                    terminalId: terminal.payload.terminalId,
                     status: "inconclusive",
                     verdict: "fail",
                     reasoning: "evaluator unavailable",
@@ -169,7 +168,7 @@ describe("OpenAIStoryAgent", () => {
 
             const outcomePromise = agent.run(env)
             const [terminal] = await waitForCount(env.events, AgentResult.is, 1)
-            assert.ok(terminal?.data.terminalId)
+            assert.ok(terminal?.payload.terminalId)
             const outcome = await outcomePromise
 
             assert.equal(outcome.success, true)
@@ -178,11 +177,11 @@ describe("OpenAIStoryAgent", () => {
             assert.equal(contexts.length, 1)
             assert.equal(env.events.filter(StoryResult.is).length, 1)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 critic,
                 Critique.create({
                     agentId: agent.id,
-                    terminalId: terminal.data.terminalId,
+                    terminalId: terminal.payload.terminalId,
                     status: "evaluated",
                     verdict: "fail",
                     reasoning: "late verdict",
@@ -232,7 +231,7 @@ describe("OpenAIStoryAgent", () => {
                 code: "review_timeout",
             })
             assert.deepEqual(
-                env.events.find(StoryResult.is)?.data.failure,
+                env.events.find(StoryResult.is)?.payload.failure,
                 outcome.failure,
             )
         })
@@ -267,12 +266,12 @@ describe("OpenAIStoryAgent", () => {
 
             const outcomePromise = agent.run(env)
             const [terminal] = await waitForCount(env.events, AgentResult.is, 1)
-            assert.ok(terminal?.data.terminalId)
-            env.deliverSemanticEvent(
+            assert.ok(terminal?.payload.terminalId)
+            env.publish(
                 critic,
                 Critique.create({
                     agentId: agent.id,
-                    terminalId: terminal.data.terminalId,
+                    terminalId: terminal.payload.terminalId,
                     status: "inconclusive",
                     verdict: "fail",
                     reasoning: "evaluator unavailable",
@@ -326,12 +325,12 @@ describe("OpenAIStoryAgent", () => {
 
             const outcomePromise = agent.run(env)
             const [first] = await waitForCount(env.events, AgentResult.is, 1)
-            assert.ok(first?.data.terminalId)
-            env.deliverSemanticEvent(
+            assert.ok(first?.payload.terminalId)
+            env.publish(
                 critic,
                 Critique.create({
                     agentId: agent.id,
-                    terminalId: first.data.terminalId,
+                    terminalId: first.payload.terminalId,
                     verdict: "fail",
                     reasoning: "the regression test still fails",
                     violatedCriteria: ["regression test passes"],
@@ -342,31 +341,31 @@ describe("OpenAIStoryAgent", () => {
 
             const terminals = await waitForCount(env.events, AgentResult.is, 2)
             const second = terminals[1]
-            assert.ok(second?.data.terminalId)
-            assert.notEqual(second.data.terminalId, first.data.terminalId)
+            assert.ok(second?.payload.terminalId)
+            assert.notEqual(second.payload.terminalId, first.payload.terminalId)
             assert.equal(contexts.length, 2)
             assert.equal(contexts[1], contexts[0])
-            const continuedContext = JSON.stringify(contexts[1]!.toJSON())
+            const continuedContext = JSON.stringify(toWire(contexts[1]!))
             assert.match(continuedContext, /candidate one/)
             assert.match(continuedContext, /authoritative review rejected/i)
             assert.match(continuedContext, /the regression test still fails/)
             assert.match(continuedContext, /regression test passes/)
 
             // None of these may release the currently reviewed second turn.
-            deliverReview(critic, env, agent.id, first.data.terminalId, "pass", 1)
-            deliverReview(attacker, env, agent.id, second.data.terminalId, "pass", 2)
+            deliverReview(critic, env, agent.id, first.payload.terminalId, "pass", 1)
+            deliverReview(attacker, env, agent.id, second.payload.terminalId, "pass", 2)
             deliverReview(
                 critic,
                 env,
                 agent.id,
-                `${second.data.terminalId}:wrong`,
+                `${second.payload.terminalId}:wrong`,
                 "pass",
                 2,
             )
             await delay(20)
             assert.equal(env.events.some(StoryResult.is), false)
 
-            deliverReview(critic, env, agent.id, second.data.terminalId, "pass", 2)
+            deliverReview(critic, env, agent.id, second.payload.terminalId, "pass", 2)
             const outcome = await outcomePromise
             assert.equal(outcome.success, true)
             assert.equal(outcome.attempts, 1)
@@ -374,7 +373,7 @@ describe("OpenAIStoryAgent", () => {
             assert.equal(env.events.filter(StoryResult.is).length, 1)
 
             // Replayed final verdicts are inert after completion.
-            deliverReview(critic, env, agent.id, second.data.terminalId, "pass", 2)
+            deliverReview(critic, env, agent.id, second.payload.terminalId, "pass", 2)
             await new Promise<void>((resolve) => setImmediate(resolve))
             assert.equal(env.events.filter(StoryResult.is).length, 1)
             agent.leave(env)
@@ -411,7 +410,7 @@ describe("OpenAIStoryAgent", () => {
             const env = captureEnv()
             agent.join(env)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("bridge"),
                 AgentTargetedMessage.create({
                     recipientId: agent.id,
@@ -422,7 +421,7 @@ describe("OpenAIStoryAgent", () => {
                     generation: 2,
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 bridge,
                 AgentTargetedMessage.create({
                     recipientId: agent.id,
@@ -435,7 +434,7 @@ describe("OpenAIStoryAgent", () => {
             )
 
             for (const text of ["first queued correction", "second queued correction"]) {
-                env.deliverSemanticEvent(
+                env.publish(
                     bridge,
                     AgentTargetedMessage.create({
                         recipientId: agent.id,
@@ -452,7 +451,7 @@ describe("OpenAIStoryAgent", () => {
             assert.equal(outcome.success, true)
             assert.equal(env.events.filter(AgentResult.is).length, 3)
             assert.deepEqual(
-                env.events.filter(AgentUserMessage.is).map((event) => event.data.text),
+                env.events.filter(AgentUserMessage.is).map((event) => event.payload.text),
                 [
                     "start the story",
                     "first queued correction",
@@ -502,13 +501,13 @@ describe("OpenAIStoryAgent", () => {
                 assert.equal(outcome.storyId, "story-openai")
                 assert.equal(outcome.attempts, 1)
                 assert.ok(event)
-                assert.equal(event.data.storyId, "story-openai")
-                assert.equal(event.data.success, true)
-                assert.equal(event.data.attempts, 1)
-                assert.equal(event.data.error, null)
-                assert.ok(terminal?.data.terminalId)
+                assert.equal(event.payload.storyId, "story-openai")
+                assert.equal(event.payload.success, true)
+                assert.equal(event.payload.attempts, 1)
+                assert.equal(event.payload.error, null)
+                assert.ok(terminal?.payload.terminalId)
                 assert.match(
-                    terminal.data.terminalId,
+                    terminal.payload.terminalId,
                     /^openai:local:unleased:legacy:story-openai:/,
                 )
             } finally {
@@ -549,10 +548,10 @@ describe("OpenAIStoryAgent", () => {
             assert.equal(outcome.error, "exceeded maxRoundsPerTurn=0")
             assert.equal(events.length, 1)
             assert.ok(event)
-            assert.equal(event.data.storyId, "story-openai-retry")
-            assert.equal(event.data.success, false)
-            assert.equal(event.data.attempts, 2)
-            assert.equal(event.data.error, "exceeded maxRoundsPerTurn=0")
+            assert.equal(event.payload.storyId, "story-openai-retry")
+            assert.equal(event.payload.success, false)
+            assert.equal(event.payload.attempts, 2)
+            assert.equal(event.payload.error, "exceeded maxRoundsPerTurn=0")
         })
     })
 
@@ -618,8 +617,8 @@ describe("OpenAIStoryAgent", () => {
                     /provider capacity unavailable in inference round 1/i,
                 )
                 assert.equal(events.length, 1)
-                assert.equal(events[0]?.data.attempts, 1)
-                assert.deepEqual(events[0]?.data.failure, outcome.failure)
+                assert.equal(events[0]?.payload.attempts, 1)
+                assert.deepEqual(events[0]?.payload.failure, outcome.failure)
             } finally {
                 await closeServer(server)
             }
@@ -666,7 +665,7 @@ describe("OpenAIStoryAgent", () => {
                 code: "connection_reset",
             })
             assert.deepEqual(
-                env.events.find(StoryResult.is)?.data.failure,
+                env.events.find(StoryResult.is)?.payload.failure,
                 outcome.failure,
             )
         })
@@ -904,7 +903,7 @@ describe("OpenAIStoryAgent", () => {
             assert.equal(existsSync(join(dir, "last-explore.txt")), true)
             assert.equal(existsSync(join(dir, "must-not-exist.txt")), false)
             assert.match(
-                JSON.stringify(contexts[2]!.toJSON()),
+                JSON.stringify(toWire(contexts[2]!)),
                 /tool-execution budget.*closed/i,
             )
             assert.deepEqual(
@@ -921,7 +920,7 @@ describe("OpenAIStoryAgent", () => {
                 },
             )
             assert.match(
-                JSON.stringify(contexts[3]!.toJSON()),
+                JSON.stringify(toWire(contexts[3]!)),
                 /previous tool call was refused/i,
             )
         })
@@ -980,7 +979,7 @@ describe("OpenAIStoryAgent", () => {
                 async () => {
                     // Arrives while the round is in flight; the agent must
                     // apply it before the next inference call.
-                    env.deliverSemanticEvent(
+                    env.publish(
                         board,
                         revision(2, "lease-gate-1"),
                     )
@@ -989,7 +988,7 @@ describe("OpenAIStoryAgent", () => {
                 },
                 async () => {
                     // Stale lease correlation: must be ignored entirely.
-                    env.deliverSemanticEvent(
+                    env.publish(
                         board,
                         revision(3, "lease-gate-other"),
                     )
@@ -1013,7 +1012,7 @@ describe("OpenAIStoryAgent", () => {
             const outcome = await agent.run(env)
 
             assert.equal(outcome.success, true)
-            const round2 = JSON.stringify(contexts[1]!.toJSON())
+            const round2 = JSON.stringify(toWire(contexts[1]!))
             assert.match(round2, /RULE UPDATE \[gate:write-surface\]/)
             assert.match(round2, /graphVersion 2/)
             assert.match(round2, /src\/shared\.ts → S9/)
@@ -1023,12 +1022,88 @@ describe("OpenAIStoryAgent", () => {
             )
             assert.equal(existsSync(join(dir, "src/shared.ts")), false)
             assert.equal(existsSync(join(dir, "src/one.ts")), true)
-            const round3 = JSON.stringify(contexts[2]!.toJSON())
+            const round3 = JSON.stringify(toWire(contexts[2]!))
             assert.doesNotMatch(round3, /graphVersion 3/)
             const ruleEchoes = env.events
                 .filter(AgentUserMessage.is)
-                .filter((event) => event.data.text.includes("RULE UPDATE"))
+                .filter((event) => event.payload.text.includes("RULE UPDATE"))
             assert.equal(ruleEchoes.length, 1)
+            agent.leave(env)
+        })
+    })
+
+    it("applies a claim's surface revision within the same graph version", async () => {
+        await withTempDir("openai-story-claim-rule-", async (dir) => {
+            const board = source("collective-board")
+            const agent = new OpenAIStoryAgent(
+                {
+                    id: "S1",
+                    prompt: "implement S1",
+                    cwd: dir,
+                    retries: 0,
+                    quietTimeoutMs: 1,
+                    maxTurns: 1,
+                    runId: "run-claim",
+                    leaseId: "lease-claim-1",
+                    generation: 0,
+                    surface: {
+                        writes: ["src/one.ts"],
+                        ownedElsewhere: { "src/two.ts": "S2" },
+                    },
+                },
+                {
+                    model: "fake-model",
+                    maxRoundsPerTurn: 6,
+                    perRoundTimeoutSecs: 60,
+                    runtimeReplanDecisionAuthority: board,
+                },
+            )
+            const env = captureEnv()
+            agent.join(env)
+            const revision = (surfaceRevision: number, owned: Record<string, string>) =>
+                GateRuleAnnounced.create({
+                    runId: "run-claim",
+                    storyId: "S1",
+                    leaseId: "lease-claim-1",
+                    generation: 0,
+                    gateId: "write-surface",
+                    graphVersion: 2,
+                    surfaceRevision,
+                    surface: {
+                        writes: Object.keys(owned).length ? ["src/one.ts"] : ["src/one.ts", "src/two.ts"],
+                        ownedElsewhere: owned,
+                    },
+                })
+
+            const contexts: ModelContext[] = []
+            const rounds: Array<
+                () => Promise<Array<FunctionCallItem | ModelMessageItem>>
+            > = [
+                async () => {
+                    env.publish(board, revision(1, { "src/two.ts": "S2" }))
+                    // S2 integrated and S1 claimed its file: same graph, newer surface.
+                    env.publish(board, revision(2, {}))
+                    // A stale revision delivered late must not take it back.
+                    env.publish(board, revision(1, { "src/two.ts": "S2" }))
+                    await delay(10)
+                    return [writeCall("call-claimed-write", "src/two.ts")]
+                },
+                async () => [ModelMessageItem.rehydrate({ text: "S1 complete" })],
+            ]
+            let index = 0
+            Object.defineProperty(agent, "runRound", {
+                value: async (context: ModelContext) => {
+                    contexts.push(context)
+                    const round = rounds[index++]
+                    assert.ok(round, `unexpected inference round ${index}`)
+                    return { items: await round(), usage: undefined }
+                },
+            })
+
+            const outcome = await agent.run(env)
+
+            assert.equal(outcome.success, true)
+            assert.equal(existsSync(join(dir, "src/two.ts")), true)
             agent.leave(env)
         })
     })
@@ -1063,7 +1138,7 @@ describe("OpenAIStoryAgent", () => {
                 () => Promise<Array<FunctionCallItem | ModelMessageItem>>
             > = [
                 async () => {
-                    env.deliverSemanticEvent(
+                    env.publish(
                         bridge,
                         AgentTargetedMessage.create({
                             recipientId: "S1",
@@ -1092,7 +1167,7 @@ describe("OpenAIStoryAgent", () => {
 
             assert.equal(outcome.success, true)
             assert.match(
-                JSON.stringify(contexts[1]!.toJSON()),
+                JSON.stringify(toWire(contexts[1]!)),
                 /moduleNameMapper now resolves/,
             )
             assert.equal(
@@ -1102,7 +1177,7 @@ describe("OpenAIStoryAgent", () => {
             )
             const echoes = env.events
                 .filter(AgentUserMessage.is)
-                .filter((event) => event.data.text === noteText)
+                .filter((event) => event.payload.text === noteText)
             assert.equal(echoes.length, 1)
             agent.leave(env)
         })
@@ -1150,14 +1225,14 @@ describe("OpenAIStoryAgent", () => {
             const env = captureEnv()
             const deliveredCalls: string[] = []
             const deliveredOutputs: string[] = []
-            const deliverFunctionCall = env.deliverFunctionCall.bind(env)
+            const deliverFunctionCall = env.publishFunctionCall.bind(env)
             const deliverFunctionCallOutput =
-                env.deliverFunctionCallOutput.bind(env)
-            env.deliverFunctionCall = (sourceParticipant, item) => {
+                env.publishFunctionCallOutput.bind(env)
+            env.publishFunctionCall = (sourceParticipant, item) => {
                 deliveredCalls.push(item.callId)
                 deliverFunctionCall(sourceParticipant, item)
             }
-            env.deliverFunctionCallOutput = (sourceParticipant, item) => {
+            env.publishFunctionCallOutput = (sourceParticipant, item) => {
                 deliveredOutputs.push(item.callId)
                 deliverFunctionCallOutput(sourceParticipant, item)
             }
@@ -1283,7 +1358,7 @@ describe("OpenAIStoryAgent", () => {
             const outcomePromise = agent.run(env)
             const proposed = await waitFor(env.events, RuntimeReplanProposed.is)
 
-            assert.deepEqual(proposed.data, {
+            assert.deepEqual(proposed.payload, {
                 runId: "run-replan-tool",
                 proposalId:
                     "run-replan-tool:runtime-replan:S1:lease-S1:4:call-runtime-1",
@@ -1295,40 +1370,40 @@ describe("OpenAIStoryAgent", () => {
                 mutation,
             })
             assert.match(
-                JSON.stringify(contexts[0]?.getItems().map((item) => item.toJSON())),
+                JSON.stringify(contexts[0]?.getItems().map((item) => toWire(item))),
                 /launch graphVersion is 7/,
             )
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("forged-board"),
                 RuntimeReplanApplied.create({
-                    ...proposed.data,
+                    ...proposed.payload,
                     previousGraphVersion: 7,
                     graphVersion: 99,
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 board,
                 RuntimeReplanApplied.create({
-                    ...proposed.data,
+                    ...proposed.payload,
                     leaseId: "wrong-lease",
                     previousGraphVersion: 7,
                     graphVersion: 98,
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 board,
                 RuntimeReplanApplied.create({
-                    ...proposed.data,
+                    ...proposed.payload,
                     baseGraphVersion: 999,
                     previousGraphVersion: 7,
                     graphVersion: 97,
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 board,
                 RuntimeReplanApplied.create({
-                    ...proposed.data,
+                    ...proposed.payload,
                     previousGraphVersion: 7,
                     graphVersion: 8,
                 }),
@@ -1340,7 +1415,7 @@ describe("OpenAIStoryAgent", () => {
             assert.deepEqual(JSON.parse(output), {
                 ok: true,
                 status: "applied",
-                proposalId: proposed.data.proposalId,
+                proposalId: proposed.payload.proposalId,
                 previousGraphVersion: 7,
                 graphVersion: 8,
                 currentGraphVersion: 8,
@@ -1379,15 +1454,15 @@ describe("OpenAIStoryAgent", () => {
             agent.join(env)
             const outcomePromise = agent.run(env)
             const proposed = await waitFor(env.events, RuntimeReplanProposed.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 board,
                 RuntimeReplanRejected.create({
-                    runId: proposed.data.runId,
-                    proposalId: proposed.data.proposalId,
-                    sourceStoryId: proposed.data.sourceStoryId,
-                    leaseId: proposed.data.leaseId,
-                    generation: proposed.data.generation,
-                    baseGraphVersion: proposed.data.baseGraphVersion,
+                    runId: proposed.payload.runId,
+                    proposalId: proposed.payload.proposalId,
+                    sourceStoryId: proposed.payload.sourceStoryId,
+                    leaseId: proposed.payload.leaseId,
+                    generation: proposed.payload.generation,
+                    baseGraphVersion: proposed.payload.baseGraphVersion,
                     currentGraphVersion: 6,
                     code: "stale_graph_version",
                     reason: "another proposal already advanced the graph",
@@ -1400,7 +1475,7 @@ describe("OpenAIStoryAgent", () => {
                 {
                     ok: false,
                     status: "rejected",
-                    proposalId: proposed.data.proposalId,
+                    proposalId: proposed.payload.proposalId,
                     code: "stale_graph_version",
                     reason: "another proposal already advanced the graph",
                     currentGraphVersion: 6,
@@ -1445,15 +1520,15 @@ describe("OpenAIStoryAgent", () => {
             const proposed = await waitFor(env.events, RuntimeReplanProposed.is)
             assert.equal(existsSync(target), false)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 board,
                 RuntimeReplanRejected.create({
-                    runId: proposed.data.runId,
-                    proposalId: proposed.data.proposalId,
-                    sourceStoryId: proposed.data.sourceStoryId,
-                    leaseId: proposed.data.leaseId,
-                    generation: proposed.data.generation,
-                    baseGraphVersion: proposed.data.baseGraphVersion,
+                    runId: proposed.payload.runId,
+                    proposalId: proposed.payload.proposalId,
+                    sourceStoryId: proposed.payload.sourceStoryId,
+                    leaseId: proposed.payload.leaseId,
+                    generation: proposed.payload.generation,
+                    baseGraphVersion: proposed.payload.baseGraphVersion,
                     currentGraphVersion: 5,
                     code: "immutable_story",
                     reason: "active work cannot be replaced",
@@ -1586,10 +1661,10 @@ describe("OpenAIStoryAgent", () => {
             assert.equal(outcome.error, "story was aborted")
             assert.equal(agent.getPhase(), "aborted")
 
-            env.deliverSemanticEvent(
+            env.publish(
                 board,
                 RuntimeReplanApplied.create({
-                    ...proposed.data,
+                    ...proposed.payload,
                     previousGraphVersion: 4,
                     graphVersion: 5,
                     currentGraphVersion: 5,
@@ -1610,7 +1685,7 @@ function deliverReview(
     verdict: "pass" | "fail",
     turn: number,
 ): void {
-    env.deliverSemanticEvent(
+    env.publish(
         authority,
         Critique.create({
             agentId,
@@ -1702,7 +1777,7 @@ function stubInferenceRounds(
 
 function functionOutput(context: ModelContext, callId: string): string {
     for (const item of context.getItems()) {
-        const json = item.toJSON() as {
+        const json = toWire(item) as {
             type?: string
             call_id?: string
             output?: Array<{ text?: string }>
@@ -1718,7 +1793,7 @@ function functionOutput(context: ModelContext, callId: string): string {
 function functionOutputCallIds(context: ModelContext): string[] {
     return context
         .getItems()
-        .map((item) => item.toJSON() as { type?: string; call_id?: string })
+        .map((item) => toWire(item) as { type?: string; call_id?: string })
         .filter(
             (item): item is { type: "function_call_output"; call_id: string } =>
                 item.type === "function_call_output" &&

@@ -4,11 +4,9 @@ import { join } from "node:path"
 import { describe, it } from "node:test"
 
 import {
-    BaseObserver,
-    type AgenticEnvironment,
-    type Participant,
     type SemanticEvent,
 } from "../../src/runtime/mozaik.js"
+import { BusMember, type CoordinationBus } from "../../src/runtime/coordination.js"
 
 import { orchestrate } from "../../src/orchestrate.js"
 import type {
@@ -26,10 +24,10 @@ import {
 } from "../../src/semantic-events.js"
 import { withTempDir } from "../execution/helpers.js"
 
-class RuntimeAdaptingExecutor extends BaseObserver implements StoryExecutor {
+class RuntimeAdaptingExecutor extends BusMember implements StoryExecutor {
     readonly started: Array<{ storyId: string; graphVersion?: number }> = []
     private pendingS1:
-        | { request: StorySpawnRequestData; environment: AgenticEnvironment }
+        | { request: StorySpawnRequestData; environment: CoordinationBus }
         | null = null
 
     get agentId(): string {
@@ -40,7 +38,7 @@ class RuntimeAdaptingExecutor extends BaseObserver implements StoryExecutor {
         request: StorySpawnRequestData,
         _route: StoryRoute,
         _cwd: string,
-        environment: AgenticEnvironment,
+        environment: CoordinationBus,
         options: StoryExecOpts,
     ): StoryExecution {
         this.started.push({
@@ -52,7 +50,7 @@ class RuntimeAdaptingExecutor extends BaseObserver implements StoryExecutor {
         if (request.storyId === "S1") {
             this.pendingS1 = { request, environment }
             setImmediate(() => {
-                environment.deliverSemanticEvent(
+                environment.publish(
                     this,
                     RuntimeReplanProposed.create({
                         runId: request.runId!,
@@ -89,12 +87,12 @@ class RuntimeAdaptingExecutor extends BaseObserver implements StoryExecutor {
     }
 
     override async onExternalEvent(
-        _source: Participant,
-        event: SemanticEvent<unknown>,
+        _source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): Promise<void> {
         if (
             RuntimeReplanApplied.is(event) &&
-            event.data.proposalId === "e2e-add-S2" &&
+            event.payload.proposalId === "e2e-add-S2" &&
             this.pendingS1
         ) {
             const pending = this.pendingS1
@@ -105,9 +103,9 @@ class RuntimeAdaptingExecutor extends BaseObserver implements StoryExecutor {
 
     private finish(
         request: StorySpawnRequestData,
-        environment: AgenticEnvironment,
+        environment: CoordinationBus,
     ): void {
-        environment.deliverSemanticEvent(
+        environment.publish(
             this,
             StoryResult.create({
                 runId: request.runId,
@@ -138,7 +136,6 @@ describe("runtime DAG adaptation orchestration", () => {
             const result = await orchestrate({
                 prdPath,
                 cwd: dir,
-                coordinationMode: "collective",
                 publishRemote: false,
                 withGit: false,
                 emitTuiEvents: false,

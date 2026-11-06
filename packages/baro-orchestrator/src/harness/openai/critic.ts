@@ -1,6 +1,6 @@
 /**
  * CriticOpenAI — sibling of `Critic` that runs the verdict evaluation
- * through Mozaik 3.9's native OpenAI inference runner instead of
+ * through Baro's Mozaik-native OpenAI inference runtime instead of
  * shelling out to `claude --print`.
  *
  * Same bus contract:
@@ -19,19 +19,14 @@
  */
 
 import {
-    BaseObserver,
-    Gpt54,
-    Gpt54Mini,
-    Gpt54Nano,
-    Gpt55,
     ModelContext,
     SemanticEvent,
     SystemMessageItem,
     UserMessageItem,
-    type GenerativeModel,
-    type Participant,
-    type TokenUsage,
-} from "../../runtime/mozaik.js"
+    type TokenUsage, toWire } from "../../runtime/mozaik.js"
+import { pickInferenceModel as pickModel } from "../mozaik/pick-model.js"
+import type { InferenceModel } from "./runtime.js"
+import { BusMember } from "../../runtime/coordination.js"
 
 import type { GatewayBillingCoordinator } from "../../telemetry/billing/index.js"
 import {
@@ -81,8 +76,8 @@ export interface CriticOpenAIOptions extends TerminalTurnAuthorityOptions {
     /** Max corrective AgentTargetedMessageItem-s per agent. Default: 2. */
     maxEmissionsPerAgent?: number
     /**
-     * OpenAI model name. One of the names Mozaik 3.9 ships:
-     * `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.4-nano`.
+     * OpenAI model name: one in Mozaik's catalogue (`gpt-5.5`, `gpt-5.4`,
+     * `gpt-5.4-mini`, ...) or any name the endpoint serves.
      * Default: `gpt-5.4-mini` (cheap; Critic runs per turn per agent).
      */
     model?: string
@@ -113,26 +108,8 @@ interface CriticOpenAITelemetry {
     cost: ModelCostMetrics
 }
 
-/** Instantiate the Mozaik model wrapper for a given OpenAI model name. */
-function pickModel(name: string): GenerativeModel {
-    switch (name) {
-        case "gpt-5.5":
-            return new Gpt55()
-        case "gpt-5.4":
-            return new Gpt54()
-        case "gpt-5.4-mini":
-            return new Gpt54Mini()
-        case "gpt-5.4-nano":
-            return new Gpt54Nano()
-        default:
-            process.stderr.write(
-                `[pickModel] Using model "${name}" as-is with the OpenAI API.\n`,
-            )
-            return new GenericOpenAIModel(name)
-    }
-}
 
-export class CriticOpenAI extends BaseObserver {
+export class CriticOpenAI extends BusMember {
     private readonly opts: Required<
         Omit<
             CriticOpenAIOptions,
@@ -147,7 +124,7 @@ export class CriticOpenAI extends BaseObserver {
         evidence?: CriticEvidenceSource
     }
     private readonly terminalAuthorities: TerminalTurnAuthorityOptions
-    private readonly model: GenerativeModel
+    private readonly model: InferenceModel
     private readonly billingCoordinator: GatewayBillingCoordinator | null
 
     private readonly emissions = new Map<string, number>()
@@ -184,8 +161,8 @@ export class CriticOpenAI extends BaseObserver {
     }
 
     override async onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): Promise<void> {
         const input = criticInput(event)
         if (!input) return
@@ -264,8 +241,8 @@ export class CriticOpenAI extends BaseObserver {
                     ? { staleCommands: preparation.staleCommands }
                     : {}),
             })
-            for (const env of this.getEnvironments()) {
-                env.deliverSemanticEvent(this, critiqueEvent)
+            for (const env of this.getBuses()) {
+                env.publish(this, critiqueEvent)
             }
 
             if (status === "evaluated" && verdict === "fail" && canContinue) {
@@ -282,8 +259,8 @@ export class CriticOpenAI extends BaseObserver {
                             ...(terminalId ? { terminalId } : {}),
                         },
                     })
-                    for (const env of this.getEnvironments()) {
-                        env.deliverSemanticEvent(this, msg)
+                    for (const env of this.getBuses()) {
+                        env.publish(this, msg)
                     }
                 }
             }
@@ -330,13 +307,13 @@ export class CriticOpenAI extends BaseObserver {
             },
         }
         const event = ModelInvocationMeasured.create(data)
-        for (const env of this.getEnvironments()) {
-            env.deliverSemanticEvent(this, event)
+        for (const env of this.getBuses()) {
+            env.publish(this, event)
         }
     }
 
     private terminalCorrelation(
-        source: Participant,
+        source: BusMember,
         agentId: string,
         terminalId: string | null,
     ): StoryResultAuthorityCorrelation | null {
@@ -376,7 +353,7 @@ export class CriticOpenAI extends BaseObserver {
             generation: number
         } | null,
     ): Promise<CriticOpenAIEvaluation> {
-        const context = ModelContext.create("critic")
+        const context = ModelContext.create()
             .addContextItem(SystemMessageItem.create(VERDICT_SYSTEM_PROMPT))
             .addContextItem(UserMessageItem.create(userPrompt))
 
@@ -410,7 +387,7 @@ export class CriticOpenAI extends BaseObserver {
             let assistantText = ""
             for (const item of round.items) {
                 if (item.type === "message") {
-                    const json = item.toJSON() as { content: Array<{ text: string }> }
+                    const json = toWire(item) as { content: Array<{ text: string }> }
                     assistantText += json.content?.[0]?.text ?? ""
                 }
             }

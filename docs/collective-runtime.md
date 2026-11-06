@@ -154,6 +154,77 @@ the capability after reading each bounded request body, closing a release race;
 release then revokes its attribution. Messages, help, notes, discoveries, and
 replans submitted after the release boundary are stale and cannot influence
 Dialogue or another worker.
+
+A running worker that needs a file it did not declare claims it
+(`agent-collab.mjs emit --kind claim --paths-json '["src/x.ts"]'`) before it
+writes. The Board decides at once, from the same ownership rule as the write
+gate: a path no story that has not integrated declares or holds (unowned, or
+released by an integrated owner) becomes the claimant's, every running lease
+receives the revised surface (`gate_rule_announced` with a `surfaceRevision`,
+so a claim orders within one graph version), and running peers are told who
+owns it; a path such a story still holds stays with it, and the claimant
+messages that owner or blocks on it. The decision is in the broker receipt and
+in a `claim_answer` message, and the bus records it as `paths_claimed`. A claim
+ends when its claimant integrates, exactly like a declared write.
+
+A Claude story's Bash runs inside Claude Code's own OS sandbox (Seatbelt on
+macOS, bubblewrap and socat on Linux), configured by Baro in the story's
+`--settings`: writes only to the worktree, the exact git metadata a commit
+needs (`objects`, the story's branch ref and log, its worktree git dir; never
+the shared config) and Claude's temp; reads everywhere except credential
+stores (`~/.ssh`, `~/.aws`, gh, git and package-manager credentials); network
+only to package registries and the lease's loopback broker
+(`BARO_SANDBOX_ALLOWED_DOMAINS` adds hosts). `allowUnsandboxedCommands` is off
+and `failIfUnavailable` is on, so a story whose sandbox cannot start does not
+run; `permissions.blockWritesOutsideWorkingDirectories` holds Write and Edit to
+the worktree. This is what holds a script the agent writes and runs, which the
+command-level hook cannot see. `BARO_UNSAFE_NO_SANDBOX=1` turns it off.
+Verified against Claude Code 2.1.318: a commit succeeds; a script writing the
+shared `.git/config` or a sibling story's worktree gets `Operation not
+permitted`; `~/.ssh` is unreadable; github.com is unreachable; the broker is.
+
+Under that sandbox the story hook no longer judges each shell command: the
+kernel already holds every process the command starts, and the command judge
+refused harmless reads, heredocs, inline code and peer messages whose text held
+a slash (test run 4). The hook still refuses publishing and shared git state
+(`publish-guard.ts`), and Write/Edit stay inside the worktree. With
+`BARO_UNSAFE_NO_SANDBOX=1` the command judge is the only guard and runs as
+before; the hook's self-check probes it either way. Verified against the live
+CLI: inline python and a commit inside the worktree work; a write to the main
+checkout or another repo, from the shell or from python, fails with `Operation
+not permitted`; `git push` is refused by the hook.
+
+Package managers write to a Baro-owned cache (`~/.baro/cache/packages`,
+`BARO_PACKAGE_CACHE` overrides it), set through `npm_config_cache`,
+`PIP_CACHE_DIR`, `XDG_CACHE_HOME`, `CARGO_HOME` and their peers; the user's own
+caches stay unwritable, so a story cannot poison the user's next install. The
+Codex, OpenCode, Pi and Devin lanes use the same cache. The Claude sandbox sets
+`enableWeakerNetworkIsolation`, which lets clients that verify TLS through
+macOS `trustd` (pip, Go, gh) do so; without it pip fails with `OSStatus
+-26276`. The domain allowlist still applies.
+
+Read-only Claude roles (architect, scouts, planner, surgeon) run under
+`dontAsk`, which refuses every read outside the checkout. They approve
+Read/Glob/Grep explicitly and deny the same credential stores, so a goal can
+point at a symlinked SDK or a sibling checkout.
+
+A dependency is a merge order, not a start barrier. A running story whose
+dependents need only part of its work (an interface, fixtures, a schema)
+commits that part and publishes it (`--kind checkpoint --reason "..."`). The
+Board accepts it from the live lease when the commits stay inside the story's
+surface, and admits every dependent whose prerequisites are each integrated or
+checkpointed. Such a dependent's worktree merges the checkpoint commits onto
+the run branch, and that merge is its recorded base, so its own diff and
+fingerprint stay its own. It integrates only after each prerequisite it
+started on has: an accepted early starter waits (`S2 is accepted and
+integrates after S1`), and since the prerequisite's final branch contains the
+same commits, the later merge is a clean continuation. If the prerequisite
+fails or loses its lease, the checkpoint is withdrawn: finished early starters
+retry from the run branch, running ones are told and can block on it, and a
+story whose early start failed once waits for integration next time. A
+dependent that finds it needs the finished work blocks on the prerequisite
+(`--kind block`) as before.
+
 Durably handed-off goal challenges remain replayable until their persisted
 Guardian projection acknowledges them. Before persistence, the Bridge also
 checks the challenge invariant against the exact derived GoalContract allowlist;
@@ -256,15 +327,14 @@ Progressive planning removes the complete-plan startup barrier for one narrow
 path. Enable it explicitly for a fresh headless Collective run:
 
 ```bash
-BARO_PROGRESSIVE_PLANNING=1 baro --headless --coordination collective --local-only \
+BARO_PROGRESSIVE_PLANNING=1 baro --headless --local-only \
   "Your goal"
 ```
 
-The switch is ignored outside headless `collective` coordination. On that
-path, version 1 rejects an opted-in resume or follow-up instead of silently
-changing its semantics. Without the opt-in, resume/follow-up and interactive
-runs, as well as every `legacy` run, retain the existing behavior of waiting
-for the complete Planner PRD before execution starts. This is an experimental
+The switch is ignored outside headless runs. On that path, version 1 rejects
+an opted-in resume or follow-up instead of silently changing its semantics.
+Without the opt-in, resume/follow-up and interactive runs retain the existing
+behavior of waiting for the complete Planner PRD before execution starts. This is an experimental
 local evaluation surface, not a production-readiness or benchmark claim.
 
 The fresh-run host first persists an empty bootstrap PRD with a correlated,
@@ -307,12 +377,8 @@ progressive host lifecycle they produce the complete PRD, which is admitted at
 `plan_complete`. Their story-execution capabilities are separate from this
 Planner limitation.
 
-In this document, `legacy` means the explicit compatibility engine in which a
-Conductor reacts to bus events and drives the already-complete DAG by levels.
-It remains useful for rollback and old-run comparison; it does not mean that
-its code or protocol is silently selected on a Collective failure. Progressive
-planning is Collective-only because its open-plan latch, durable fragment
-admission and scheduling authority live on the Board.
+Progressive planning's open-plan latch, durable fragment admission and
+scheduling authority live on the Board.
 
 This design sits directly on Mozaik without assigning domain authority to the
 bus. Mozaik provides the shared environment, typed event delivery and exact
@@ -482,9 +548,7 @@ accepted-goal phase, optional summary, and at most 24 complete correlated
 history records into an exact schema-v1 file capped at 128 KiB. The file is
 private and temporary, is bound again to the PRD session ID and `GoalEnvelope`
 before use, is not inherited by worker subprocesses, and is deleted as soon as
-the orchestrator exits. `legacy` coordination still uses the conversation-first
-front door and durable goal metadata, but intentionally omits this run-local
-Dialogue projection because legacy has no Dialogue participant.
+the orchestrator exits.
 
 This intentionally does not turn Dialogue into a central root coordinator. The
 provider process remains text-only and disposable; durable history and a bounded

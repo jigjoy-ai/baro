@@ -175,7 +175,7 @@ console.log(${JSON.stringify(JSON.stringify(wrapper))});
 
         const replan = env.events.find((event) => Replan.is(event))
         assert.ok(replan, "Replan emitted")
-        assert.deepEqual(replan.data, {
+        assert.deepEqual(replan.payload, {
             source: "surgeon",
             reason: "deterministic skip: S2 exhausted 3 attempts (tests failed)",
             addedStories: [],
@@ -263,7 +263,7 @@ console.log(${JSON.stringify(JSON.stringify(wrapper))});
             assert.ok(env.events.indexOf(measured[0]!) < env.events.indexOf(replans[0]!))
             assert.ok(env.events.indexOf(measured[0]!) < env.events.indexOf(decisions[0]!))
 
-            const item = measured[0]!.data
+            const item = measured[0]!.payload
             assert.equal(
                 item.invocationId,
                 "run-surgeon-telemetry:surgeon:S2:generation-4",
@@ -339,13 +339,13 @@ console.log(${JSON.stringify(JSON.stringify(wrapper))});
             const measured = env.events.filter(ModelInvocationMeasured.is)
             const replans = env.events.filter(Replan.is)
             assert.equal(measured.length, 1)
-            assert.equal(measured[0]!.data.status, "succeeded")
+            assert.equal(measured[0]!.payload.status, "succeeded")
             assert.deepEqual(
-                measured[0]!.data.tokens.total,
+                measured[0]!.payload.tokens.total,
                 knownMetric(3, "derived"),
             )
             assert.equal(replans.length, 1)
-            assert.match(replans[0]!.data.reason, /llm fallback after error:/)
+            assert.match(replans[0]!.payload.reason, /llm fallback after error:/)
         })
     })
 
@@ -390,14 +390,14 @@ console.log(${JSON.stringify(JSON.stringify(wrapper))});
 
                 const measured = env.events.filter(ModelInvocationMeasured.is)
                 assert.equal(measured.length, 1, item.name)
-                assert.equal(measured[0]!.data.status, item.status, item.name)
+                assert.equal(measured[0]!.payload.status, item.status, item.name)
                 assert.deepEqual(
-                    measured[0]!.data.tokens.inputTotal,
+                    measured[0]!.payload.tokens.inputTotal,
                     unknownMetric(item.reason),
                     item.name,
                 )
                 assert.deepEqual(
-                    measured[0]!.data.cost.equivalentUsd,
+                    measured[0]!.payload.cost.equivalentUsd,
                     unknownMetric(item.reason),
                     item.name,
                 )
@@ -509,7 +509,7 @@ console.log(${JSON.stringify(JSON.stringify(wrapper))});
 
         const replan = env.events.find(Replan.is)
         assert.ok(replan)
-        assert.match(replan.data.reason, /acceptance quality gate failed: tests missing/)
+        assert.match(replan.payload.reason, /acceptance quality gate failed: tests missing/)
         assert.deepEqual(
             env.events
                 .filter((event) =>

@@ -1,4 +1,4 @@
-import type { Participant } from "./mozaik.js"
+import type { BusMember } from "./coordination.js"
 
 /**
  * The agent a bus participant speaks for, or null when it speaks for none.
@@ -8,7 +8,7 @@ import type { Participant } from "./mozaik.js"
  * do it. Identity is read from the participant the runtime handed us, never
  * from event payloads — a payload can claim any id it likes.
  */
-export function participantAgentId(source: Participant): string | null {
+export function participantAgentId(source: BusMember): string | null {
     const candidate = (source as unknown as { agentId?: unknown }).agentId
     return typeof candidate === "string" && candidate.length > 0 ? candidate : null
 }

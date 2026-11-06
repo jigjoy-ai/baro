@@ -16,8 +16,7 @@ import {
     ModelContext,
     SystemMessageItem,
     UserMessageItem,
-    type TokenUsage,
-} from "../runtime/mozaik.js"
+    type TokenUsage, toWire } from "../runtime/mozaik.js"
 
 import type { GatewayBillingCoordinator } from "../telemetry/billing/index.js"
 import { runCodexOneShot } from "../harness/codex/one-shot.js"
@@ -537,7 +536,7 @@ function createOpenAIResponder(
                 "OpenAI dialogue was cancelled before provider dispatch",
             )
         }
-        const context = ModelContext.create(`dialogue:${input.messageId}`)
+        const context = ModelContext.create()
             .addContextItem(SystemMessageItem.create(input.systemPrompt))
             .addContextItem(UserMessageItem.create(input.userPrompt))
         const providerCall = providerCallSignal(
@@ -595,7 +594,7 @@ function createOpenAIResponder(
         let text = ""
         for (const item of round.items) {
             if (item.type !== "message") continue
-            const json = item.toJSON() as {
+            const json = toWire(item) as {
                 content?: Array<{ text?: unknown }>
             }
             for (const content of json.content ?? []) {

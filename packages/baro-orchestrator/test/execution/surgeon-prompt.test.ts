@@ -293,7 +293,6 @@ describe("Surgeon execution escalation routing", () => {
                             estimate,
                         },
                     ],
-                    "collective",
                     undefined,
                 ),
             /required story tier 'heavy'/,
@@ -316,7 +315,6 @@ describe("Surgeon execution escalation routing", () => {
                         estimate,
                     },
                 ],
-                "collective",
                 undefined,
             ),
         )

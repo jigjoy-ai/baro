@@ -1,8 +1,8 @@
 /**
  * A streamed chat-completions round, assembled into the items a round returns.
  *
- * THIS FILE IS MOZAIK'S JOB, HELD HERE UNTIL MOZAIK DOES IT. Its adapter
- * (`OpenAICompatibleChatCompletions`) exposes `stream()`, but 3.12 sends no
+ * THIS FILE IS MOZAIK'S JOB, HELD HERE UNTIL MOZAIK DOES IT. Its endpoint
+ * (`OpenAIChatCompletions`) exposes `stream()`, but sends no
  * `stream_options.include_usage` — so a streamed round reports no tokens at
  * all — and yields raw `chat.completion.chunk` events without assembling them
  * into context items. Cache-accurate usage is what every cost figure and every

@@ -1,4 +1,5 @@
-import { BaseObserver, Participant, SemanticEvent } from "../../runtime/mozaik.js"
+import { SemanticEvent } from "../../runtime/mozaik.js"
+import { BusMember } from "../../runtime/coordination.js"
 
 import {
     ClaudeStreamChunk,
@@ -29,7 +30,7 @@ const PROGRESS_THROTTLE_MS = 1500
  * Emits: token_usage (authoritative, summed downstream) and token_progress
  * (latest cumulative snapshot per agent; consumers take the max, not a sum).
  */
-export class TokenUsageForwarder extends BaseObserver {
+export class TokenUsageForwarder extends BusMember {
     // Per-agent live accumulator for Claude streaming. Claude reports
     // output_tokens cumulatively *within a message*, restarting each turn — so
     // we carry committed output across turns and add the current message's count.
@@ -70,37 +71,37 @@ export class TokenUsageForwarder extends BaseObserver {
     }
 
     override async onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): Promise<void> {
         if (WorkLeaseGranted.is(event) || WorkLeaseReleased.is(event)) {
             const authorities = this.collectiveAuthorities
             if (
                 !authorities ||
                 source !== authorities.broker ||
-                event.data.runId !== authorities.runId
+                event.payload.runId !== authorities.runId
             ) return
             if (
                 WorkLeaseReleased.is(event) &&
                 !this.leases.matchesLease(
-                    event.data.storyId,
-                    event.data.runId,
-                    event.data.leaseId,
+                    event.payload.storyId,
+                    event.payload.runId,
+                    event.payload.leaseId,
                 )
             ) return
             this.leases.observe(event, authorities.runId)
             return
         }
         if (ModelInvocationMeasured.is(event)) {
-            if (!this.acceptsMeasurement(source, event.data)) return
-            if (this.seenMeasurementIds.has(event.data.measurementId)) return
-            this.seenMeasurementIds.add(event.data.measurementId)
-            this.handleMeasurement(event.data)
+            if (!this.acceptsMeasurement(source, event.payload)) return
+            if (this.seenMeasurementIds.has(event.payload.measurementId)) return
+            this.seenMeasurementIds.add(event.payload.measurementId)
+            this.handleMeasurement(event.payload)
             return
         }
         if (ClaudeStreamChunk.is(event)) {
-            if (!this.acceptsStreamSource(source, event.data.agentId)) return
-            this.handleStreamChunk(event.data)
+            if (!this.acceptsStreamSource(source, event.payload.agentId)) return
+            this.handleStreamChunk(event.payload)
             return
         }
     }
@@ -164,7 +165,7 @@ export class TokenUsageForwarder extends BaseObserver {
     }
 
     private acceptsMeasurement(
-        source: Participant,
+        source: BusMember,
         item: ModelInvocationMeasuredData,
     ): boolean {
         const isCollective =
@@ -180,7 +181,7 @@ export class TokenUsageForwarder extends BaseObserver {
     }
 
     private acceptsStreamSource(
-        source: Participant,
+        source: BusMember,
         storyId: string,
     ): boolean {
         const isCollective =
@@ -212,10 +213,10 @@ export class TokenUsageForwarder extends BaseObserver {
 
 export interface CollectiveTokenUsageAuthorities {
     runId: string
-    broker: Participant
+    broker: BusMember
     outcomeAuthority: StoryOutcomeAuthority
     measurementAuthorities: readonly {
-        source: Participant
+        source: BusMember
         phases: readonly ModelInvocationPhase[]
     }[]
 }

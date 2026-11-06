@@ -1,4 +1,5 @@
-import type { Participant, SemanticEvent } from "./mozaik.js"
+import type { SemanticEvent } from "./mozaik.js"
+import type { BusMember } from "./coordination.js"
 
 import {
     Critique,
@@ -20,38 +21,38 @@ import type { StoryOutcomeAuthority } from "./story-outcome-authority.js"
  * runs omit these authorities and preserve the historical open-bus behaviour.
  */
 export class RecoverySourceAuthority {
-    private leaseAuthority: Participant | null = null
-    private qualityAuthority: Participant | null = null
-    private blockAuthority: Participant | null = null
-    private criticAuthority: Participant | null = null
+    private leaseAuthority: BusMember | null = null
+    private qualityAuthority: BusMember | null = null
+    private blockAuthority: BusMember | null = null
+    private criticAuthority: BusMember | null = null
     private readonly blockedLeases = new Map<string, string>()
 
     constructor(
         private readonly outcomeAuthority?: StoryOutcomeAuthority,
     ) {}
 
-    setLeaseAuthority(authority: Participant): void {
+    setLeaseAuthority(authority: BusMember): void {
         if (this.leaseAuthority && this.leaseAuthority !== authority) {
             throw new Error("recovery lease authority is already bound")
         }
         this.leaseAuthority = authority
     }
 
-    setQualityAuthority(authority: Participant): void {
+    setQualityAuthority(authority: BusMember): void {
         if (this.qualityAuthority && this.qualityAuthority !== authority) {
             throw new Error("recovery quality authority is already bound")
         }
         this.qualityAuthority = authority
     }
 
-    setBlockAuthority(authority: Participant): void {
+    setBlockAuthority(authority: BusMember): void {
         if (this.blockAuthority && this.blockAuthority !== authority) {
             throw new Error("recovery block authority is already bound")
         }
         this.blockAuthority = authority
     }
 
-    setCriticAuthority(authority: Participant): void {
+    setCriticAuthority(authority: BusMember): void {
         if (this.criticAuthority && this.criticAuthority !== authority) {
             throw new Error("recovery critic authority is already bound")
         }
@@ -60,8 +61,8 @@ export class RecoverySourceAuthority {
 
     /** Consume every lease lifecycle event, applying it only from the Broker. */
     observeLease(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
         leases: ActiveLeaseRegistry,
         runId: string | undefined,
     ): boolean {
@@ -69,16 +70,16 @@ export class RecoverySourceAuthority {
             if (
                 this.blockAuthority &&
                 source === this.blockAuthority &&
-                (!runId || event.data.runId === runId)
+                (!runId || event.payload.runId === runId)
             ) {
                 this.blockedLeases.set(
                     blockKey(
-                        event.data.runId,
-                        event.data.storyId,
-                        event.data.leaseId,
-                        event.data.generation,
+                        event.payload.runId,
+                        event.payload.storyId,
+                        event.payload.leaseId,
+                        event.payload.generation,
                     ),
-                    event.data.blockId,
+                    event.payload.blockId,
                 )
             }
             return true
@@ -87,7 +88,7 @@ export class RecoverySourceAuthority {
             if (
                 this.blockAuthority &&
                 source === this.blockAuthority &&
-                (!runId || !event.data.runId || event.data.runId === runId)
+                (!runId || !event.payload.runId || event.payload.runId === runId)
             ) this.blockedLeases.clear()
             return true
         }
@@ -105,7 +106,7 @@ export class RecoverySourceAuthority {
     }
 
     /** Validate the source of an event that may trigger recovery policy. */
-    accepts(source: Participant, event: SemanticEvent<unknown>): boolean {
+    accepts(source: BusMember, event: SemanticEvent<string, unknown>): boolean {
         if (Critique.is(event)) {
             return this.outcomeAuthority
                 ? this.criticAuthority !== null && source === this.criticAuthority
@@ -113,21 +114,21 @@ export class RecoverySourceAuthority {
         }
         if (StoryResult.is(event)) {
             if (
-                event.data.runId &&
-                event.data.leaseId &&
-                event.data.generation !== undefined &&
-                event.data.suspension?.kind === "dependency" &&
+                event.payload.runId &&
+                event.payload.leaseId &&
+                event.payload.generation !== undefined &&
+                event.payload.suspension?.kind === "dependency" &&
                 this.blockedLeases.get(
                     blockKey(
-                        event.data.runId,
-                        event.data.storyId,
-                        event.data.leaseId,
-                        event.data.generation,
+                        event.payload.runId,
+                        event.payload.storyId,
+                        event.payload.leaseId,
+                        event.payload.generation,
                     ),
-                ) === event.data.suspension.blockId
+                ) === event.payload.suspension.blockId
             ) return false
             return !this.outcomeAuthority ||
-                this.outcomeAuthority.matchesResult(source, event.data)
+                this.outcomeAuthority.matchesResult(source, event.payload)
         }
         if (StoryQualityCompleted.is(event)) {
             return this.outcomeAuthority

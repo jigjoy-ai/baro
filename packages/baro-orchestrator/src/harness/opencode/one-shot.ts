@@ -5,6 +5,7 @@
  * the live stderr audit trail and allows a gentler SIGTERM.
  */
 
+import { spawnReadOnly } from "../os-sandbox.js"
 import { ChildProcess } from "child_process"
 import { writeFile } from "node:fs/promises"
 import { join } from "node:path"
@@ -104,7 +105,7 @@ export async function runOpenCodeOneShot(
         let proc: ChildProcess
         try {
             const childEnvironment = harnessChildEnvironment()
-            proc = spawn(opts.opencodeBin ?? "opencode", args, {
+            proc = spawnReadOnly("opencode", opts.opencodeBin ?? "opencode", args, {
                 cwd: opts.cwd,
                 env: safeConfig
                     ? {

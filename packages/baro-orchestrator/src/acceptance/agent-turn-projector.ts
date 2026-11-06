@@ -1,9 +1,7 @@
 import {
-    BaseObserver,
     type ModelMessageItem,
-    type Participant,
-    type SemanticEvent,
-} from "../runtime/mozaik.js"
+    type SemanticEvent, toWire } from "../runtime/mozaik.js"
+import { BusMember } from "../runtime/coordination.js"
 
 import {
     AgentResult,
@@ -52,13 +50,13 @@ interface PendingProjectedTerminal {
     isError: boolean
     resultText: string
     /** Exact nested CLI which emitted this candidate. */
-    source: Participant | null
+    source: BusMember | null
     correlation: StoryResultAuthorityCorrelation | null
     attempt: number | null
 }
 
 /** Projects one-shot CLI message streams into the Critic's neutral terminal contract. */
-export class AgentTurnProjector extends BaseObserver {
+export class AgentTurnProjector extends BusMember {
     private readonly text = new Map<string, string[]>()
     private readonly backends = new Map<string, string>()
     private readonly completed = new Set<string>()
@@ -70,14 +68,14 @@ export class AgentTurnProjector extends BaseObserver {
     private readonly activeLeases = new Map<string, LeaseCorrelation>()
     private readonly seenNativeTerminalIds = new Set<string>()
     private readonly handledReverifications = new Set<string>()
-    private readonly nativeSources = new Map<string, Participant>()
+    private readonly nativeSources = new Map<string, BusMember>()
     private readonly pendingProjectedTerminals = new Map<
         string,
         PendingProjectedTerminal
     >()
     private readonly lastFinalizedAttempts = new Map<string, number>()
-    private leaseAuthority: Participant | null = null
-    private reverificationAuthority: Participant | null = null
+    private leaseAuthority: BusMember | null = null
+    private reverificationAuthority: BusMember | null = null
 
     constructor(private readonly opts: AgentTurnProjectorOptions = {}) {
         super()
@@ -88,7 +86,7 @@ export class AgentTurnProjector extends BaseObserver {
         }
     }
 
-    setLeaseAuthority(authority: Participant): void {
+    setLeaseAuthority(authority: BusMember): void {
         if (this.leaseAuthority && this.leaseAuthority !== authority) {
             throw new Error("terminal projector lease authority is already bound")
         }
@@ -96,7 +94,7 @@ export class AgentTurnProjector extends BaseObserver {
     }
 
     /** Bind the exact AcceptanceGate allowed to request a same-candidate replay. */
-    setReverificationAuthority(authority: Participant): void {
+    setReverificationAuthority(authority: BusMember): void {
         if (
             this.reverificationAuthority &&
             this.reverificationAuthority !== authority
@@ -138,7 +136,7 @@ export class AgentTurnProjector extends BaseObserver {
     }
 
     override async onExternalModelMessage(
-        source: Participant,
+        source: BusMember,
         item: ModelMessageItem,
     ): Promise<void> {
         const agentId = agentIdOf(source)
@@ -148,7 +146,7 @@ export class AgentTurnProjector extends BaseObserver {
         // A new assistant message is positive evidence that a new turn/attempt
         // started after any previously projected terminal event.
         this.completed.delete(agentId)
-        const json = item.toJSON() as { content?: Array<{ text?: string }> }
+        const json = toWire(item) as { content?: Array<{ text?: string }> }
         const parts = (json.content ?? [])
             .map((part) => part.text ?? "")
             .filter((part) => part.length > 0)
@@ -161,62 +159,62 @@ export class AgentTurnProjector extends BaseObserver {
     }
 
     override async onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): Promise<void> {
         if (WorkLeaseGranted.is(event)) {
             if (!this.acceptsLeaseSource(source)) return
             if (
                 this.opts.outcomeAuthority &&
-                event.data.runId !== this.opts.outcomeAuthority.runId
+                event.payload.runId !== this.opts.outcomeAuthority.runId
             ) return
-            this.activeLeases.set(event.data.request.storyId, {
-                runId: event.data.runId,
-                leaseId: event.data.leaseId,
-                generation: event.data.generation,
+            this.activeLeases.set(event.payload.request.storyId, {
+                runId: event.payload.runId,
+                leaseId: event.payload.leaseId,
+                generation: event.payload.generation,
                 authoritative:
                     this.leaseAuthority !== null &&
                     source === this.leaseAuthority,
             })
-            this.pendingProjectedTerminals.delete(event.data.request.storyId)
+            this.pendingProjectedTerminals.delete(event.payload.request.storyId)
             return
         }
         if (WorkLeaseReleased.is(event)) {
             if (!this.acceptsLeaseSource(source)) return
-            const active = this.activeLeases.get(event.data.storyId)
+            const active = this.activeLeases.get(event.payload.storyId)
             if (
-                active?.runId === event.data.runId &&
-                active.leaseId === event.data.leaseId
+                active?.runId === event.payload.runId &&
+                active.leaseId === event.payload.leaseId
             ) {
-                this.activeLeases.delete(event.data.storyId)
-                this.pendingProjectedTerminals.delete(event.data.storyId)
+                this.activeLeases.delete(event.payload.storyId)
+                this.pendingProjectedTerminals.delete(event.payload.storyId)
             }
             return
         }
         if (StoryQualityReverificationRequested.is(event)) {
-            this.reverify(source, event.data)
+            this.reverify(source, event.payload)
             return
         }
         if (OneShotAttemptFinalized.is(event)) {
-            this.finalizeOneShotAttempt(source, event.data)
+            this.finalizeOneShotAttempt(source, event.payload)
             return
         }
         if (StoryRouted.is(event)) {
             if (this.opts.outcomeAuthority) {
-                const active = this.activeLeases.get(event.data.storyId)
+                const active = this.activeLeases.get(event.payload.storyId)
                 if (
                     !active ||
-                    event.data.runId !== active.runId ||
-                    event.data.leaseId !== active.leaseId ||
-                    event.data.generation !== active.generation ||
+                    event.payload.runId !== active.runId ||
+                    event.payload.leaseId !== active.leaseId ||
+                    event.payload.generation !== active.generation ||
                     !this.opts.outcomeAuthority.matchesSpawnAuthority(source, {
                         runId: active.runId,
-                        storyId: event.data.storyId,
+                        storyId: event.payload.storyId,
                         leaseId: active.leaseId,
                     })
                 ) return
             }
-            this.backends.set(event.data.storyId, event.data.backend)
+            this.backends.set(event.payload.storyId, event.payload.backend)
             return
         }
         if (AgentResult.is(event)) {
@@ -224,55 +222,55 @@ export class AgentTurnProjector extends BaseObserver {
             return
         }
         if (CodexTurnEvent.is(event)) {
-            if (!this.acceptsNativeSource(source, event.data.agentId)) return
-            this.selectNativeSource(source, event.data.agentId)
-            if (event.data.phase === "started") this.completed.delete(event.data.agentId)
-            else if (event.data.phase === "completed") this.complete(event.data.agentId, "codex", false)
-            else if (event.data.phase === "failed") this.complete(event.data.agentId, "codex", true)
+            if (!this.acceptsNativeSource(source, event.payload.agentId)) return
+            this.selectNativeSource(source, event.payload.agentId)
+            if (event.payload.phase === "started") this.completed.delete(event.payload.agentId)
+            else if (event.payload.phase === "completed") this.complete(event.payload.agentId, "codex", false)
+            else if (event.payload.phase === "failed") this.complete(event.payload.agentId, "codex", true)
             return
         }
         if (OpenCodeSystem.is(event)) {
-            if (!this.acceptsNativeSource(source, event.data.agentId)) return
-            this.selectNativeSource(source, event.data.agentId)
-            if (event.data.subtype === "step_start") this.completed.delete(event.data.agentId)
-            else if (event.data.subtype === "step_finish") {
-                this.complete(event.data.agentId, "opencode", false)
+            if (!this.acceptsNativeSource(source, event.payload.agentId)) return
+            this.selectNativeSource(source, event.payload.agentId)
+            if (event.payload.subtype === "step_start") this.completed.delete(event.payload.agentId)
+            else if (event.payload.subtype === "step_finish") {
+                this.complete(event.payload.agentId, "opencode", false)
             }
             return
         }
         if (DevinTurnEvent.is(event)) {
-            if (!this.acceptsNativeSource(source, event.data.agentId)) return
-            this.selectNativeSource(source, event.data.agentId)
-            if (event.data.turnType === "turn_end") this.complete(event.data.agentId, "devin", false)
+            if (!this.acceptsNativeSource(source, event.payload.agentId)) return
+            this.selectNativeSource(source, event.payload.agentId)
+            if (event.payload.turnType === "turn_end") this.complete(event.payload.agentId, "devin", false)
             return
         }
         if (PiTurnEvent.is(event)) {
-            if (!this.acceptsNativeSource(source, event.data.agentId)) return
-            this.selectNativeSource(source, event.data.agentId)
-            if (event.data.turnType === "message_start") {
-                this.completed.delete(event.data.agentId)
-            } else if (event.data.turnType === "message_end") {
-                const raw = event.data.raw as Record<string, unknown>
+            if (!this.acceptsNativeSource(source, event.payload.agentId)) return
+            this.selectNativeSource(source, event.payload.agentId)
+            if (event.payload.turnType === "message_start") {
+                this.completed.delete(event.payload.agentId)
+            } else if (event.payload.turnType === "message_end") {
+                const raw = event.payload.raw as Record<string, unknown>
                 const message = raw.message as Record<string, unknown> | undefined
-                if (message?.role === "assistant") this.complete(event.data.agentId, "pi", false)
+                if (message?.role === "assistant") this.complete(event.payload.agentId, "pi", false)
             }
         }
     }
 
-    private acceptsNativeSource(source: Participant, agentId: string): boolean {
+    private acceptsNativeSource(source: BusMember, agentId: string): boolean {
         return this.opts.outcomeAuthority === undefined ||
             this.opts.outcomeAuthority.matchesTerminalTurnSource(source, agentId)
     }
 
-    private acceptsLeaseSource(source: Participant): boolean {
+    private acceptsLeaseSource(source: BusMember): boolean {
         return this.opts.outcomeAuthority
             ? this.leaseAuthority !== null && source === this.leaseAuthority
             : this.leaseAuthority === null || source === this.leaseAuthority
     }
 
     private rememberNativeCandidate(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): void {
         const input = criticInput(event)
         if (!input || input.isError || !input.resultText) return
@@ -290,7 +288,7 @@ export class AgentTurnProjector extends BaseObserver {
         })
     }
 
-    private selectNativeSource(source: Participant, agentId: string): void {
+    private selectNativeSource(source: BusMember, agentId: string): void {
         // Legacy adapters historically reconstruct lightweight source objects
         // around the same agentId. Exact identity is meaningful only when the
         // collective registry is present.
@@ -338,7 +336,7 @@ export class AgentTurnProjector extends BaseObserver {
     }
 
     private finalizeOneShotAttempt(
-        source: Participant,
+        source: BusMember,
         finalized: {
             runId: string
             storyId: string
@@ -479,7 +477,7 @@ export class AgentTurnProjector extends BaseObserver {
     }
 
     private reverify(
-        source: Participant,
+        source: BusMember,
         request: {
             runId: string
             requestId: string
@@ -547,14 +545,14 @@ export class AgentTurnProjector extends BaseObserver {
         )
     }
 
-    private emit(event: SemanticEvent<unknown>): void {
-        for (const environment of this.getEnvironments()) {
-            environment.deliverSemanticEvent(this, event)
+    private emit(event: SemanticEvent<string, unknown>): void {
+        for (const environment of this.getBuses()) {
+            environment.publish(this, event)
         }
     }
 }
 
-function agentIdOf(source: Participant): string | null {
+function agentIdOf(source: BusMember): string | null {
     const id = (source as { agentId?: unknown }).agentId
     return typeof id === "string" && id ? id : null
 }

@@ -1,22 +1,15 @@
 /**
- * StoryFactory — Mozaik-native participant that spawns StoryAgent
- * instances in response to StorySpawnRequest events on the bus.
- *
- * It removes direct coupling between either coordinator and StoryAgent:
- * coordinators request work, while the factory owns agent lifecycle.
- *
- * Replacing this factory (e.g. with a mock for tests, or with a
- * remote-execution variant) requires no changes to Conductor.
+ * StoryFactory — Mozaik-native participant that claims or bids on offered
+ * work and spawns a story agent for each lease it is granted. The Board
+ * requests work; the factory owns agent lifecycle.
  */
 
 import {
-    BaseObserver,
-    Participant,
     SemanticEvent,
 } from "../runtime/mozaik.js"
 
 import { SPAWN_GATES, announceGates } from "../execution/gate-registry.js"
-import { AgenticEnvironment } from "../runtime/mozaik.js"
+import { CoordinationBus, BusMember } from "../runtime/coordination.js"
 import type { GatewayBillingCoordinator } from "../telemetry/billing/index.js"
 import {
     RunCompleted,
@@ -86,34 +79,33 @@ Baro quarantines the story worktree if cooperative process quiescence cannot be 
 
 export interface StoryFactoryOptions {
     cwd: string
-    coordinationMode?: "legacy" | "collective"
-    runId?: string
+    runId: string
     workerId?: string
     /** Object-identity authority allowed to grant/release collective leases. */
-    leaseAuthority?: Participant
+    leaseAuthority?: BusMember
     /** Exact CollectiveBoard allowed to publish executable work offers. */
-    offerAuthority?: Participant
+    offerAuthority?: BusMember
     /** Shared run-scoped authority for dynamic factory/agent outcomes. */
     outcomeAuthority?: StoryOutcomeAuthority
     /** Exact CollaborationBridge whose correlated deliveries may reach a
      * collective worker. Presence enables fail-closed message validation. */
-    targetedMessageAuthority?: Participant
+    targetedMessageAuthority?: BusMember
     /** Exact Supervisor allowed to abort the current collective lease. When
      * omitted, collective bus interventions are disabled. */
-    interventionAuthority?: Participant
+    interventionAuthority?: BusMember
     /** Collective Board allowed to answer native `propose_replan` tool calls. */
-    runtimeReplanDecisionAuthority?: Participant
+    runtimeReplanDecisionAuthority?: BusMember
     /** Exact Critic allowed to complete a continuation-capable worker turn. */
-    turnReviewAuthority?: Participant
+    turnReviewAuthority?: BusMember
     /** Exact terminal projector used to correlate one-shot CLI candidates. */
-    terminalTurnAuthority?: Participant
+    terminalTurnAuthority?: BusMember
     /** Exact collective AcceptanceGate that remains responsible for quality
      * after an inconclusive continuation-worker handoff. */
-    acceptanceGateAuthority?: Participant
+    acceptanceGateAuthority?: BusMember
     /** Bound for the Critic handshake before an infrastructure failure. */
     turnReviewTimeoutMs?: number
     /** Exact telemetry reducer whose measurements may influence advisory bids. */
-    telemetryAuthority?: Participant
+    telemetryAuthority?: BusMember
     collaboration?: {
         commandPath: string
         /** Exact manager-owned Bridge capability issuer. Its private storage
@@ -129,11 +121,9 @@ export interface StoryFactoryOptions {
     }
     /**
      * When set, each story runs in its own isolated git worktree instead of
-     * the shared `cwd` (issue #50). Collective mode requires this isolation.
+     * `cwd` (issue #50); a story whose worktree cannot be created fails.
      */
     worktrees?: WorktreeManager
-    /** Fail the lease when an isolated worktree cannot be created. */
-    requireWorktree?: boolean
     /** The story's gate, run on an unjudged attempt's restored commits; null
      * means inconclusive. Absent disables re-verification. */
     commitGate?(
@@ -151,7 +141,7 @@ export interface StoryFactoryOptions {
      *               subprocess
      *   "pi"      — PiStoryAgent wrapping a `pi --mode json -p` subprocess
      *   "devin"   — DevinStoryAgent driving one `devin acp` turn
-     * Same bus contract for all — Conductor, Critic, Surgeon,
+     * Same bus contract for all — Board, Critic, Surgeon,
      * Sentry, Librarian, Cartographer don't notice the swap.
      */
     llm?: "claude" | "openai" | "codex" | "opencode" | "pi" | "devin"
@@ -221,9 +211,9 @@ export interface StoryFactoryBidOptions {
     maxConcurrent?: number
 }
 
-export class StoryFactory extends BaseObserver {
+export class StoryFactory extends BusMember {
     /** The bus environment, wired in before any spawn; passed to the executor. */
-    private envRef: AgenticEnvironment | null = null
+    private envRef: CoordinationBus | null = null
     private readonly active: Map<string, StoryExecution> = new Map()
     /** Disposed terminal executions retained only until their exact lease is
      * released, so a delayed block decision can still prove quiescence. */
@@ -275,19 +265,16 @@ export class StoryFactory extends BaseObserver {
 
     constructor(private readonly opts: StoryFactoryOptions) {
         super()
-        if (opts.coordinationMode === "collective" && !opts.leaseAuthority) {
+        if (!opts.leaseAuthority) {
             throw new Error("collective StoryFactory requires a leaseAuthority")
         }
-        if (opts.coordinationMode === "collective" && !opts.offerAuthority) {
+        if (!opts.offerAuthority) {
             throw new Error("collective StoryFactory requires an offerAuthority")
         }
-        if (opts.coordinationMode === "collective" && !opts.outcomeAuthority) {
+        if (!opts.outcomeAuthority) {
             throw new Error("collective StoryFactory requires an outcomeAuthority")
         }
-        if (
-            opts.coordinationMode === "collective" &&
-            opts.outcomeAuthority?.runId !== this.runId()
-        ) {
+        if (opts.outcomeAuthority.runId !== this.runId()) {
             throw new Error("collective StoryFactory outcomeAuthority runId mismatch")
         }
         this.executor = opts.executor ?? new LocalStoryExecutor()
@@ -321,39 +308,36 @@ export class StoryFactory extends BaseObserver {
         this.routeLearner?.clearPending()
     }
 
-    setEnvironment(env: AgenticEnvironment): void {
+    setEnvironment(env: CoordinationBus): void {
         this.envRef = env
-        if (this.opts.coordinationMode === "collective") {
-            // Advertise as soon as the worker joins. Board preparation can
-            // synchronously emit offers before the outer RunStart event reaches
-            // later participants, so waiting only for RunStart loses early bids.
-            this.advertiseCapabilities()
-        }
+        // Advertise as soon as the worker joins. Board preparation can
+        // synchronously emit offers before the outer RunStart event reaches
+        // later participants, so waiting only for RunStart loses early bids.
+        this.advertiseCapabilities()
     }
 
     override async onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): Promise<void> {
         await this.handleEvent(event, source, false)
     }
 
-    override async onInternalEvent(event: SemanticEvent<unknown>): Promise<void> {
+    override async onInternalEvent(event: SemanticEvent<string, unknown>): Promise<void> {
         await this.handleEvent(event, null, true)
     }
 
     private async handleEvent(
-        event: SemanticEvent<unknown>,
-        source: Participant | null,
+        event: SemanticEvent<string, unknown>,
+        source: BusMember | null,
         internal: boolean,
     ): Promise<void> {
         if (
-            this.opts.coordinationMode === "collective" &&
             this.bidOptions &&
             source === this.opts.telemetryAuthority &&
             ModelInvocationMeasured.is(event)
         ) {
-            const measurement = event.data
+            const measurement = event.payload
             const correlation = measurement.leaseId
                 ? this.telemetryLeases.get(measurement.leaseId)
                 : undefined
@@ -373,7 +357,6 @@ export class StoryFactory extends BaseObserver {
             return
         }
         if (
-            this.opts.coordinationMode === "collective" &&
             RunStartRequest.is(event)
         ) {
             this.advertiseCapabilities()
@@ -381,25 +364,23 @@ export class StoryFactory extends BaseObserver {
         }
 
         if (
-            this.opts.coordinationMode === "collective" &&
             WorkOffered.is(event) &&
-            event.data.runId === this.runId() &&
+            event.payload.runId === this.runId() &&
             source === this.opts.offerAuthority
         ) {
-            if (this.bidOptions) this.bid(event.data)
-            else this.claim(event.data)
+            if (this.bidOptions) this.bid(event.payload)
+            else this.claim(event.payload)
             return
         }
 
         if (
-            this.opts.coordinationMode === "collective" &&
             WorkOfferRetractionResolved.is(event) &&
-            event.data.runId === this.runId() &&
-            event.data.disposition === "retracted" &&
+            event.payload.runId === this.runId() &&
+            event.payload.disposition === "retracted" &&
             source === this.opts.leaseAuthority
         ) {
             for (const [bidId, stored] of this.bidRoutes) {
-                if (stored.offerId === event.data.offerId) {
+                if (stored.offerId === event.payload.offerId) {
                     this.bidRoutes.delete(bidId)
                 }
             }
@@ -407,44 +388,43 @@ export class StoryFactory extends BaseObserver {
         }
 
         if (
-            this.opts.coordinationMode === "collective" &&
             WorkLeaseGranted.is(event) &&
-            event.data.runId === this.runId() &&
+            event.payload.runId === this.runId() &&
             source === this.opts.leaseAuthority
         ) {
-            if (event.data.workerId !== this.workerId()) return
+            if (event.payload.workerId !== this.workerId()) return
             this.opts.outcomeAuthority!.registerSpawnAuthority(
                 {
-                    runId: event.data.runId,
-                    storyId: event.data.request.storyId,
-                    leaseId: event.data.leaseId,
+                    runId: event.payload.runId,
+                    storyId: event.payload.request.storyId,
+                    leaseId: event.payload.leaseId,
                 },
                 this,
             )
             if (this.bidOptions) {
                 for (const [bidId, stored] of this.bidRoutes) {
                     if (
-                        stored.offerId === event.data.offerId &&
-                        bidId !== event.data.bidId
+                        stored.offerId === event.payload.offerId &&
+                        bidId !== event.payload.bidId
                     ) this.bidRoutes.delete(bidId)
                 }
             }
             if (this.bidOptions) {
-                const stored = event.data.bidId
-                    ? this.bidRoutes.get(event.data.bidId)
+                const stored = event.payload.bidId
+                    ? this.bidRoutes.get(event.payload.bidId)
                     : undefined
                 if (
                     !stored ||
-                    stored.offerId !== event.data.offerId ||
-                    !event.data.route ||
-                    !sameRouteDescriptor(stored.descriptor, event.data.route)
+                    stored.offerId !== event.payload.offerId ||
+                    !event.payload.route ||
+                    !sameRouteDescriptor(stored.descriptor, event.payload.route)
                 ) {
                     this.emitBus(
                         StorySpawnFailed.create({
-                            runId: event.data.runId,
-                            offerId: event.data.offerId,
-                            leaseId: event.data.leaseId,
-                            storyId: event.data.request.storyId,
+                            runId: event.payload.runId,
+                            offerId: event.payload.offerId,
+                            leaseId: event.payload.leaseId,
+                            storyId: event.payload.request.storyId,
                             error: "market lease did not match the worker's stored bid",
                             failure: {
                                 kind: "infrastructure",
@@ -454,94 +434,90 @@ export class StoryFactory extends BaseObserver {
                     )
                     return
                 }
-                this.leasedRoutes.set(event.data.request.storyId, stored.route)
+                this.leasedRoutes.set(event.payload.request.storyId, stored.route)
             }
-            this.leases.set(event.data.request.storyId, event.data)
-            this.telemetryLeases.set(event.data.leaseId, {
-                storyId: event.data.request.storyId,
-                generation: event.data.generation,
+            this.leases.set(event.payload.request.storyId, event.payload)
+            this.telemetryLeases.set(event.payload.leaseId, {
+                storyId: event.payload.request.storyId,
+                generation: event.payload.generation,
             })
             this.routeLearner?.beginLease(
-                event.data.leaseId,
-                event.data.request.storyId,
+                event.payload.leaseId,
+                event.payload.request.storyId,
             )
             this.emitBus(
                 StorySpawnRequest.create({
-                    ...event.data.request,
-                    offerId: event.data.offerId,
-                    runId: event.data.runId,
-                    leaseId: event.data.leaseId,
-                    generation: event.data.generation,
-                    workerId: event.data.workerId,
+                    ...event.payload.request,
+                    offerId: event.payload.offerId,
+                    runId: event.payload.runId,
+                    leaseId: event.payload.leaseId,
+                    generation: event.payload.generation,
+                    workerId: event.payload.workerId,
                 }),
             )
             return
         }
 
         if (StorySpawnRequest.is(event)) {
-            if (this.opts.coordinationMode === "collective") {
-                // Collective spawn requests are projected by this worker only
-                // after an authorized lease. Never trust an external replay.
-                if (!internal) return
-                const lease = this.leases.get(event.data.storyId)
-                if (
-                    !lease ||
-                    event.data.runId !== this.runId() ||
-                    event.data.workerId !== this.workerId() ||
-                    event.data.leaseId !== lease.leaseId ||
-                    event.data.generation !== lease.generation
-                ) return
-            }
-            await this.spawn(event.data)
+            // Spawn requests are projected by this worker only after an
+            // authorized lease. Never trust an external replay.
+            if (!internal) return
+            const lease = this.leases.get(event.payload.storyId)
+            if (
+                !lease ||
+                event.payload.runId !== this.runId() ||
+                event.payload.workerId !== this.workerId() ||
+                event.payload.leaseId !== lease.leaseId ||
+                event.payload.generation !== lease.generation
+            ) return
+            await this.spawn(event.payload)
             return
         }
 
         if (
-            this.opts.coordinationMode === "collective" &&
             WorkBlockAccepted.is(event) &&
-            event.data.runId === this.runId() &&
+            event.payload.runId === this.runId() &&
             source === this.opts.runtimeReplanDecisionAuthority
         ) {
-            const lease = this.leases.get(event.data.storyId)
+            const lease = this.leases.get(event.payload.storyId)
             if (
-                lease?.leaseId === event.data.leaseId &&
-                lease.generation === event.data.generation
+                lease?.leaseId === event.payload.leaseId &&
+                lease.generation === event.payload.generation
             ) {
-                this.beginDependencySuspension(event.data)
+                this.beginDependencySuspension(event.payload)
             }
             return
         }
 
         if (
-            this.opts.coordinationMode === "collective" &&
             WorkLeaseReleased.is(event) &&
-            event.data.runId === this.runId() &&
+            event.payload.runId === this.runId() &&
             source === this.opts.leaseAuthority
         ) {
-            const lease = this.leases.get(event.data.storyId)
-            if (lease?.leaseId === event.data.leaseId) {
+            const lease = this.leases.get(event.payload.storyId)
+            if (lease?.leaseId === event.payload.leaseId) {
                 if (this.routeLearner && this.configuredBidRoute) {
                     const learned = this.routeLearner.completeLease(
-                        event.data.storyId,
-                        event.data.leaseId,
-                        event.data.reason,
+                        event.payload.storyId,
+                        event.payload.leaseId,
+                        event.payload.reason,
                     )
                     this.publishLearnedEstimate(learned)
                 }
-                const exec = this.active.get(event.data.storyId)
+                const exec = this.active.get(event.payload.storyId)
                 if (exec && this.envRef) {
                     exec.abort?.()
                     exec.dispose(this.envRef)
-                    this.active.delete(event.data.storyId)
+                    this.active.delete(event.payload.storyId)
                 }
-                this.leases.delete(event.data.storyId)
-                this.suspensions.delete(event.data.storyId)
-                this.settledExecutions.delete(event.data.storyId)
+                this.leases.delete(event.payload.storyId)
+                this.suspensions.delete(event.payload.storyId)
+                this.settledExecutions.delete(event.payload.storyId)
                 this.routeLearner?.forgetLease(
-                    event.data.storyId,
-                    event.data.leaseId,
+                    event.payload.storyId,
+                    event.payload.leaseId,
                 )
-                this.leasedRoutes.delete(event.data.storyId)
+                this.leasedRoutes.delete(event.payload.storyId)
                 if (lease.bidId) this.bidRoutes.delete(lease.bidId)
             }
             return
@@ -549,30 +525,27 @@ export class StoryFactory extends BaseObserver {
 
         if (
             RunCompleted.is(event) &&
-            (this.opts.coordinationMode !== "collective" ||
-                (event.data.runId === this.runId() &&
-                    source === this.opts.runtimeReplanDecisionAuthority))
+            event.payload.runId === this.runId() &&
+            source === this.opts.runtimeReplanDecisionAuthority
         ) {
             this.bidRoutes.clear()
             this.leasedRoutes.clear()
             return
         }
 
-        if (StoryIntervention.is(event) && event.data.action === "abort") {
-            if (this.opts.coordinationMode === "collective") {
-                const lease = this.leases.get(event.data.storyId)
-                if (
-                    source !== this.opts.interventionAuthority ||
-                    !lease ||
-                    event.data.runId !== this.runId() ||
-                    event.data.leaseId !== lease.leaseId ||
-                    event.data.generation !== lease.generation
-                ) return
-            }
-            const aborted = this.abort(event.data.storyId)
+        if (StoryIntervention.is(event) && event.payload.action === "abort") {
+            const lease = this.leases.get(event.payload.storyId)
+            if (
+                source !== this.opts.interventionAuthority ||
+                !lease ||
+                event.payload.runId !== this.runId() ||
+                event.payload.leaseId !== lease.leaseId ||
+                event.payload.generation !== lease.generation
+            ) return
+            const aborted = this.abort(event.payload.storyId)
             if (aborted) {
                 process.stderr.write(
-                    `[story-factory] ${event.data.storyId} aborted (${event.data.source}): ${event.data.reason}\n`,
+                    `[story-factory] ${event.payload.storyId} aborted (${event.payload.source}): ${event.payload.reason}\n`,
                 )
             }
             return
@@ -581,35 +554,31 @@ export class StoryFactory extends BaseObserver {
         // When a story finishes (passes or fails), dispose its execution so we
         // can clean up its bus membership / executor resources.
         if (StoryResult.is(event)) {
-            if (this.opts.coordinationMode === "collective") {
-                if (
-                    !source ||
-                    !this.opts.outcomeAuthority!.matchesResult(source, event.data)
-                ) return
-                const lease = this.leases.get(event.data.storyId)
-                if (
-                    !lease ||
-                    event.data.runId !== this.runId() ||
-                    event.data.leaseId !== lease.leaseId ||
-                    event.data.generation !== lease.generation
-                ) return
-            }
             if (
-                event.data.failure?.kind === "infrastructure" &&
-                event.data.failure.code ===
+                !source ||
+                !this.opts.outcomeAuthority!.matchesResult(source, event.payload)
+            ) return
+            const lease = this.leases.get(event.payload.storyId)
+            if (
+                !lease ||
+                event.payload.runId !== this.runId() ||
+                event.payload.leaseId !== lease.leaseId ||
+                event.payload.generation !== lease.generation
+            ) return
+            if (
+                event.payload.failure?.kind === "infrastructure" &&
+                event.payload.failure.code ===
                     "process_quiescence_uncertified"
             ) {
-                this.uncertifiedWorktreeIds.add(event.data.storyId)
+                this.uncertifiedWorktreeIds.add(event.payload.storyId)
             }
-            const exec = this.active.get(event.data.storyId)
+            const exec = this.active.get(event.payload.storyId)
             if (exec && this.envRef) {
                 exec.dispose(this.envRef)
-                this.active.delete(event.data.storyId)
-                if (this.opts.coordinationMode === "collective") {
-                    this.settledExecutions.set(event.data.storyId, exec)
-                }
-            } else if (this.spawning.has(event.data.storyId)) {
-                this.settledWhileSpawning.add(event.data.storyId)
+                this.active.delete(event.payload.storyId)
+                this.settledExecutions.set(event.payload.storyId, exec)
+            } else if (this.spawning.has(event.payload.storyId)) {
+                this.settledWhileSpawning.add(event.payload.storyId)
             }
         }
     }
@@ -693,8 +662,8 @@ export class StoryFactory extends BaseObserver {
     }
 
     /**
-     * Abort a running story mid-flight (StoryIntervention from the bus, or the
-     * Operator's external abort). The agent settles with a failed StoryResult,
+     * Abort a running story mid-flight (StoryIntervention from the bus).
+     * The agent settles with a failed StoryResult,
      * which the Surgeon then reacts to (split/escalate). Returns false if the
      * story isn't active or its executor doesn't support abort.
      */
@@ -909,25 +878,6 @@ export class StoryFactory extends BaseObserver {
                     failure,
                 }),
             )
-            if (this.opts.coordinationMode !== "collective") {
-                this.emitBus(
-                    StoryResult.create({
-                        storyId: req.storyId,
-                        success: false,
-                        attempts: 0,
-                        durationSecs: 0,
-                        error: `spawn failed: ${message}`,
-                        failure,
-                        ...(req.runId && req.leaseId && req.generation != null
-                            ? {
-                                  runId: req.runId,
-                                  leaseId: req.leaseId,
-                                  generation: req.generation,
-                              }
-                            : {}),
-                    }),
-                )
-            }
         } finally {
             this.spawning.delete(req.storyId)
             if (this.spawnDrains.get(req.storyId) === spawnDrain) {
@@ -954,14 +904,13 @@ export class StoryFactory extends BaseObserver {
                 (req.model ? ` (model="${req.model}")` : "") +
                 "\n",
         )
-        this.envRef.deliverSemanticEvent(
+        this.envRef.publish(
             this,
             StoryRouted.create({
                 storyId: req.storyId,
                 backend: route.backend,
                 model: route.model ?? "default",
-                ...(this.opts.coordinationMode === "collective" &&
-                req.runId &&
+                ...(req.runId &&
                 req.leaseId &&
                 req.generation != null
                     ? {
@@ -973,7 +922,6 @@ export class StoryFactory extends BaseObserver {
             }),
         )
 
-        // Legacy may fall back to cwd; collective treats missing isolation as failure.
         const worktrees = this.opts.worktrees
         let createdWorktree: string | null = null
         let reverified: ReverifiedSpawn | null = null
@@ -1004,14 +952,17 @@ export class StoryFactory extends BaseObserver {
                     createdWorktree = null
                 }
             } else {
-                createdWorktree = await worktrees.create(req.storyId)
+                createdWorktree = await worktrees.create(
+                    req.storyId,
+                    req.checkpointBase ? { checkpoints: req.checkpointBase } : {},
+                )
             }
         }
         // The run may have completed while git worktree creation was queued.
         // Leave any already-created path registered for cleanup, but never
         // launch a provider process across the shutdown boundary.
         if (this.shuttingDown) return
-        if (this.opts.worktrees && !createdWorktree && this.opts.requireWorktree) {
+        if (this.opts.worktrees && !createdWorktree) {
             throw new Error(`isolated worktree unavailable for ${req.storyId}`)
         }
         const storyCwd = createdWorktree ?? this.opts.cwd
@@ -1044,7 +995,6 @@ export class StoryFactory extends BaseObserver {
               } as const
             : undefined
         const processContract =
-            this.opts.coordinationMode === "collective" &&
             route.backend !== "openai"
                 ? COLLECTIVE_CLI_PROCESS_CONTRACT
                 : ""
@@ -1080,32 +1030,21 @@ export class StoryFactory extends BaseObserver {
 
         // Run the story — in-process by default, or via an injected executor
         // that runs it elsewhere. Either way the StoryResult lands on the bus
-        // when it settles, and Conductor reacts.
+        // when it settles, and the Board reacts.
         let resultAuthorityRegistered = false
-        const collectiveCorrelation = this.opts.coordinationMode === "collective"
-            ? this.resultCorrelation(req)
-            : null
+        const collectiveCorrelation = this.resultCorrelation(req)
         const executor = reverified
             ? new ReverifiedCommitExecutor(reverified.head, reverified.gate)
             : this.executor
         const exec = executor.start(executionRequest, route, storyCwd, this.envRef, {
             openaiModel: this.opts.openaiModel,
             effort: this.opts.effort,
-            ...(this.opts.coordinationMode === "collective"
-                ? { requireProcessQuiescenceCertification: true }
-                : {}),
-            ...(this.opts.coordinationMode === "collective"
-                ? { scopedVerification: true }
-                : {}),
-            ...(this.opts.coordinationMode === "collective"
-                ? {
-                      // Missing wiring fails closed: no external participant
-                      // can have this exact factory identity. Production
-                      // orchestration supplies the CollaborationBridge.
-                      targetedMessageAuthority:
-                          this.opts.targetedMessageAuthority ?? this,
-                  }
-                : {}),
+            requireProcessQuiescenceCertification: true,
+            scopedVerification: true,
+            // Missing wiring fails closed: no external participant can have
+            // this exact factory identity. Production orchestration supplies
+            // the CollaborationBridge.
+            targetedMessageAuthority: this.opts.targetedMessageAuthority ?? this,
             ...(route.backend === "openai" &&
             this.opts.runtimeReplanDecisionAuthority
                 ? {
@@ -1126,7 +1065,6 @@ export class StoryFactory extends BaseObserver {
                       turnReviewAuthority: this.opts.turnReviewAuthority,
                       turnReviewTimeoutMs: this.opts.turnReviewTimeoutMs,
                       handoffInconclusiveToAcceptanceGate:
-                          this.opts.coordinationMode === "collective" &&
                           req.requiresQualityReview === true &&
                           this.opts.acceptanceGateAuthority !== undefined,
                   }
@@ -1135,25 +1073,21 @@ export class StoryFactory extends BaseObserver {
             ...(route.backend === "openai" && this.opts.billingCoordinator
                 ? { billingCoordinator: this.opts.billingCoordinator }
                 : {}),
-            ...(collectiveCorrelation
-                ? {
-                      registerResultAuthority: (source: Participant) => {
-                          this.opts.outcomeAuthority!.registerResultAuthority(
-                              collectiveCorrelation,
-                              source,
-                          )
-                          resultAuthorityRegistered = true
-                      },
-                      registerTerminalAuthority: (source: Participant) => {
-                          this.opts.outcomeAuthority!.registerTerminalAuthority(
-                              collectiveCorrelation,
-                              source,
-                          )
-                      },
-                  }
-                : {}),
+            registerResultAuthority: (source: BusMember) => {
+                this.opts.outcomeAuthority!.registerResultAuthority(
+                    collectiveCorrelation,
+                    source,
+                )
+                resultAuthorityRegistered = true
+            },
+            registerTerminalAuthority: (source: BusMember) => {
+                this.opts.outcomeAuthority!.registerTerminalAuthority(
+                    collectiveCorrelation,
+                    source,
+                )
+            },
         })
-        if (collectiveCorrelation && !resultAuthorityRegistered) {
+        if (!resultAuthorityRegistered) {
             try {
                 exec.abort?.()
             } catch (error) {
@@ -1175,17 +1109,13 @@ export class StoryFactory extends BaseObserver {
 
         if (this.settledWhileSpawning.delete(req.storyId)) {
             exec.dispose(this.envRef)
-            if (this.opts.coordinationMode === "collective") {
-                this.settledExecutions.set(req.storyId, exec)
-            }
+            this.settledExecutions.set(req.storyId, exec)
         } else {
             this.active.set(req.storyId, exec)
         }
 
-        // Emit the "yes, agent spawned" notification so observers can
-        // see the lifecycle. Conductor doesn't actually need this, but
-        // it makes audit logs/replays much clearer.
-        this.envRef.deliverSemanticEvent(
+        // The Board does not need this, but it makes audit logs/replays clearer.
+        this.envRef.publish(
             this,
             StorySpawned.create({ storyId: req.storyId }),
         )
@@ -1312,8 +1242,8 @@ export class StoryFactory extends BaseObserver {
         )
     }
 
-    private emitBus(event: SemanticEvent<unknown>): void {
-        this.envRef?.deliverSemanticEvent(this, event)
+    private emitBus(event: SemanticEvent<string, unknown>): void {
+        this.envRef?.publish(this, event)
     }
 
     private advertiseCapabilities(): void {
@@ -1336,7 +1266,7 @@ export class StoryFactory extends BaseObserver {
     }
 
     private runId(): string {
-        return this.opts.runId ?? "legacy"
+        return this.opts.runId
     }
 
     private initialCollaborationMessages(messages: readonly string[]): string {
@@ -1372,10 +1302,9 @@ export class StoryFactory extends BaseObserver {
             ...(surface ? { surface } : {}),
             collabCommand: command,
             collabCapability: capability,
-            // Collective runs end with the objective RunVerifier pass on the
-            // fully-merged branch, so a story owes only its own perimeter.
-            hostRunsWholeTreeVerification:
-                this.opts.coordinationMode === "collective",
+            // Runs end with the objective RunVerifier pass on the fully-merged
+            // branch, so a story owes only its own perimeter.
+            hostRunsWholeTreeVerification: true,
         }).join("\n\n")
     }
 
@@ -1396,6 +1325,9 @@ export class StoryFactory extends BaseObserver {
             `- Ask peers: ${command} emit ${capability} --kind help --text ${JSON.stringify("YOUR QUESTION")}`,
             `- Message a peer: ${command} emit ${capability} --kind message --to S2 --text ${JSON.stringify("YOUR MESSAGE")} (queued if that peer starts in a later wave)`,
             `- Share a finding: ${command} emit ${capability} --kind note --text ${JSON.stringify("YOUR FINDING")} (retained in later agents' launch context)`,
+            `- Need a file you did not declare? Claim it before writing: ${command} emit ${capability} --kind claim --paths-json ${JSON.stringify('["src/x.ts"]')} --reason ${JSON.stringify("WHY")} (answered at once: a file no unintegrated story holds becomes yours)`,
+            `- Unblock your dependents early: once the part of your work they build on (interfaces, types, fixtures, schemas) is committed and its tests pass, publish it: ${command} emit ${capability} --kind checkpoint --reason ${JSON.stringify("WHAT IS STABLE NOW AND WHAT IS STILL COMING")}`,
+            "  Dependents then start on that commit while you finish, and integrate only after you do. Keep what you published stable; if it must change, commit, publish a new checkpoint and message the dependents the Board names.",
             "  These event commands generate a stable id. If one returns `outcome_unknown`, retry the exact same payload with its returned `--event-id`; never mint a replacement id.",
             `- If repository evidence shows a global invariant is unsatisfied or contradicted, fail closed for the collective: ${command} emit ${capability} --kind challenge --invariant G-A1 --reason ${JSON.stringify("CONCRETE EVIDENCE / MISSING WORK")}`,
             // Working around a false premise in silence is what leaves the

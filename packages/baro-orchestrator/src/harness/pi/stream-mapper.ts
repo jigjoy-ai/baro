@@ -23,7 +23,7 @@ export type MappedPiItem =
     | ModelMessageItem
     | FunctionCallItem
     | FunctionCallOutputItem
-    | SemanticEvent<unknown>
+    | SemanticEvent<string, unknown>
 
 export interface PiMapResult {
     /** Always non-empty. */

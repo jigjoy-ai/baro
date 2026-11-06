@@ -188,6 +188,14 @@ function dispatchDeclared(
     if (tool === "vendor/bin/phpunit") {
         return translatePhpunit(cwd, requirement, parsed)
     }
+    if (
+        tool === "pytest" ||
+        ((tool === "python" || tool === "python3") &&
+            parsed.tokens[1] === "-m" &&
+            parsed.tokens[2] === "pytest")
+    ) {
+        return translatePytest(cwd, requirement, parsed)
+    }
     if (tool === "ddev") {
         return translateDdev(
             cwd,
@@ -199,7 +207,7 @@ function dispatchDeclared(
     }
     return incomplete(
         requirement,
-        "unsupported declared test; allowed tools are npm/pnpm/yarn, exact npx rstest run paths, cargo, node, mvn, gradle, git diff --check, composer, vendor/bin/phpunit, and ddev exec",
+        "unsupported declared test; allowed tools are npm/pnpm/yarn, exact npx rstest run paths, cargo, node, pytest (or python -m pytest), mvn, gradle, git diff --check, composer, vendor/bin/phpunit, and ddev exec",
     )
 }
 
@@ -1407,6 +1415,60 @@ function translateComposer(
         label: `composer run ${script}`,
         tool: "composer",
         args: ["run", script],
+    }
+}
+
+const PYTEST_FLAGS = /^(-q|-qq|-v|-vv|-x|-s|-l|--no-header|--strict-markers|--tb=(short|line|no|long|native)|--maxfail=\d{1,4}|-p=?no:cacheprovider)$/u
+const PYTEST_VALUE_FLAGS = new Set(["-k", "-m", "-p"])
+
+/**
+ * `pytest [flags] [paths]` and `python[3] -m pytest ...`. Paths (and node ids,
+ * `tests/test_x.py::test_y`) must stay inside the tree; flags come from a
+ * short allowlist. The interpreter is chosen when the command runs.
+ */
+function translatePytest(
+    cwd: string,
+    requirement: DeclaredTestRequirement,
+    parsed: DeclaredTokens,
+): VerifyCommandSpec {
+    const rest = parsed.tokens.slice(parsed.tokens[0] === "pytest" ? 1 : 3)
+    const args: string[] = []
+    const containedPaths: VerifyContainedPath[] = []
+    for (let index = 0; index < rest.length; index += 1) {
+        const token = rest[index]!
+        if (PYTEST_FLAGS.test(token)) {
+            args.push(token)
+            continue
+        }
+        if (PYTEST_VALUE_FLAGS.has(token)) {
+            const value = rest[index + 1]
+            if (value === undefined || value.startsWith("-") || !SAFE_TOKEN.test(value)) {
+                return incomplete(requirement, `pytest ${token} requires a plain value`)
+            }
+            args.push(token, value)
+            index += 1
+            continue
+        }
+        if (token.startsWith("-")) {
+            return incomplete(
+                requirement,
+                `pytest option '${token}' is not allowed; use contained test paths, -k/-m/-p values, and -q/-v/-x/-s/--tb/--maxfail`,
+            )
+        }
+        const [pathPart, ...nodeParts] = token.split("::")
+        const contained = containedPath(cwd, pathPart ?? "", false)
+        if (!contained.path) {
+            return incomplete(requirement, contained.reason ?? `unsafe pytest path '${token}'`)
+        }
+        args.push([contained.path, ...nodeParts].join("::"))
+        containedPaths.push({ path: join(cwd, contained.path), requireFile: false })
+    }
+    return {
+        label: parsed.normalized,
+        tool: "python3",
+        args,
+        pytest: true,
+        ...(containedPaths.length > 0 ? { containedPaths } : {}),
     }
 }
 

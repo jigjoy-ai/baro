@@ -23,7 +23,7 @@ export type MappedCodexItem =
     | ModelMessageItem
     | FunctionCallItem
     | FunctionCallOutputItem
-    | SemanticEvent<unknown>
+    | SemanticEvent<string, unknown>
 
 export interface CodexMapResult {
     items: MappedCodexItem[]

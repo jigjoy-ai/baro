@@ -24,7 +24,7 @@ describe("bundled runner v2 protocol", () => {
         ])
     })
 
-    it("makes collective coordination explicit for every current runner dispatch", () => {
+    it("passes no engine flag, since the collective engine is the only one", () => {
         const args = buildRunArgs({
             t: "dispatch_run",
             runId: "run-args",
@@ -33,10 +33,8 @@ describe("bundled runner v2 protocol", () => {
             parallel: 3,
             timeoutSecs: 60,
         }, "/tmp/work")
-        assert.deepEqual(args.slice(args.indexOf("--coordination"), args.indexOf("--coordination") + 2), [
-            "--coordination",
-            "collective",
-        ])
+        // cli.ts refuses an unknown flag, so a stale one fails every run.
+        assert.ok(!args.includes("--coordination"))
         assert.ok(!args.includes("--with-dialogue"))
         assert.ok(buildRunArgs({
             t: "dispatch_run",

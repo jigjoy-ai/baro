@@ -1,4 +1,5 @@
-import { BaseObserver, type Participant, type SemanticEvent } from "../runtime/mozaik.js"
+import { type SemanticEvent } from "../runtime/mozaik.js"
+import { BusMember } from "../runtime/coordination.js"
 import { createHash } from "node:crypto"
 
 import {
@@ -80,7 +81,7 @@ interface PendingAggregateReview {
  * proposes invariant-scoped remediation through the Board's transaction lane,
  * then attests the resulting event ledger when the coordinator asks.
  */
-export class GoalGuardian extends BaseObserver {
+export class GoalGuardian extends BusMember {
     readonly contract: GoalContract | null
 
     private readonly ledger: GoalInvariantLedger | null
@@ -96,11 +97,11 @@ export class GoalGuardian extends BaseObserver {
     private projectionRevision = 0
     private projectionFingerprint = ""
     private coverageDeferred: boolean
-    private requestAuthority: Participant | null = null
-    private integrationAuthority: Participant | null = null
-    private qualityAuthority: Participant | null = null
-    private challengeAuthority: Participant | null = null
-    private aggregateReviewAuthority: Participant | null = null
+    private requestAuthority: BusMember | null = null
+    private integrationAuthority: BusMember | null = null
+    private qualityAuthority: BusMember | null = null
+    private challengeAuthority: BusMember | null = null
+    private aggregateReviewAuthority: BusMember | null = null
 
     constructor(private readonly opts: GoalGuardianOptions) {
         super()
@@ -153,7 +154,7 @@ export class GoalGuardian extends BaseObserver {
         this.coverageDeferred = opts.deferCoverageUntilPlanningClosed ?? false
     }
 
-    setRequestAuthority(authority: Participant): void {
+    setRequestAuthority(authority: BusMember): void {
         this.requestAuthority = bindAuthority(
             this.requestAuthority,
             authority,
@@ -161,7 +162,7 @@ export class GoalGuardian extends BaseObserver {
         )
     }
 
-    setIntegrationAuthority(authority: Participant): void {
+    setIntegrationAuthority(authority: BusMember): void {
         this.integrationAuthority = bindAuthority(
             this.integrationAuthority,
             authority,
@@ -169,7 +170,7 @@ export class GoalGuardian extends BaseObserver {
         )
     }
 
-    setQualityAuthority(authority: Participant): void {
+    setQualityAuthority(authority: BusMember): void {
         this.qualityAuthority = bindAuthority(
             this.qualityAuthority,
             authority,
@@ -178,7 +179,7 @@ export class GoalGuardian extends BaseObserver {
     }
 
     /** Attribution-validating bridge allowed to relay leased worker challenges. */
-    setChallengeAuthority(authority: Participant): void {
+    setChallengeAuthority(authority: BusMember): void {
         this.challengeAuthority = bindAuthority(
             this.challengeAuthority,
             authority,
@@ -186,7 +187,7 @@ export class GoalGuardian extends BaseObserver {
         )
     }
 
-    setAggregateReviewAuthority(authority: Participant): void {
+    setAggregateReviewAuthority(authority: BusMember): void {
         this.aggregateReviewAuthority = bindAuthority(
             this.aggregateReviewAuthority,
             authority,
@@ -195,24 +196,24 @@ export class GoalGuardian extends BaseObserver {
     }
 
     override onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): void {
         if (
             GoalStoryInvariantMapped.is(event) &&
-            event.data.runId === this.opts.runId
+            event.payload.runId === this.opts.runId
         ) {
             if (!this.isRequestAuthority(source) || !this.ledger) return
             const requestKey = JSON.stringify([
-                event.data.storyId,
-                event.data.invariantIds,
+                event.payload.storyId,
+                event.payload.invariantIds,
             ])
-            const seen = this.mappingEvents.get(event.data.mappingId)
+            const seen = this.mappingEvents.get(event.payload.mappingId)
             if (seen !== undefined) return
-            this.mappingEvents.set(event.data.mappingId, requestKey)
+            this.mappingEvents.set(event.payload.mappingId, requestKey)
             this.ledger.mapStory({
-                storyId: event.data.storyId,
-                invariantIds: event.data.invariantIds,
+                storyId: event.payload.storyId,
+                invariantIds: event.payload.invariantIds,
             })
             this.publishProjection()
             return
@@ -220,16 +221,16 @@ export class GoalGuardian extends BaseObserver {
 
         if (
             RuntimeReplanApplied.is(event) &&
-            event.data.runId === this.opts.runId &&
+            event.payload.runId === this.opts.runId &&
             this.isRequestAuthority(source) &&
             this.ledger
         ) {
             const displaced: DisplacedGoalRemediation[] = []
-            for (const storyId of event.data.mutation.removedStoryIds) {
+            for (const storyId of event.payload.mutation.removedStoryIds) {
                 displaced.push(...this.ledger.removeStory(storyId))
             }
             this.bindDisplacedRemediations(displaced)
-            for (const story of event.data.mutation.addedStories) {
+            for (const story of event.payload.mutation.addedStories) {
                 this.ledger.mapStory({
                     storyId: story.id,
                     invariantIds: story.goalInvariantIds ?? [],
@@ -241,15 +242,15 @@ export class GoalGuardian extends BaseObserver {
             return
         }
 
-        if (StoryMerged.is(event) && event.data.runId === this.opts.runId) {
+        if (StoryMerged.is(event) && event.payload.runId === this.opts.runId) {
             if (
                 !this.ledger ||
                 !this.integrationAuthority ||
                 source !== this.integrationAuthority
             ) return
             this.ledger.recordIntegration({
-                storyId: event.data.storyId,
-                ...(event.data.leaseId ? { leaseId: event.data.leaseId } : {}),
+                storyId: event.payload.storyId,
+                ...(event.payload.leaseId ? { leaseId: event.payload.leaseId } : {}),
             })
             const resolutions = this.ledger.resolveSatisfiedRemediations(
                 this.requireIndependentQuality,
@@ -261,21 +262,21 @@ export class GoalGuardian extends BaseObserver {
 
         if (
             StoryQualityCompleted.is(event) &&
-            event.data.runId === this.opts.runId
+            event.payload.runId === this.opts.runId
         ) {
             if (
                 !this.ledger ||
                 !this.qualityAuthority ||
                 source !== this.qualityAuthority
             ) return
-            const critique = event.data.critique
+            const critique = event.payload.critique
             this.ledger.recordQuality({
-                storyId: event.data.storyId,
-                leaseId: event.data.leaseId,
-                evaluationId: event.data.evaluationId,
-                status: event.data.status,
+                storyId: event.payload.storyId,
+                leaseId: event.payload.leaseId,
+                evaluationId: event.payload.evaluationId,
+                status: event.payload.status,
                 independentlyPassed:
-                    event.data.status === "passed" &&
+                    event.payload.status === "passed" &&
                     critique?.verdict === "pass" &&
                     (critique.status ?? "evaluated") === "evaluated",
             })
@@ -289,27 +290,27 @@ export class GoalGuardian extends BaseObserver {
 
         if (
             GoalInvariantChallengeRaised.is(event) &&
-            event.data.runId === this.opts.runId
+            event.payload.runId === this.opts.runId
         ) {
             if (!this.ledger) return
             if (this.challengeAuthority) {
                 if (source !== this.challengeAuthority) return
-            } else if (participantId(source) !== event.data.raisedBy) return
+            } else if (participantId(source) !== event.payload.raisedBy) return
             this.ledger.raiseChallenge({
-                challengeId: event.data.challengeId,
-                invariantId: event.data.invariantId,
-                raisedBy: event.data.raisedBy,
-                reason: event.data.reason,
-                ...(event.data.storyId ? { storyId: event.data.storyId } : {}),
+                challengeId: event.payload.challengeId,
+                invariantId: event.payload.invariantId,
+                raisedBy: event.payload.raisedBy,
+                reason: event.payload.reason,
+                ...(event.payload.storyId ? { storyId: event.payload.storyId } : {}),
             })
             // A retained bridge outbox may replay the original challenge after
             // restart.  Reconciliation may already have retry-linked it to a
             // fresh remediation, which must not be replaced by the original
             // deterministic proposal identity.
-            if (!this.ledger.hasChallengeRemediation(event.data.challengeId)) {
+            if (!this.ledger.hasChallengeRemediation(event.payload.challengeId)) {
                 this.bindRemediation(
-                    event.data.challengeId,
-                    event.data.invariantId,
+                    event.payload.challengeId,
+                    event.payload.invariantId,
                 )
             }
             this.publishProjection()
@@ -319,35 +320,35 @@ export class GoalGuardian extends BaseObserver {
 
         if (
             GoalInvariantRemediationAdmitted.is(event) &&
-            event.data.runId === this.opts.runId
+            event.payload.runId === this.opts.runId
         ) {
             if (
                 !this.isRequestAuthority(source) ||
                 !this.ledger ||
-                event.data.contractId !== this.contract?.contractId
+                event.payload.contractId !== this.contract?.contractId
             ) return
-            const challengeIds = remediationChallengeIds(event.data)
-            const invariantIds = remediationInvariantIds(event.data)
+            const challengeIds = remediationChallengeIds(event.payload)
+            const invariantIds = remediationInvariantIds(event.payload)
             if (
                 challengeIds.length !== invariantIds.length ||
-                event.data.challengeId !== challengeIds[0] ||
-                event.data.invariantId !== invariantIds[0] ||
-                (event.data.remediationGroupId !== undefined &&
-                    (event.data.remediationGroupId.trim().length === 0 ||
-                        event.data.remediationGroupId.length > 128)) ||
+                event.payload.challengeId !== challengeIds[0] ||
+                event.payload.invariantId !== invariantIds[0] ||
+                (event.payload.remediationGroupId !== undefined &&
+                    (event.payload.remediationGroupId.trim().length === 0 ||
+                        event.payload.remediationGroupId.length > 128)) ||
                 !this.ledger.matchesChallengeRemediationTargets(
                     challengeIds,
                     invariantIds,
-                    event.data.proposalId,
-                    event.data.storyId,
-                    event.data.remediationGroupId,
+                    event.payload.proposalId,
+                    event.payload.storyId,
+                    event.payload.remediationGroupId,
                 )
             ) return
             this.ledger.admitChallengeRemediationGroup(
                 challengeIds,
-                event.data.proposalId,
-                event.data.storyId,
-                event.data.graphVersion,
+                event.payload.proposalId,
+                event.payload.storyId,
+                event.payload.graphVersion,
             )
             const resolutions = this.ledger.resolveSatisfiedRemediations(
                 this.requireIndependentQuality,
@@ -359,26 +360,26 @@ export class GoalGuardian extends BaseObserver {
 
         if (
             GoalInvariantChallengeResolved.is(event) &&
-            event.data.runId === this.opts.runId
+            event.payload.runId === this.opts.runId
         ) {
             if (!this.isRequestAuthority(source) || !this.ledger) return
-            this.ledger.resolveChallenge(event.data)
+            this.ledger.resolveChallenge(event.payload)
             this.publishProjection()
             return
         }
 
         if (
             GoalAggregateReviewCompleted.is(event) &&
-            event.data.runId === this.opts.runId
+            event.payload.runId === this.opts.runId
         ) {
             if (source !== this.aggregateReviewAuthority || !this.ledger) return
-            this.onAggregateReviewCompleted(event.data)
+            this.onAggregateReviewCompleted(event.payload)
             return
         }
 
         if (
             RunPreparationRequested.is(event) &&
-            event.data.runId === this.opts.runId &&
+            event.payload.runId === this.opts.runId &&
             this.isRequestAuthority(source)
         ) {
             // A challenge can arrive from the durable Bridge before Board has
@@ -397,8 +398,8 @@ export class GoalGuardian extends BaseObserver {
 
         if (
             PlanningStreamClosed.is(event) &&
-            event.data.runId === this.opts.runId &&
-            event.data.status === "completed" &&
+            event.payload.runId === this.opts.runId &&
+            event.payload.status === "completed" &&
             this.isRequestAuthority(source)
         ) {
             this.coverageDeferred = false
@@ -410,14 +411,14 @@ export class GoalGuardian extends BaseObserver {
 
         if (
             GoalCompletionCheckRequested.is(event) &&
-            event.data.runId === this.opts.runId
+            event.payload.runId === this.opts.runId
         ) {
             if (!this.isRequestAuthority(source)) return
-            this.onCompletionCheck(event.data)
+            this.onCompletionCheck(event.payload)
         }
     }
 
-    private isRequestAuthority(source: Participant): boolean {
+    private isRequestAuthority(source: BusMember): boolean {
         return this.requestAuthority !== null && source === this.requestAuthority
     }
 
@@ -1004,9 +1005,9 @@ export class GoalGuardian extends BaseObserver {
         }
     }
 
-    private emit(event: SemanticEvent<unknown>): void {
-        for (const env of this.getEnvironments()) {
-            env.deliverSemanticEvent(this, event)
+    private emit(event: SemanticEvent<string, unknown>): void {
+        for (const env of this.getBuses()) {
+            env.publish(this, event)
         }
     }
 }
@@ -1151,18 +1152,18 @@ function uniqueIntegrations(
 }
 
 function bindAuthority(
-    current: Participant | null,
-    authority: Participant,
+    current: BusMember | null,
+    authority: BusMember,
     label: string,
-): Participant {
+): BusMember {
     if (current && current !== authority) {
         throw new Error(`${label} is already bound`)
     }
     return authority
 }
 
-function participantId(participant: Participant): string | null {
-    const value = (participant as Participant & { agentId?: unknown }).agentId
+function participantId(participant: BusMember): string | null {
+    const value = (participant as BusMember & { agentId?: unknown }).agentId
     return typeof value === "string" && value.length > 0 ? value : null
 }
 

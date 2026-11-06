@@ -6,8 +6,7 @@ import {
     ModelMessageItem,
     type ContextItem,
     type ModelContext,
-    type Tool,
-} from "../src/runtime/mozaik.js"
+    type Tool, toWire } from "../src/runtime/mozaik.js"
 
 import { GenericOpenAIModel } from "../src/harness/openai/runtime.js"
 import {
@@ -302,15 +301,15 @@ One public boundary exists.
         ])
         assert.deepEqual(sequence.toolCounts, [2, 2])
         assert.match(
-            JSON.stringify(sequence.contexts[0]!.toJSON()),
+            JSON.stringify(toWire(sequence.contexts[0]!)),
             /immutable.*exact, same-order.*prefix/is,
         )
         assert.match(
-            JSON.stringify(sequence.contexts[0]!.toJSON()),
+            JSON.stringify(toWire(sequence.contexts[0]!)),
             /moment.*safe to execute.*immediately.*do not wait for the full DAG/is,
         )
         assert.match(
-            JSON.stringify(sequence.contexts[0]!.toJSON()),
+            JSON.stringify(toWire(sequence.contexts[0]!)),
             /Output ONLY JSON.*only.*terminal response/is,
         )
     })
@@ -348,7 +347,7 @@ One public boundary exists.
         assert.equal(published.length, 1)
         assert.equal(sequence.rounds(), 3)
         assert.match(
-            JSON.stringify(sequence.contexts[2]!.toJSON()),
+            JSON.stringify(toWire(sequence.contexts[2]!)),
             /does not exactly match admitted prefix story/i,
         )
     })
@@ -416,7 +415,7 @@ One public boundary exists.
         assert.deepEqual(JSON.parse(result), JSON.parse(VALID_PRD))
         assert.equal(published.length, 1)
         assert.match(
-            JSON.stringify(sequence.contexts[2]!.toJSON()),
+            JSON.stringify(toWire(sequence.contexts[2]!)),
             /this call was not executed/i,
         )
     })
@@ -442,7 +441,7 @@ One public boundary exists.
         assert.equal(result, VALID_PRD)
         assert.deepEqual(published, [])
         assert.match(
-            JSON.stringify(sequence.contexts[0]!.toJSON()),
+            JSON.stringify(toWire(sequence.contexts[0]!)),
             /never force an unsafe or provisional split.*if no dependency-closed prefix becomes safe.*do not publish/is,
         )
     })
@@ -481,7 +480,7 @@ describe("PlannerOpenAI GLM-compatible finalization", () => {
         assert.equal(sequence.rounds(), 4)
         assert.deepEqual(sequence.toolCounts, [1, 1, 1, 1])
         assert.match(
-            JSON.stringify(sequence.contexts[3]!.toJSON()),
+            JSON.stringify(toWire(sequence.contexts[3]!)),
             /do not emit <tool_call> tags/i,
         )
     })
@@ -512,7 +511,7 @@ describe("PlannerOpenAI GLM-compatible finalization", () => {
         assert.equal(invokes, 1)
         assert.deepEqual(sequence.toolCounts, [1, 1, 1])
         assert.match(
-            JSON.stringify(sequence.contexts[2]!.toJSON()),
+            JSON.stringify(toWire(sequence.contexts[2]!)),
             /this call was not executed/i,
         )
     })
@@ -563,7 +562,7 @@ describe("PlannerOpenAI GLM-compatible finalization", () => {
 
         assert.deepEqual(JSON.parse(result), JSON.parse(VALID_PRD))
         assert.match(
-            JSON.stringify(sequence.contexts[2]!.toJSON()),
+            JSON.stringify(toWire(sequence.contexts[2]!)),
             /missing a non-empty project/i,
         )
     })
@@ -592,7 +591,7 @@ describe("PlannerOpenAI GLM-compatible finalization", () => {
 
         assert.deepEqual(JSON.parse(result), JSON.parse(VALID_PRD))
         assert.match(
-            JSON.stringify(sequence.contexts[2]!.toJSON()),
+            JSON.stringify(toWire(sequence.contexts[2]!)),
             /non-string values in tests/i,
         )
     })
@@ -622,7 +621,7 @@ describe("PlannerOpenAI GLM-compatible finalization", () => {
 
         assert.deepEqual(JSON.parse(result), JSON.parse(VALID_PRD))
         assert.match(
-            JSON.stringify(sequence.contexts[2]!.toJSON()),
+            JSON.stringify(toWire(sequence.contexts[2]!)),
             /must contain non-empty acceptance/i,
         )
     })

@@ -15,10 +15,9 @@
  */
 
 import {
-    BaseObserver,
-    type Participant,
     type SemanticEvent,
 } from "../../runtime/mozaik.js"
+import { BusMember } from "../../runtime/coordination.js"
 import {
     ArchitecturePremiseAmended,
     ArchitecturePremiseDisputed,
@@ -95,7 +94,7 @@ export interface PremiseAmendmentAuthorityOptions {
  * budget: a run that spends its budget disputing is not converging, and the
  * remaining claims stay as the Architect wrote them.
  */
-export class PremiseAmendmentAuthority extends BaseObserver {
+export class PremiseAmendmentAuthority extends BusMember {
     private readonly amendments: PremiseAmendment[] = []
 
     constructor(private readonly opts: PremiseAmendmentAuthorityOptions) {
@@ -107,11 +106,11 @@ export class PremiseAmendmentAuthority extends BaseObserver {
     }
 
     override onExternalEvent(
-        _source: Participant,
-        event: SemanticEvent<unknown>,
+        _source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): void {
         if (!ArchitecturePremiseDisputed.is(event)) return
-        const data = event.data
+        const data = event.payload
         if (data.runId !== this.opts.runId) return
         const limit = this.opts.maxAmendments ?? MAX_PREMISE_AMENDMENTS
         if (this.amendments.length >= limit) {
@@ -151,8 +150,8 @@ export class PremiseAmendmentAuthority extends BaseObserver {
                 (amendment.obligationId ? ` (${amendment.obligationId})` : "") +
                 `: ${amendment.claim.slice(0, 120)}`,
         )
-        for (const environment of this.getEnvironments()) {
-            environment.deliverSemanticEvent(
+        for (const environment of this.getBuses()) {
+            environment.publish(
                 this,
                 ArchitecturePremiseAmended.create({
                     runId: this.opts.runId,

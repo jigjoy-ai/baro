@@ -14,13 +14,12 @@ import { ChildProcess } from "child_process"
 import spawn from "cross-spawn"
 
 import {
-    AgenticEnvironment,
-    BaseObserver,
     FunctionCallItem,
     FunctionCallOutputItem,
     ModelMessageItem,
     SemanticEvent,
 } from "../runtime/mozaik.js"
+import { BusMember, CoordinationBus } from "../runtime/coordination.js"
 
 import { harnessChildEnvironment } from "./environment.js"
 import {
@@ -29,6 +28,7 @@ import {
 } from "./process-tree.js"
 import { AgentState, type AgentPhase } from "../semantic-events.js"
 import { appendCliDiagnosticTail } from "./cli-story-failure.js"
+import { confinedSpawn, storyCredentialEnv } from "./os-sandbox.js"
 
 export interface CliRunSummaryCore {
     exitCode: number | null
@@ -56,7 +56,7 @@ export interface CliParticipantSpec {
 
 export abstract class CliParticipant<
     TSummary extends CliRunSummaryCore,
-> extends BaseObserver {
+> extends BusMember {
     /**
      * Process-wide registry for the orchestrator's SIGINT/SIGTERM handlers,
      * so a killed baro doesn't leave orphaned agents burning quota.
@@ -77,7 +77,7 @@ export abstract class CliParticipant<
     private processTree: ManagedProcessTree | null = null
     private buffer = ""
     private stderrTailValue = ""
-    protected envRef: AgenticEnvironment | null = null
+    protected envRef: CoordinationBus | null = null
     private currentPhase: AgentPhase = "idle"
     protected exitCode: number | null = null
     protected exitSignal: NodeJS.Signals | null = null
@@ -238,17 +238,62 @@ export abstract class CliParticipant<
         this.rejectReady(error)
     }
 
+    private confinement: "none" | "credentials" | "worktree" | "read-only" = "none"
+
+    /** A role that only reads and answers: OS-confined with no repo writes. */
+    confineReadOnly(): this {
+        this.confinement = "read-only"
+        return this
+    }
+
+    /**
+     * Run this story's CLI inside the OS sandbox (os-sandbox.ts) and without
+     * publish credentials. A lane with no sandbox on this platform fails to
+     * start instead of running unconfined.
+     */
+    confineToWorktree(): this {
+        this.confinement = "worktree"
+        return this
+    }
+
+    /** Strip publish credentials only, for a CLI that sandboxes itself. */
+    withoutPublishCredentials(): this {
+        if (this.confinement === "none") this.confinement = "credentials"
+        return this
+    }
+
     /** Idempotent: subsequent calls are a no-op. */
-    start(environment: AgenticEnvironment): void {
+    start(environment: CoordinationBus): void {
         if (this.proc) return
         this.envRef = environment
 
-        const args = this.buildArgs()
+        let binary = this.spec.binary
+        let args = this.buildArgs()
+        let env: NodeJS.ProcessEnv = { ...harnessChildEnvironment(), ...this.spec.env }
+        if (this.confinement === "worktree" || this.confinement === "read-only") {
+            const confined = confinedSpawn(
+                this.spec.name,
+                binary,
+                args,
+                this.confinement === "worktree" ? this.spec.cwd : null,
+                env,
+            )
+            if ("refusal" in confined) {
+                this.spawnError = new Error(confined.refusal)
+                this.transition("failed", this.spawnError.message)
+                this.failReady(this.spawnError)
+                this.settleDone(this.summarize())
+                return
+            }
+            ;({ binary, args, env } = confined)
+        } else if (this.confinement === "credentials") {
+            env = storyCredentialEnv(env)
+        }
         let proc: ChildProcess
         try {
-            proc = spawn(this.spec.binary, args, {
+            proc = spawn(binary, args, {
                 cwd: this.spec.cwd,
-                env: { ...harnessChildEnvironment(), ...this.spec.env },
+                env,
                 stdio: [this.spec.stdinMode, "pipe", "pipe"],
                 detached: POSIX_PROCESS_GROUPS_SUPPORTED,
             })
@@ -420,28 +465,28 @@ export abstract class CliParticipant<
             | ModelMessageItem
             | FunctionCallItem
             | FunctionCallOutputItem
-            | SemanticEvent<unknown>,
+            | SemanticEvent<string, unknown>,
     ): void {
         if (!this.envRef) return
         if (item instanceof ModelMessageItem) {
-            this.envRef.deliverModelMessage(this, item)
+            this.envRef.publishModelMessage(this, item)
             return
         }
         if (item instanceof FunctionCallItem) {
-            this.envRef.deliverFunctionCall(this, item)
+            this.envRef.publishFunctionCall(this, item)
             return
         }
         if (item instanceof FunctionCallOutputItem) {
-            this.envRef.deliverFunctionCallOutput(this, item)
+            this.envRef.publishFunctionCallOutput(this, item)
             return
         }
-        this.envRef.deliverSemanticEvent(this, item)
+        this.envRef.publish(this, item)
     }
 
     protected transition(next: AgentPhase, detail?: string): void {
         if (next === this.currentPhase) return
         this.currentPhase = next
-        this.envRef?.deliverSemanticEvent(
+        this.envRef?.publish(
             this,
             AgentState.create({
                 agentId: this.agentId,

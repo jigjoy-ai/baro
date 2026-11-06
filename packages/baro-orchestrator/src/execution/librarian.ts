@@ -7,12 +7,12 @@
  */
 
 import {
-    BaseObserver,
     FunctionCallItem,
     FunctionCallOutputItem,
-    Participant,
     SemanticEvent,
+    toWire,
 } from "../runtime/mozaik.js"
+import { BusMember } from "../runtime/coordination.js"
 
 import {
     AgentTargetedMessage,
@@ -81,13 +81,13 @@ export interface LibrarianOptions {
     }
 }
 
-export class Librarian extends BaseObserver {
+export class Librarian extends BusMember {
     private readonly opts: Required<Omit<LibrarianOptions, "collective">> &
         Pick<LibrarianOptions, "collective">
     /** Tool protocols scope call ids to one producer. Preserve that namespace
      * explicitly so two parallel participants may reuse the same call id. */
     private readonly pending = new Map<
-        Participant,
+        BusMember,
         Map<string, PendingCall>
     >()
     private readonly knowledge: IndexedKnowledge[] = []
@@ -100,7 +100,7 @@ export class Librarian extends BaseObserver {
         string,
         StoryResultAuthorityCorrelation
     >()
-    private leaseAuthority: Participant | null = null
+    private leaseAuthority: BusMember | null = null
 
     constructor(opts: LibrarianOptions = {}) {
         super()
@@ -118,7 +118,7 @@ export class Librarian extends BaseObserver {
         }
     }
 
-    setLeaseAuthority(authority: Participant): void {
+    setLeaseAuthority(authority: BusMember): void {
         if (this.leaseAuthority && this.leaseAuthority !== authority) {
             throw new Error("Librarian lease authority is already bound")
         }
@@ -178,82 +178,82 @@ export class Librarian extends BaseObserver {
         ].join("\n")
     }
 
-    override async onExternalFunctionCall(source: Participant, item: FunctionCallItem): Promise<void> {
+    override async onExternalFunctionCall(source: BusMember, item: FunctionCallItem): Promise<void> {
         this.recordPending(source, item)
     }
 
     override async onExternalFunctionCallOutput(
-        source: Participant,
+        source: BusMember,
         item: FunctionCallOutputItem,
     ): Promise<void> {
         this.completeWithOutput(source, item)
     }
 
     override async onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): Promise<void> {
         const collective = this.opts.collective
         if (collective && WorkLeaseGranted.is(event)) {
             if (
                 source !== this.leaseAuthority ||
-                event.data.runId !== collective.runId
+                event.payload.runId !== collective.runId
             ) return
-            const storyId = event.data.request.storyId
+            const storyId = event.payload.request.storyId
             const current = this.activeLeases.get(storyId)
             if (
                 current &&
-                (event.data.generation < current.generation ||
-                    (event.data.generation === current.generation &&
-                        event.data.leaseId !== current.leaseId))
+                (event.payload.generation < current.generation ||
+                    (event.payload.generation === current.generation &&
+                        event.payload.leaseId !== current.leaseId))
             ) return
             if (
                 current &&
-                event.data.generation === current.generation &&
-                event.data.leaseId === current.leaseId
+                event.payload.generation === current.generation &&
+                event.payload.leaseId === current.leaseId
             ) return
             if (current) this.dropPendingForCorrelation(current)
             this.activeLeases.set(storyId, {
                 runId: collective.runId,
                 storyId,
-                leaseId: event.data.leaseId,
-                generation: event.data.generation,
+                leaseId: event.payload.leaseId,
+                generation: event.payload.generation,
             })
-            this.storyHints.set(storyId, tokenizeHints(event.data.request.prompt))
+            this.storyHints.set(storyId, tokenizeHints(event.payload.request.prompt))
             this.inFlight.add(storyId)
             return
         }
         if (collective && WorkLeaseReleased.is(event)) {
             if (
                 source !== this.leaseAuthority ||
-                event.data.runId !== collective.runId
+                event.payload.runId !== collective.runId
             ) return
-            const current = this.activeLeases.get(event.data.storyId)
-            if (current?.leaseId !== event.data.leaseId) return
+            const current = this.activeLeases.get(event.payload.storyId)
+            if (current?.leaseId !== event.payload.leaseId) return
             this.dropPendingForCorrelation(current)
-            this.activeLeases.delete(event.data.storyId)
-            this.inFlight.delete(event.data.storyId)
-            this.storyHints.delete(event.data.storyId)
+            this.activeLeases.delete(event.payload.storyId)
+            this.inFlight.delete(event.payload.storyId)
+            this.storyHints.delete(event.payload.storyId)
             return
         }
         if (collective) return
         if (StorySpawnRequest.is(event)) {
             this.storyHints.set(
-                event.data.storyId,
-                tokenizeHints(event.data.prompt),
+                event.payload.storyId,
+                tokenizeHints(event.payload.prompt),
             )
             return
         }
         if (StorySpawned.is(event)) {
-            this.inFlight.add(event.data.storyId)
+            this.inFlight.add(event.payload.storyId)
             return
         }
         if (StoryResult.is(event)) {
-            this.inFlight.delete(event.data.storyId)
+            this.inFlight.delete(event.payload.storyId)
         }
     }
 
-    private recordPending(source: Participant, item: FunctionCallItem): void {
+    private recordPending(source: BusMember, item: FunctionCallItem): void {
         if (!EXPLORATION_TOOLS.has(item.name)) return
         const agentId = (source as unknown as { agentId?: string }).agentId
         if (typeof agentId !== "string") return
@@ -284,10 +284,10 @@ export class Librarian extends BaseObserver {
     }
 
     private completeWithOutput(
-        source: Participant,
+        source: BusMember,
         item: FunctionCallOutputItem,
     ): void {
-        const json = item.toJSON() as {
+        const json = toWire(item) as {
             call_id: string
             output: Array<{ text: string }>
         }
@@ -321,8 +321,8 @@ export class Librarian extends BaseObserver {
         }
         this.knowledge.push(entry)
 
-        for (const env of this.getEnvironments()) {
-            env.deliverSemanticEvent(
+        for (const env of this.getBuses()) {
+            env.publish(
                 this,
                 Knowledge.create({
                     sourceAgentId: entry.sourceAgentId,
@@ -343,7 +343,7 @@ export class Librarian extends BaseObserver {
 
     private broadcastFinding(finding: IndexedKnowledge): void {
         if (this.inFlight.size === 0) return
-        const envs = this.getEnvironments()
+        const envs = this.getBuses()
         if (envs.length === 0) return
 
         const findingTokens = new Set(
@@ -384,7 +384,7 @@ export class Librarian extends BaseObserver {
             this.broadcastBytes.set(recipientId, already + bytes)
 
             for (const env of envs) {
-                env.deliverSemanticEvent(
+                env.publish(
                     this,
                     AgentTargetedMessage.create({
                         recipientId,
@@ -401,7 +401,7 @@ export class Librarian extends BaseObserver {
     }
 
     private collectiveCorrelation(
-        source: Participant,
+        source: BusMember,
         storyId: string,
     ): StoryResultAuthorityCorrelation | null {
         const collective = this.opts.collective
@@ -428,7 +428,7 @@ export class Librarian extends BaseObserver {
         }
     }
 
-    private deletePending(source: Participant, callId: string): void {
+    private deletePending(source: BusMember, callId: string): void {
         const calls = this.pending.get(source)
         if (!calls) return
         calls.delete(callId)

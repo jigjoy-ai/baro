@@ -1,4 +1,5 @@
-import type { Participant, SemanticEvent } from "../../runtime/mozaik.js"
+import type { SemanticEvent } from "../../runtime/mozaik.js"
+import type { BusMember } from "../../runtime/coordination.js"
 
 import {
     AgentTurnCompleted,
@@ -17,8 +18,8 @@ import {
 export interface OneShotTurnReviewOptions {
     agentId: string
     requiresReview: boolean
-    terminalAuthority?: Participant
-    authority?: Participant
+    terminalAuthority?: BusMember
+    authority?: BusMember
     timeoutMs: number
     /** Collective-only: the AcceptanceGate may recheck an unchanged terminal. */
     handoffInconclusiveToAcceptanceGate?: boolean
@@ -97,19 +98,19 @@ export class OneShotTurnReview {
     }
 
     /** Returns true only for a review consumed by this exact story lane. */
-    observe(source: Participant, event: SemanticEvent<unknown>): boolean {
+    observe(source: BusMember, event: SemanticEvent<string, unknown>): boolean {
         if (
             this.options.requiresReview &&
             source === this.options.terminalAuthority &&
             AgentTurnCompleted.is(event) &&
-            event.data.agentId === this.options.agentId
+            event.payload.agentId === this.options.agentId
         ) {
-            const terminalId = normalizedTerminalId(event.data.terminalId)
+            const terminalId = normalizedTerminalId(event.payload.terminalId)
             if (
                 this.collectingCandidate &&
                 terminalId &&
-                !event.data.isError &&
-                event.data.resultText &&
+                !event.payload.isError &&
+                event.payload.resultText &&
                 !this.seenTerminalIds.has(terminalId)
             ) {
                 this.seenTerminalIds.add(terminalId)
@@ -123,10 +124,10 @@ export class OneShotTurnReview {
             !this.options.requiresReview ||
             source !== this.options.authority ||
             !Critique.is(event) ||
-            event.data.agentId !== this.options.agentId
+            event.payload.agentId !== this.options.agentId
         ) return false
 
-        this.reviews.deliver(snapshotTurnReview(event.data))
+        this.reviews.deliver(snapshotTurnReview(event.payload))
         return true
     }
 

@@ -14,12 +14,10 @@
 import { randomUUID } from "node:crypto"
 
 import {
-    BaseObserver,
-    type AgenticEnvironment,
-    type Participant,
     type SemanticEvent,
     type TokenUsage,
 } from "../../runtime/mozaik.js"
+import { BusMember, type CoordinationBus } from "../../runtime/coordination.js"
 import {
     AgentResult,
     type AgentResultData,
@@ -74,7 +72,7 @@ import { extractJsonObject } from "../domain/planner-prompts.js"
 export interface PlannerBusSessionOptions {
     runId: string
     cwd: string
-    env: AgenticEnvironment
+    env: CoordinationBus
     feed: PlanningFeed
     goalEnvelope: GoalEnvelope
     /** Host-owned final-PRD metadata: the coordinator compares SEVEN fields
@@ -144,7 +142,7 @@ interface FragmentReceipt {
 }
 
 /** Resolves fragment receipts by correlating admission events on the bus. */
-class ReceiptObserver extends BaseObserver {
+class ReceiptObserver extends BusMember {
     private readonly waiters = new Map<
         string,
         (receipt: FragmentReceipt) => void
@@ -161,28 +159,28 @@ class ReceiptObserver extends BaseObserver {
     }
 
     override onExternalEvent(
-        _source: Participant,
-        event: SemanticEvent<unknown>,
+        _source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): void {
         if (PlanFragmentAdmitted.is(event)) {
-            if (event.data.planningId !== this.planningId) return
-            this.settle(event.data.fragmentId, {
+            if (event.payload.planningId !== this.planningId) return
+            this.settle(event.payload.fragmentId, {
                 admitted: true,
-                graphVersion: event.data.graphVersion,
-                storyIds: event.data.storyIds,
-                droppedEdges: event.data.droppedEdges,
-                replay: event.data.replay,
+                graphVersion: event.payload.graphVersion,
+                storyIds: event.payload.storyIds,
+                droppedEdges: event.payload.droppedEdges,
+                replay: event.payload.replay,
             })
             return
         }
         if (PlanFragmentRejected.is(event)) {
-            if (event.data.planningId !== this.planningId) return
-            if (!event.data.fragmentId) return
-            this.settle(event.data.fragmentId, {
+            if (event.payload.planningId !== this.planningId) return
+            if (!event.payload.fragmentId) return
+            this.settle(event.payload.fragmentId, {
                 admitted: false,
-                rejectionCode: event.data.code,
-                rejectionReason: event.data.reason,
-                ...(event.data.overlap ? { overlap: event.data.overlap } : {}),
+                rejectionCode: event.payload.code,
+                rejectionReason: event.payload.reason,
+                ...(event.payload.overlap ? { overlap: event.payload.overlap } : {}),
             })
         }
     }
@@ -198,7 +196,7 @@ class ReceiptObserver extends BaseObserver {
 /** Hands each of the planner's terminal results to the session as it lands,
  *  so a rejected final PRD can be answered with a correction on the still-open
  *  stdin instead of killing the whole planning stream. */
-class ResultStream extends BaseObserver {
+class ResultStream extends BusMember {
     private readonly queue: string[] = []
     private waiter: ((text: string | null) => void) | null = null
     private closed = false
@@ -227,13 +225,13 @@ class ResultStream extends BaseObserver {
     }
 
     override onExternalEvent(
-        _source: Participant,
-        event: SemanticEvent<unknown>,
+        _source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): void {
-        if (!AgentResult.is(event) || event.data.agentId !== this.agentId) {
+        if (!AgentResult.is(event) || event.payload.agentId !== this.agentId) {
             return
         }
-        const text = event.data.isError ? null : event.data.resultText
+        const text = event.payload.isError ? null : event.payload.resultText
         if (typeof text !== "string") return
         if (this.waiter) {
             this.waiter(text)
@@ -247,7 +245,7 @@ class ResultStream extends BaseObserver {
 /** Publishes one ModelInvocationMeasured per planner turn. The bus
  *  collector only admits story terminals with lease correlation, so the
  *  session is the runner-evidence producer for its own participant. */
-class PlannerTelemetryObserver extends BaseObserver {
+class PlannerTelemetryObserver extends BusMember {
     private turn = 0
 
     constructor(
@@ -266,10 +264,10 @@ class PlannerTelemetryObserver extends BaseObserver {
     }
 
     override onExternalEvent(
-        _source: Participant,
-        event: SemanticEvent<unknown>,
+        _source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): void {
-        if (!AgentResult.is(event) || event.data.agentId !== this.agentId) {
+        if (!AgentResult.is(event) || event.payload.agentId !== this.agentId) {
             return
         }
         const measurement = plannerTurnMeasurement({
@@ -277,15 +275,15 @@ class PlannerTelemetryObserver extends BaseObserver {
             backend: this.backend,
             requestedModel: this.requestedModel,
             turn: ++this.turn,
-            result: event.data,
+            result: event.payload,
         })
         if (this.publishMeasurement) {
             this.publishMeasurement(measurement)
             return
         }
         const measured = ModelInvocationMeasured.create(measurement)
-        for (const env of this.getEnvironments()) {
-            env.deliverSemanticEvent(this, measured)
+        for (const env of this.getBuses()) {
+            env.publish(this, measured)
         }
     }
 }
@@ -719,7 +717,7 @@ export async function runPlannerBusSession(
         receipts.leave(opts.env)
         results.leave(opts.env)
         telemetry.leave(opts.env)
-        if (planner.getEnvironments().includes(opts.env)) {
+        if (planner.getBuses().includes(opts.env)) {
             planner.leave(opts.env)
         }
         await progressive.close()

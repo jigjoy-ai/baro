@@ -5,7 +5,8 @@
  * The process/stream skeleton lives in CliParticipant.
  */
 
-import { AgenticEnvironment, Participant, SemanticEvent } from "../../runtime/mozaik.js"
+import { SemanticEvent } from "../../runtime/mozaik.js"
+import { BusMember, CoordinationBus } from "../../runtime/coordination.js"
 
 import {
     AgentTargetedMessage,
@@ -41,7 +42,7 @@ export interface DevinCliParticipantOptions {
     onItem?: (item: DevinDeliveredItem) => void
     /** Bound inherited-stdio drain after the direct CLI root exits. */
     closeDrainTimeoutMs?: number
-    targetedMessageAuthority?: Participant
+    targetedMessageAuthority?: BusMember
     targetedMessageCorrelation?: Readonly<{
         runId?: string
         leaseId?: string
@@ -92,7 +93,7 @@ export class DevinCliParticipant extends CliParticipant<DevinRunSummary> {
         return this.turn?.getSessionId() ?? null
     }
 
-    override start(environment: AgenticEnvironment): void {
+    override start(environment: CoordinationBus): void {
         if (this.turn) return
         super.start(environment)
         const stdin = this.processStdin
@@ -185,7 +186,7 @@ export class DevinCliParticipant extends CliParticipant<DevinRunSummary> {
         super.dispatch(item)
     }
 
-    private system(subtype: string, raw: Record<string, unknown>): SemanticEvent<unknown> {
+    private system(subtype: string, raw: Record<string, unknown>): SemanticEvent<string, unknown> {
         return DevinSystem.create({ agentId: this.agentId, subtype, raw })
     }
 
@@ -195,14 +196,14 @@ export class DevinCliParticipant extends CliParticipant<DevinRunSummary> {
     }
 
     override async onExternalEvent(
-        source: Participant,
-        event: SemanticEvent<unknown>,
+        source: BusMember,
+        event: SemanticEvent<string, unknown>,
     ): Promise<void> {
         if (
             AgentTargetedMessage.is(event) &&
             acceptsTargetedMessage(
                 source,
-                event.data,
+                event.payload,
                 this.agentId,
                 this.options.targetedMessageAuthority,
                 this.options.targetedMessageCorrelation ?? {},

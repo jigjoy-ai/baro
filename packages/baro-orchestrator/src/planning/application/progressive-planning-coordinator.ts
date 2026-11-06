@@ -83,7 +83,7 @@ export interface ProgressivePlanningCoordinatorHost {
     admitGraph(
         admission: ProgressivePlanningGraphAdmission,
     ): RuntimeReplanDecisionOutcome
-    emit(event: SemanticEvent<unknown>): void
+    emit(event: SemanticEvent<string, unknown>): void
     afterAdmission(): void
     afterClose(): void
     terminate(reason: string): void
@@ -185,33 +185,33 @@ export class ProgressivePlanningCoordinator {
         return initialized
     }
 
-    handleEvent(event: SemanticEvent<unknown>): boolean {
+    handleEvent(event: SemanticEvent<string, unknown>): boolean {
         if (
             PlanningStreamOpened.is(event) &&
-            event.data.runId === this.opts.runId
+            event.payload.runId === this.opts.runId
         ) {
-            this.onPlanningStreamOpened(event.data.planningId)
+            this.onPlanningStreamOpened(event.payload.planningId)
             return true
         }
         if (
             PlanFragmentProposed.is(event) &&
-            event.data.runId === this.opts.runId
+            event.payload.runId === this.opts.runId
         ) {
-            this.onPlanFragmentProposed(event.data)
+            this.onPlanFragmentProposed(event.payload)
             return true
         }
         if (
             PlanningStreamCompleted.is(event) &&
-            event.data.runId === this.opts.runId
+            event.payload.runId === this.opts.runId
         ) {
-            this.onPlanningStreamCompleted(event.data)
+            this.onPlanningStreamCompleted(event.payload)
             return true
         }
         if (
             PlanningStreamFailed.is(event) &&
-            event.data.runId === this.opts.runId
+            event.payload.runId === this.opts.runId
         ) {
-            this.onPlanningStreamFailed(event.data)
+            this.onPlanningStreamFailed(event.payload)
             return true
         }
         return false
@@ -518,10 +518,10 @@ export class ProgressivePlanningCoordinator {
                 fragment,
                 "graph_rejected",
                 RuntimeReplanRejected.is(outcome.event)
-                    ? outcome.event.data.reason
+                    ? outcome.event.payload.reason
                     : "planner fragment was not admitted",
                 RuntimeReplanRejected.is(outcome.event)
-                    ? outcome.event.data.overlap
+                    ? outcome.event.payload.overlap
                     : undefined,
             )
         }
@@ -533,7 +533,7 @@ export class ProgressivePlanningCoordinator {
                 planningId: planning.planningId,
                 fragmentId: validated.fragmentId,
                 ordinal: validated.ordinal,
-                graphVersion: outcome.event.data.graphVersion,
+                graphVersion: outcome.event.payload.graphVersion,
                 storyIds: [...outcome.applied.addedStoryIds],
                 replay: false,
                 ...(droppedEdges.length > 0 ? { droppedEdges } : {}),
@@ -545,7 +545,7 @@ export class ProgressivePlanningCoordinator {
                 phase: "running_level",
                 detail:
                     `progressive planner admitted ${outcome.applied.addedStoryIds.join(", ")} ` +
-                    `at graph v${outcome.event.data.graphVersion}`,
+                    `at graph v${outcome.event.payload.graphVersion}`,
                 currentLevel: current.wave?.ordinal,
                 storyIds: current.wave?.storyIds,
             }),

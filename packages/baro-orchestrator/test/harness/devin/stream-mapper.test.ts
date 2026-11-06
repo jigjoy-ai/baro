@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
-import { FunctionCallItem, FunctionCallOutputItem, ModelMessageItem } from "../../../src/runtime/mozaik.js"
+import { FunctionCallItem, FunctionCallOutputItem, ModelMessageItem, toWire } from "../../../src/runtime/mozaik.js"
 import { DevinStreamMapper } from "../../../src/harness/devin/stream-mapper.js"
 
 describe("DevinStreamMapper", () => {
@@ -37,7 +37,7 @@ describe("DevinStreamMapper", () => {
         mapper.map({ sessionUpdate: "tool_call_update", toolCallId: "t", status: "in_progress", _meta: { terminal_exit: { exit_code: 1, signal: null } } })
         const [output] = mapper.map({ sessionUpdate: "tool_call_update", toolCallId: "t", status: "completed", content: [{ type: "content", content: { type: "text", text: "1 failing" } }] })
             .filter((i) => i instanceof FunctionCallOutputItem) as FunctionCallOutputItem[]
-        assert.match(JSON.stringify(output!.toJSON()), /\[error\] exit code 1/)
+        assert.match(JSON.stringify(toWire(output!)), /\[error\] exit code 1/)
         assert.equal(mapper.toolSuccessCount, 0)
     })
 
@@ -48,7 +48,7 @@ describe("DevinStreamMapper", () => {
         update({ status: "in_progress", content: [{ type: "content", content: { type: "text", text: "ok 1" } }] })
         update({ status: "in_progress", content: [{ type: "content", content: { type: "text", text: "ok 1\nok 2" } }], _meta: { terminal_exit: { exit_code: 0 } } })
         const [output] = update({ status: "completed" }).filter((i) => i instanceof FunctionCallOutputItem) as FunctionCallOutputItem[]
-        assert.match(JSON.stringify(output!.toJSON()), /ok 1\\nok 2\\n\(exit code 0\)/)
+        assert.match(JSON.stringify(toWire(output!)), /ok 1\\nok 2\\n\(exit code 0\)/)
         assert.equal(mapper.toolSuccessCount, 1)
     })
 })

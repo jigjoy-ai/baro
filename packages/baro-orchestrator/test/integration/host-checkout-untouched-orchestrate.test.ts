@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import type { AgenticEnvironment } from "../../src/runtime/mozaik.js"
+import type { CoordinationBus } from "../../src/runtime/coordination.js"
 import type {
     StoryExecOpts,
     StoryExecution,
@@ -48,7 +48,7 @@ class TwoFileWritingExecutor implements StoryExecutor {
         request: StorySpawnRequestData,
         _route: StoryRoute,
         cwd: string,
-        environment: AgenticEnvironment,
+        environment: CoordinationBus,
         options: StoryExecOpts,
     ): StoryExecution {
         this.hostBranchesDuringRun.push(git(this.repo, "branch", "--show-current"))
@@ -58,7 +58,7 @@ class TwoFileWritingExecutor implements StoryExecutor {
         const resultSource = { agentId: request.storyId } as never
         options.registerResultAuthority?.(resultSource)
         setImmediate(() => {
-            environment.deliverSemanticEvent(
+            environment.publish(
                 resultSource,
                 StoryResult.create({
                     storyId: request.storyId,
@@ -130,7 +130,6 @@ function runOrchestrate(repo: string, runId: string, prdPath: string, executor: 
         cwd: repo,
         runId,
         continueRun: false,
-        coordinationMode: "legacy",
         publishRemote: false,
         withGit: true,
         withWorktrees: true,

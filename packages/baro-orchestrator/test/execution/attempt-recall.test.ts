@@ -2,12 +2,11 @@ import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
 import {
-    AgenticEnvironment,
-    BaseObserver,
     FunctionCallItem,
     FunctionCallOutputItem,
     ModelMessageItem,
 } from "../../src/runtime/mozaik.js"
+import { BusMember, CoordinationBus } from "../../src/runtime/coordination.js"
 import { StoryResult, WorkLeaseGranted } from "../../src/semantic-events.js"
 import { AttemptRecallRunner } from "../../src/execution/attempt-recall-runner.js"
 import {
@@ -19,13 +18,13 @@ import {
     MAX_RECALLED_STATEMENTS,
 } from "../../src/execution/attempt-recall.js"
 
-class FakeAgent extends BaseObserver {
+class FakeAgent extends BusMember {
     constructor(readonly agentId: string) {
         super()
     }
 }
 
-class FakeBroker extends BaseObserver {}
+class FakeBroker extends BusMember {}
 
 describe("what a killed attempt hands to its successor", () => {
     it("says nothing when there is nothing to hand over", () => {
@@ -79,7 +78,7 @@ describe("what a killed attempt hands to its successor", () => {
 
 describe("AttemptRecallRunner on the bus", () => {
     function harness() {
-        const env = new AgenticEnvironment("attempt-recall")
+        const env = new CoordinationBus("attempt-recall")
         const broker = new FakeBroker()
         broker.join(env)
         const runner = new AttemptRecallRunner({
@@ -90,10 +89,10 @@ describe("AttemptRecallRunner on the bus", () => {
         runner.join(env)
 
         const delivered: Array<{ recipientId: string; text: string }> = []
-        const real = env.deliverSemanticEvent.bind(env)
-        env.deliverSemanticEvent = (source, event) => {
-            const data = (event as { data?: { recipientId?: string; text?: string } })
-                .data
+        const real = env.publish.bind(env)
+        env.publish = (source, event) => {
+            const data = (event as { payload?: { recipientId?: string; text?: string } })
+                .payload
             if (data?.recipientId && data.text) {
                 delivered.push({ recipientId: data.recipientId, text: data.text })
             }
@@ -133,11 +132,11 @@ describe("AttemptRecallRunner on the bus", () => {
         const agent = new FakeAgent("S2")
         agent.join(env)
 
-        env.deliverModelMessage(
+        env.publishModelMessage(
             agent,
             ModelMessageItem.rehydrate({ text: "`.default(x).optional()` gives both the optional output type and the runtime default." }),
         )
-        env.deliverFunctionCall(
+        env.publishFunctionCall(
             agent,
             FunctionCallItem.rehydrate({
                 callId: "c1",
@@ -145,11 +144,11 @@ describe("AttemptRecallRunner on the bus", () => {
                 args: JSON.stringify({ command: "npx tsc --noEmit" }),
             }),
         )
-        env.deliverFunctionCallOutput(
+        env.publishFunctionCallOutput(
             agent,
             FunctionCallOutputItem.rehydrate({ callId: "c1", output: "TS OK" }),
         )
-        env.deliverFunctionCall(
+        env.publishFunctionCall(
             agent,
             FunctionCallItem.rehydrate({
                 callId: "c2",
@@ -160,10 +159,10 @@ describe("AttemptRecallRunner on the bus", () => {
             }),
         )
 
-        env.deliverSemanticEvent(broker, killed("S2"))
+        env.publish(broker, killed("S2"))
         assert.equal(delivered.length, 0, "nothing is said until a successor exists")
 
-        env.deliverSemanticEvent(broker, lease("S2", 2))
+        env.publish(broker, lease("S2", 2))
 
         assert.equal(delivered.length, 1)
         assert.equal(delivered[0]!.recipientId, "S2")
@@ -182,13 +181,13 @@ describe("AttemptRecallRunner on the bus", () => {
         const { env, broker, delivered } = harness()
         const agent = new FakeAgent("S2")
         agent.join(env)
-        env.deliverModelMessage(
+        env.publishModelMessage(
             agent,
             ModelMessageItem.rehydrate({ text: "the enum coerces on undefined" }),
         )
-        env.deliverSemanticEvent(broker, killed("S2"))
-        env.deliverSemanticEvent(broker, lease("S2", 2))
-        env.deliverSemanticEvent(broker, lease("S2", 3))
+        env.publish(broker, killed("S2"))
+        env.publish(broker, lease("S2", 2))
+        env.publish(broker, lease("S2", 3))
         assert.equal(delivered.length, 1)
     })
 
@@ -198,11 +197,11 @@ describe("AttemptRecallRunner on the bus", () => {
         const { env, broker, delivered } = harness()
         const agent = new FakeAgent("S3")
         agent.join(env)
-        env.deliverModelMessage(
+        env.publishModelMessage(
             agent,
             ModelMessageItem.rehydrate({ text: "done migrating" }),
         )
-        env.deliverSemanticEvent(
+        env.publish(
             broker,
             StoryResult.create({
                 storyId: "S3",
@@ -214,7 +213,7 @@ describe("AttemptRecallRunner on the bus", () => {
                 runId: "run-1",
             }),
         )
-        env.deliverSemanticEvent(broker, lease("S3", 2))
+        env.publish(broker, lease("S3", 2))
         assert.equal(delivered.length, 0)
     })
 
@@ -222,18 +221,18 @@ describe("AttemptRecallRunner on the bus", () => {
         const { env, broker, delivered } = harness()
         const agent = new FakeAgent("S4")
         agent.join(env)
-        env.deliverModelMessage(
+        env.publishModelMessage(
             agent,
             ModelMessageItem.rehydrate({ text: "half-way through" }),
         )
-        env.deliverSemanticEvent(broker, killed("S4"))
+        env.publish(broker, killed("S4"))
 
         const impostor = new FakeBroker()
         impostor.join(env)
-        env.deliverSemanticEvent(impostor, lease("S4", 2))
+        env.publish(impostor, lease("S4", 2))
         assert.equal(delivered.length, 0)
 
-        env.deliverSemanticEvent(broker, lease("S4", 2))
+        env.publish(broker, lease("S4", 2))
         assert.equal(delivered.length, 1)
     })
 
@@ -241,7 +240,7 @@ describe("AttemptRecallRunner on the bus", () => {
         const { env, broker, delivered } = harness()
         const agent = new FakeAgent("S5")
         agent.join(env)
-        env.deliverFunctionCall(
+        env.publishFunctionCall(
             agent,
             FunctionCallItem.rehydrate({
                 callId: "c9",
@@ -249,12 +248,12 @@ describe("AttemptRecallRunner on the bus", () => {
                 args: "{not json",
             }),
         )
-        env.deliverModelMessage(
+        env.publishModelMessage(
             agent,
             ModelMessageItem.rehydrate({ text: "still here" }),
         )
-        env.deliverSemanticEvent(broker, killed("S5"))
-        env.deliverSemanticEvent(broker, lease("S5", 2))
+        env.publish(broker, killed("S5"))
+        env.publish(broker, lease("S5", 2))
         assert.equal(delivered.length, 1)
         assert.match(delivered[0]!.text, /still here/u)
     })

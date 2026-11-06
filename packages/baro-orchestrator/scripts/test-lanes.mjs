@@ -26,7 +26,6 @@ const SLOW_PATTERNS = [
     "runner-protocol",
     "runner-helpers",
     "agent-collab",
-    "ab-evidence",
 ]
 
 function walk(dir) {
@@ -55,7 +54,7 @@ const concurrency = lane === "slow" ? "2" : "4"
 console.error(`[test-lanes] ${lane}: ${files.length}/${all.length} files, concurrency ${concurrency}`)
 const result = spawnSync(
     process.execPath,
-    ["--import", "tsx", "--test", `--test-concurrency=${concurrency}`, ...files.sort()],
+    ["--import", "tsx", "--import", "./test/env.ts", "--test", `--test-concurrency=${concurrency}`, ...files.sort()],
     { stdio: "inherit" },
 )
 process.exit(result.status ?? 1)

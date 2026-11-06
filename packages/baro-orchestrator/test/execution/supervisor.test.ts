@@ -23,13 +23,30 @@ function feed(sup: Supervisor, id: string, name: string, args = "{}") {
 }
 
 function interventions(env: CapturedEnvironment): StoryInterventionData[] {
-    return env.events.filter(StoryIntervention.is).map((e) => e.data)
+    return env.events.filter(StoryIntervention.is).map((e) => e.payload)
 }
 
+// Count-logic tests: no minimum exploration time unless a test sets one.
 function supervised(opts: SupervisorOptions = {}): { sup: Supervisor; env: CapturedEnvironment } {
-    const sup = new Supervisor(opts)
+    const sup = new Supervisor({ noProgressMinMs: 0, ...opts })
     return { sup, env: joinWithCapture(sup) }
 }
+
+// A survey story in a live run read 80 files in 90 seconds and was aborted for
+// "exploring, not converging" before it could write its one document.
+test("does not abort fast exploration, only exploration that drags on", async () => {
+    let now = 0
+    const { sup, env } = supervised({ noProgressToolCalls: 10, noProgressMinMs: 10 * 60_000, now: () => now })
+    for (let i = 0; i < 30; i++) {
+        now += 3_000
+        await feed(sup, "S1", "read_file", `{"n":${i}}`)
+    }
+    assert.equal(interventions(env).length, 0, "90 s of reading is research, not a loop")
+    now += 10 * 60_000
+    await feed(sup, "S1", "read_file", `{"n":"late"}`)
+    assert.equal(interventions(env).length, 1)
+    assert.match(interventions(env)[0]!.reason, /no file change/)
+})
 
 test("aborts a story exploring with no file changes", async () => {
     const { sup, env } = supervised({ noProgressToolCalls: 10 })
@@ -274,6 +291,7 @@ test("collective supervision authenticates the active worker and correlates abor
     }
     outcomeAuthority.registerResultAuthority(correlation, worker)
     const sup = new Supervisor({
+        noProgressMinMs: 0,
         noProgressToolCalls: 2,
         repeatThreshold: 999,
         collective: { runId, leaseAuthority: broker, outcomeAuthority },

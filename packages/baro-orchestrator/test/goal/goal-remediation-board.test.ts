@@ -136,11 +136,11 @@ describe("goal remediation graph admission", () => {
             guardian.join(env)
             board.join(env)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "test" }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 repository,
                 RunPrepared.create({ runId, baseSha: null }),
             )
@@ -148,11 +148,11 @@ describe("goal remediation graph admission", () => {
                 env.events,
                 RunVerificationRequested.is,
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 verifier,
                 RunVerificationCompleted.create({
                     runId,
-                    verificationId: firstVerification.data.verificationId,
+                    verificationId: firstVerification.payload.verificationId,
                     status: "skipped",
                     commands: [
                         {
@@ -174,17 +174,17 @@ describe("goal remediation graph admission", () => {
                 env.events,
                 GoalAggregateReviewRequested.is,
             )
-            assert.deepEqual(firstReview.data.basis.storyIds, [...storyIds].sort())
+            assert.deepEqual(firstReview.payload.basis.storyIds, [...storyIds].sort())
             assert.deepEqual(
-                firstReview.data.basis.invariants.find(
+                firstReview.payload.basis.invariants.find(
                     ({ invariantId }) => invariantId === "G-A1",
                 )?.mappedStoryIds,
                 ["S2"],
             )
 
-            env.deliverSemanticEvent(
+            env.publish(
                 reviewer,
-                aggregateReviewCompletion(firstReview.data, "failed", "G-A1"),
+                aggregateReviewCompletion(firstReview.payload, "failed", "G-A1"),
             )
             const admission = await waitFor(
                 env.events,
@@ -197,14 +197,14 @@ describe("goal remediation graph admission", () => {
                 env.events,
                 (event) =>
                     WorkContextRequested.is(event) &&
-                    event.data.storyId === admission.data.storyId,
+                    event.payload.storyId === admission.payload.storyId,
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("context"),
                 WorkContextProvided.create({
                     runId,
-                    requestId: context.data.requestId,
-                    storyId: admission.data.storyId,
+                    requestId: context.payload.requestId,
+                    storyId: admission.payload.storyId,
                     context: null,
                 }),
             )
@@ -212,41 +212,41 @@ describe("goal remediation graph admission", () => {
                 env.events,
                 (event) =>
                     WorkOffered.is(event) &&
-                    event.data.request.storyId === admission.data.storyId,
+                    event.payload.request.storyId === admission.payload.storyId,
             )
-            const leaseId = `lease-${admission.data.storyId}`
-            env.deliverSemanticEvent(
+            const leaseId = `lease-${admission.payload.storyId}`
+            env.publish(
                 source("broker"),
                 WorkLeaseGranted.create({
                     runId,
-                    offerId: offer.data.offerId,
+                    offerId: offer.payload.offerId,
                     leaseId,
                     workerId: "remediation-worker",
-                    generation: offer.data.generation,
-                    request: offer.data.request,
+                    generation: offer.payload.generation,
+                    request: offer.payload.request,
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("remediation-worker"),
                 StoryResult.create({
                     runId,
-                    storyId: admission.data.storyId,
+                    storyId: admission.payload.storyId,
                     leaseId,
-                    generation: offer.data.generation,
+                    generation: offer.payload.generation,
                     success: true,
                     attempts: 1,
                     durationSecs: 1,
                     error: null,
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 qualityGate,
                 StoryQualityCompleted.create({
                     runId,
-                    evaluationId: `${admission.data.storyId}:quality`,
-                    storyId: admission.data.storyId,
+                    evaluationId: `${admission.payload.storyId}:quality`,
+                    storyId: admission.payload.storyId,
                     leaseId,
-                    generation: offer.data.generation,
+                    generation: offer.payload.generation,
                     status: "passed",
                     targetTurn: 1,
                     reason: "independent Critic passed the remediation",
@@ -265,13 +265,13 @@ describe("goal remediation graph admission", () => {
                 env.events,
                 (event) =>
                     StoryIntegrationRequested.is(event) &&
-                    event.data.storyId === admission.data.storyId,
+                    event.payload.storyId === admission.payload.storyId,
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 repository,
                 StoryMerged.create({
                     runId,
-                    storyId: admission.data.storyId,
+                    storyId: admission.payload.storyId,
                     leaseId,
                     mode: "worktree",
                 }),
@@ -281,17 +281,17 @@ describe("goal remediation graph admission", () => {
                 env.events,
                 (event) =>
                     RunVerificationRequested.is(event) &&
-                    event.data.verificationId !==
-                        firstVerification.data.verificationId,
+                    event.payload.verificationId !==
+                        firstVerification.payload.verificationId,
             )
             const reviewCountBeforeReplay = env.events.filter(
                 GoalAggregateReviewRequested.is,
             ).length
-            env.deliverSemanticEvent(
+            env.publish(
                 verifier,
                 RunVerificationCompleted.create({
                     runId,
-                    verificationId: firstVerification.data.verificationId,
+                    verificationId: firstVerification.payload.verificationId,
                     status: "passed",
                     commands: [{
                         command: "npm run test",
@@ -307,11 +307,11 @@ describe("goal remediation graph admission", () => {
                 reviewCountBeforeReplay,
             )
 
-            env.deliverSemanticEvent(
+            env.publish(
                 verifier,
                 RunVerificationCompleted.create({
                     runId,
-                    verificationId: secondVerification.data.verificationId,
+                    verificationId: secondVerification.payload.verificationId,
                     status: "passed",
                     commands: [{
                         command: "npm run test",
@@ -325,21 +325,21 @@ describe("goal remediation graph admission", () => {
                 env.events,
                 (event) =>
                     GoalAggregateReviewRequested.is(event) &&
-                    event.data.basis.verificationId ===
-                        secondVerification.data.verificationId,
+                    event.payload.basis.verificationId ===
+                        secondVerification.payload.verificationId,
             )
             assert.deepEqual(
-                secondReview.data.basis.invariants.find(
+                secondReview.payload.basis.invariants.find(
                     ({ invariantId }) => invariantId === "G-A1",
                 )?.mappedStoryIds,
-                [admission.data.storyId, "S2"].sort(),
+                [admission.payload.storyId, "S2"].sort(),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 reviewer,
-                aggregateReviewCompletion(secondReview.data, "passed"),
+                aggregateReviewCompletion(secondReview.payload, "passed"),
             )
             await waitFor(env.events, RunPushRequested.is)
-            env.deliverSemanticEvent(
+            env.publish(
                 repository,
                 RunPushed.create({ runId, pushed: false }),
             )
@@ -347,8 +347,8 @@ describe("goal remediation graph admission", () => {
             assert.equal(summary.success, true)
             assert.equal(summary.verificationStatus, "passed")
             assert.notEqual(
-                firstVerification.data.verificationId,
-                secondVerification.data.verificationId,
+                firstVerification.payload.verificationId,
+                secondVerification.payload.verificationId,
             )
         })
     })
@@ -408,11 +408,11 @@ describe("goal remediation graph admission", () => {
 
             // Deliver preparation immediately: RunPrepared can already be in
             // Board's mailbox when Guardian reacts to RunPreparationRequested.
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "test" }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repository"),
                 RunPrepared.create({ runId, baseSha: null }),
             )
@@ -422,13 +422,13 @@ describe("goal remediation graph admission", () => {
                 GoalInvariantRemediationAdmitted.is,
             )
             await board.idle()
-            assert.equal(admission.data.invariantId, "G-C1")
+            assert.equal(admission.payload.invariantId, "G-C1")
             assert.equal(persistAttempts, 2)
             assert.equal(
                 env.events.some(
                     (event) =>
                         RuntimeReplanRejected.is(event) &&
-                        event.data.code === "persistence_failed",
+                        event.payload.code === "persistence_failed",
                 ),
                 true,
             )
@@ -436,7 +436,7 @@ describe("goal remediation graph admission", () => {
             const durable = JSON.parse(readFileSync(path, "utf8")) as PrdFile
             assert.equal(
                 durable.userStories.some(
-                    ({ id }) => id === admission.data.storyId,
+                    ({ id }) => id === admission.payload.storyId,
                 ),
                 true,
             )
@@ -493,15 +493,15 @@ describe("goal remediation graph admission", () => {
             const env = captureEnv()
             guardian.join(env)
             board.join(env)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "test" }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 repository,
                 RunPrepared.create({ runId, baseSha: null }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("planner"),
                 PlanFragmentProposed.create({
                     runId,
@@ -516,13 +516,13 @@ describe("goal remediation graph admission", () => {
                 env.events,
                 (event) =>
                     WorkContextRequested.is(event) &&
-                    event.data.storyId === "S1",
+                    event.payload.storyId === "S1",
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("context"),
                 WorkContextProvided.create({
                     runId,
-                    requestId: context.data.requestId,
+                    requestId: context.payload.requestId,
                     storyId: "S1",
                     context: null,
                 }),
@@ -531,27 +531,27 @@ describe("goal remediation graph admission", () => {
                 env.events,
                 (event) =>
                     WorkOffered.is(event) &&
-                    event.data.request.storyId === "S1",
+                    event.payload.request.storyId === "S1",
             )
             const leaseId = "lease-progressive-S1"
-            env.deliverSemanticEvent(
+            env.publish(
                 source("broker"),
                 WorkLeaseGranted.create({
                     runId,
-                    offerId: offer.data.offerId,
+                    offerId: offer.payload.offerId,
                     leaseId,
                     workerId: "worker-S1",
-                    generation: offer.data.generation,
-                    request: offer.data.request,
+                    generation: offer.payload.generation,
+                    request: offer.payload.request,
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("worker-S1"),
                 StoryResult.create({
                     runId,
                     storyId: "S1",
                     leaseId,
-                    generation: offer.data.generation,
+                    generation: offer.payload.generation,
                     success: true,
                     attempts: 1,
                     durationSecs: 1,
@@ -562,9 +562,9 @@ describe("goal remediation graph admission", () => {
                 env.events,
                 (event) =>
                     StoryIntegrationRequested.is(event) &&
-                    event.data.storyId === "S1",
+                    event.payload.storyId === "S1",
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 repository,
                 StoryMerged.create({
                     runId,
@@ -580,7 +580,7 @@ describe("goal remediation graph admission", () => {
                 "coverage stays deferred while the planner stream is open",
             )
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("planner"),
                 PlanningStreamCompleted.create({
                     runId,
@@ -594,11 +594,11 @@ describe("goal remediation graph admission", () => {
                 GoalInvariantRemediationAdmitted.is,
             )
             await board.idle()
-            assert.equal(admission.data.invariantId, "G-C1")
+            assert.equal(admission.payload.invariantId, "G-C1")
             const durable = JSON.parse(readFileSync(path, "utf8")) as PrdFile
             assert.equal(
                 durable.userStories.some(
-                    ({ id }) => id === admission.data.storyId,
+                    ({ id }) => id === admission.payload.storyId,
                 ),
                 true,
             )
@@ -655,15 +655,15 @@ describe("goal remediation graph admission", () => {
             guardian.join(env)
             board.join(env)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "test" }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repository"),
                 RunPrepared.create({ runId, baseSha: null }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 bridge,
                 GoalInvariantChallengeRaised.create({
                     runId,
@@ -683,17 +683,17 @@ describe("goal remediation graph admission", () => {
                 JSON.stringify(
                     env.events.map((event) => ({
                         type: event.type,
-                        data: event.data,
+                        data: event.payload,
                     })),
                 ),
             )
-            assert.equal(applied.data.mutation.addedStories.length, 1)
-            const remediation = applied.data.mutation.addedStories[0]!
+            assert.equal(applied.payload.mutation.addedStories.length, 1)
+            const remediation = applied.payload.mutation.addedStories[0]!
             assert.match(remediation.id, /^GREM-/u)
             assert.deepEqual(remediation.goalInvariantIds, ["G-A1"])
             assert.equal(remediation.model, "heavy")
             const admission = env.events.find(GoalInvariantRemediationAdmitted.is)
-            assert.equal(admission?.data.storyId, remediation.id)
+            assert.equal(admission?.payload.storyId, remediation.id)
 
             const durable = JSON.parse(readFileSync(path, "utf8")) as PrdFile
             assert.equal(
@@ -774,15 +774,15 @@ describe("goal remediation graph admission", () => {
             guardian.join(env)
             board.join(env)
 
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "test" }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repository"),
                 RunPrepared.create({ runId, baseSha: null }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 bridge,
                 GoalInvariantChallengeRaised.create({
                     runId,
@@ -796,7 +796,7 @@ describe("goal remediation graph admission", () => {
 
             const applied = env.events.find(RuntimeReplanApplied.is)
             assert.ok(applied)
-            const remediation = applied.data.mutation.addedStories[0]!
+            const remediation = applied.payload.mutation.addedStories[0]!
             assert.match(remediation.id, /^GREM-/u)
             assert.deepEqual(remediation.dependsOn, ["S-EVID", "S-IMPL"])
             assert.equal(remediation.retries, 0)
@@ -804,17 +804,17 @@ describe("goal remediation graph admission", () => {
             // A replayed proposal (restart, retained outbox) carries the
             // guardian's original empty dependsOn and must still match.
             const proposed = env.events.find(GoalInvariantRemediationProposed.is)!
-            env.deliverSemanticEvent(
+            env.publish(
                 guardian,
-                GoalInvariantRemediationProposed.create(proposed.data),
+                GoalInvariantRemediationProposed.create(proposed.payload),
             )
             await board.idle()
             const admissions = env.events.filter(GoalInvariantRemediationAdmitted.is)
-            assert.equal(admissions.at(-1)?.data.disposition, "existing")
+            assert.equal(admissions.at(-1)?.payload.disposition, "existing")
             assert.equal(
                 env.events.some((event) =>
-                    typeof (event.data as { detail?: unknown }).detail === "string" &&
-                    (event.data as { detail: string }).detail.includes("story id collision")),
+                    typeof (event.payload as { detail?: unknown }).detail === "string" &&
+                    (event.payload as { detail: string }).detail.includes("story id collision")),
                 false,
             )
         })
@@ -881,17 +881,17 @@ describe("goal remediation graph admission", () => {
             const env = captureEnv()
             guardian.join(env)
             board.join(env)
-            env.deliverSemanticEvent(
+            env.publish(
                 source("operator"),
                 RunStartRequest.create({ reason: "test" }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repository"),
                 RunPrepared.create({ runId, baseSha: null }),
             )
 
             for (const invariant of contract.invariants) {
-                env.deliverSemanticEvent(
+                env.publish(
                     bridge,
                     GoalInvariantChallengeRaised.create({
                         runId,
@@ -908,7 +908,7 @@ describe("goal remediation graph admission", () => {
                 env.events.filter(
                     (event) =>
                         GoalInvariantRemediationAdmitted.is(event) &&
-                        event.data.disposition === "applied",
+                        event.payload.disposition === "applied",
                 ).length,
                 3,
             )
@@ -917,13 +917,13 @@ describe("goal remediation graph admission", () => {
                 env.events,
                 (event) =>
                     WorkContextRequested.is(event) &&
-                    event.data.storyId === "S1",
+                    event.payload.storyId === "S1",
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("context"),
                 WorkContextProvided.create({
                     runId,
-                    requestId: contextRequest.data.requestId,
+                    requestId: contextRequest.payload.requestId,
                     storyId: "S1",
                     context: null,
                 }),
@@ -932,27 +932,27 @@ describe("goal remediation graph admission", () => {
                 env.events,
                 (event) =>
                     WorkOffered.is(event) &&
-                    event.data.request.storyId === "S1",
+                    event.payload.request.storyId === "S1",
             )
             const leaseId = "lease-S1-progress"
-            env.deliverSemanticEvent(
+            env.publish(
                 source("broker"),
                 WorkLeaseGranted.create({
                     runId,
-                    offerId: offer.data.offerId,
+                    offerId: offer.payload.offerId,
                     leaseId,
                     workerId: "worker-S1",
-                    generation: offer.data.generation,
-                    request: offer.data.request,
+                    generation: offer.payload.generation,
+                    request: offer.payload.request,
                 }),
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("worker-S1"),
                 StoryResult.create({
                     runId,
                     storyId: "S1",
                     leaseId,
-                    generation: offer.data.generation,
+                    generation: offer.payload.generation,
                     success: true,
                     attempts: 1,
                     durationSecs: 1,
@@ -963,9 +963,9 @@ describe("goal remediation graph admission", () => {
                 env.events,
                 (event) =>
                     StoryIntegrationRequested.is(event) &&
-                    event.data.storyId === "S1",
+                    event.payload.storyId === "S1",
             )
-            env.deliverSemanticEvent(
+            env.publish(
                 source("repository"),
                 StoryMerged.create({
                     runId,
@@ -980,7 +980,7 @@ describe("goal remediation graph admission", () => {
                 env.events.filter(
                     (event) =>
                         GoalInvariantRemediationAdmitted.is(event) &&
-                        event.data.disposition === "applied",
+                        event.payload.disposition === "applied",
                 ).length,
                 4,
             )

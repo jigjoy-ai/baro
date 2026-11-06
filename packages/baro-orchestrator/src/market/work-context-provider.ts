@@ -1,4 +1,4 @@
-import type { Participant } from "../runtime/mozaik.js"
+import type { BusMember } from "../runtime/coordination.js"
 
 import {
     CollaborationNote,
@@ -28,8 +28,8 @@ const MAX_NOTE_CHARS = 2_000
 const MAX_NOTE_CONTEXT_CHARS = 8_000
 
 export class WorkContextProvider extends SerializedObserver {
-    private requestAuthority: Participant | null = null
-    private collaborationAuthority: Participant | null = null
+    private requestAuthority: BusMember | null = null
+    private collaborationAuthority: BusMember | null = null
     private readonly retainedNotes: RetainedCollaborationNote[] = []
 
     constructor(
@@ -40,14 +40,14 @@ export class WorkContextProvider extends SerializedObserver {
         super()
     }
 
-    setRequestAuthority(authority: Participant): void {
+    setRequestAuthority(authority: BusMember): void {
         if (this.requestAuthority && this.requestAuthority !== authority) {
             throw new Error("work context request authority is already bound")
         }
         this.requestAuthority = authority
     }
 
-    setCollaborationAuthority(authority: Participant): void {
+    setCollaborationAuthority(authority: BusMember): void {
         if (
             this.collaborationAuthority &&
             this.collaborationAuthority !== authority
@@ -59,17 +59,17 @@ export class WorkContextProvider extends SerializedObserver {
 
     protected override handleEvent(context: SerializedEventContext): void {
         const { event } = context
-        if (CollaborationNote.is(event) && event.data.runId === this.runId) {
+        if (CollaborationNote.is(event) && event.payload.runId === this.runId) {
             if (
                 !this.collaborationAuthority ||
                 context.source !== this.collaborationAuthority
             ) {
                 return
             }
-            this.retainNote(event.data.sourceAgentId, event.data.text)
+            this.retainNote(event.payload.sourceAgentId, event.payload.text)
             return
         }
-        if (!WorkContextRequested.is(event) || event.data.runId !== this.runId) {
+        if (!WorkContextRequested.is(event) || event.payload.runId !== this.runId) {
             return
         }
         if (!this.requestAuthority || context.source !== this.requestAuthority) return
@@ -78,8 +78,8 @@ export class WorkContextProvider extends SerializedObserver {
         const retainedNotes = this.retainedNotes.map((note) => ({ ...note }))
         context.spawnTask(
             {
-                label: `gather context for ${event.data.storyId}`,
-                key: event.data.storyId,
+                label: `gather context for ${event.payload.storyId}`,
+                key: event.payload.storyId,
             },
             async () => {
                 let gathered: string | null = null
@@ -87,15 +87,15 @@ export class WorkContextProvider extends SerializedObserver {
                     gathered = this.source
                         ? await withTimeout(
                               this.source.gatherContext(
-                                  event.data.storyId,
-                                  event.data.hints,
+                                  event.payload.storyId,
+                                  event.payload.hints,
                               ),
                               this.timeoutMs,
                           )
                         : null
                 } catch (error) {
                     process.stderr.write(
-                        `[work-context] ${event.data.storyId}: ${(error as Error)?.message ?? String(error)}\n`,
+                        `[work-context] ${event.payload.storyId}: ${(error as Error)?.message ?? String(error)}\n`,
                     )
                 }
                 const launchContext = mergeLaunchContext(
@@ -105,8 +105,8 @@ export class WorkContextProvider extends SerializedObserver {
                 context.publish(
                     WorkContextProvided.create({
                         runId: this.runId,
-                        requestId: event.data.requestId,
-                        storyId: event.data.storyId,
+                        requestId: event.payload.requestId,
+                        storyId: event.payload.storyId,
                         context: launchContext,
                     }),
                 )
