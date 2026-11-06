@@ -90,7 +90,6 @@ async function goalAheadOfHost() {
     const prepared = await iw.prepare()
     const mgr = new WorktreeManager(repo, gate, runId, {
         integrationRoot: prepared.integrationRoot,
-        allowSharedFallback: false,
         linkDepDirs: false,
         onLog: (l) => logs.push(l),
     })
@@ -129,7 +128,6 @@ describe("IntegrationWorktree — prepare + WorktreeManager merge", () => {
 
         const mgr = new WorktreeManager(repo, gate, runId, {
             integrationRoot: prepared.integrationRoot,
-            allowSharedFallback: false,
             linkDepDirs: false,
             onLog: (l) => logs.push(l),
         })
@@ -351,7 +349,6 @@ describe("IntegrationWorktree — host edit doesn't block merge", () => {
         const prepared = await iw.prepare()
         const mgr = new WorktreeManager(repo, gate, runId, {
             integrationRoot: prepared.integrationRoot,
-            allowSharedFallback: false,
             linkDepDirs: false,
             onLog: (l) => logs.push(l),
         })
@@ -479,9 +476,7 @@ describe("IntegrationWorktree — remove", () => {
         const prepared = await iw.prepare()
         const mgr = new WorktreeManager(repo, gate, runId, {
             integrationRoot: prepared.integrationRoot,
-            allowSharedFallback: false,
             linkDepDirs: false,
-            resolveConflictsWithTheirs: false,
             onLog: (l) => logs.push(l),
         })
         const p1 = (await mgr.create("S1"))!

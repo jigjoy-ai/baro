@@ -249,7 +249,6 @@ if (args[0] === "rev-parse" && args[1] === "HEAD") {
             const gate = new GitGate()
             const worktreeRunId = uniqueRunId("run-timeout")
             const manager = new WorktreeManager(repo, gate, worktreeRunId, {
-                allowSharedFallback: false,
                 linkDepDirs: false,
             })
             try {
