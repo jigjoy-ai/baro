@@ -18,6 +18,8 @@ import {
     StoryMerged,
     StoryResult,
     WorkContextProvided,
+    WorkspaceCleanupCompleted,
+    WorkspaceCleanupRequested,
     WorkContextRequested,
     WorkLeaseGranted,
     WorkOffered,
@@ -94,6 +96,47 @@ describe("CollectiveBoard checkpoints", () => {
             assert.deepEqual(withdrawn.payload.affected, ["S2"])
             await waitForDetail(env, /S2 failed: started on S1's checkpoint, which was withdrawn/)
             assert.equal(integrationsOf(env, "S2"), 0)
+            await board.idle()
+        })
+    })
+
+    // Run 3 of the hermes-baro goal stalled for an hour: a held early starter
+    // kept the wave pending while the prerequisite it waited on needed exactly
+    // that wave to close to be retried.
+    it("never lets a held early starter keep its wave open", async () => {
+        await withBoard(async (env, board) => {
+            const s1 = await leaseStory(env, "S1", 1)
+            requestCheckpoint(env, s1, ["src/contract.ts"])
+            await nthDecision(env, 1)
+            const s2 = await leaseStory(env, "S2", 2)
+            env.publish(source("S2"), pass("S2", s2))
+            await waitForDetail(env, /S2 is accepted and integrates after S1/)
+
+            env.publish(source("S1"), fail("S1", s1))
+            // The repository finishes the failed attempts' cleanups.
+            const cleanups = await waitForCount(env.events, WorkspaceCleanupRequested.is, 2)
+            for (const cleanup of cleanups) {
+                env.publish(
+                    source("repo"),
+                    WorkspaceCleanupCompleted.create({
+                        runId: RUN,
+                        cleanupId: cleanup.payload.cleanupId,
+                        storyId: cleanup.payload.storyId,
+                        leaseId: cleanup.payload.leaseId,
+                        generation: cleanup.payload.generation,
+                    }),
+                )
+            }
+
+            // S2 retries from the run branch, S3 waits for real integration,
+            // and S1 gets its recovery attempt: no wave waits on itself.
+            const s1Contexts = () =>
+                env.events.filter((x) => WorkContextRequested.is(x) && x.payload.storyId === "S1").length
+            const deadline = Date.now() + 2_000
+            while (s1Contexts() < 2 && Date.now() < deadline) {
+                await new Promise((resolve) => setTimeout(resolve, 5))
+            }
+            assert.equal(s1Contexts(), 2, "S1's recovery attempt was offered")
             await board.idle()
         })
     })
@@ -272,4 +315,18 @@ async function waitFor<T extends SemanticEvent<string, unknown>>(
         await new Promise<void>((resolve) => setTimeout(resolve, 2))
     }
     assert.fail("timed out waiting for event")
+}
+
+async function waitForCount<T extends SemanticEvent<string, unknown>>(
+    events: SemanticEvent<string, unknown>[],
+    guard: (event: SemanticEvent<string, unknown>) => event is T,
+    count: number,
+): Promise<T[]> {
+    const deadline = Date.now() + 2_000
+    while (Date.now() < deadline) {
+        const matches = events.filter(guard)
+        if (matches.length >= count) return matches
+        await new Promise<void>((resolve) => setTimeout(resolve, 2))
+    }
+    assert.fail(`timed out waiting for ${count} events`)
 }

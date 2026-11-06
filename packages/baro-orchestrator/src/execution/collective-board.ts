@@ -1393,6 +1393,9 @@ export class CollectiveBoard extends SerializedObserver {
         }
 
         this.pendingDependencyBlocks.delete(storyId)
+        // Resuming replays its commits onto a new base, so the published
+        // checkpoint will not be an ancestor of what it finally integrates.
+        this.withdrawCheckpoint(storyId, `${storyId} suspended on a prerequisite`)
         this.wave.pending.delete(storyId)
         addUnique(this.wave.blocked, storyId)
         this.leases.delete(storyId)
@@ -2629,6 +2632,7 @@ export class CollectiveBoard extends SerializedObserver {
             if (
                 !story ||
                 story.passes ||
+                this.integrationHold.has(storyId) ||
                 !this.wave.pending.has(storyId) ||
                 this.leases.has(storyId) ||
                 this.offers.hasOffer(storyId) ||
@@ -2685,6 +2689,7 @@ export class CollectiveBoard extends SerializedObserver {
                 !scheduled.has(story.id) &&
                 !this.failed.has(story.id) &&
                 !blocked.has(story.id) &&
+                !this.integrationHold.has(story.id) &&
                 story.dependsOn.every((dependency) =>
                     this.dependencyMet(story.id, storyById.get(dependency)),
                 ),
@@ -2794,7 +2799,9 @@ export class CollectiveBoard extends SerializedObserver {
             (story) =>
                 !story.passes &&
                 !this.failed.has(story.id) &&
-                !blocked.has(story.id),
+                !blocked.has(story.id) &&
+                // Accepted and waiting to integrate: it has a lease and a result.
+                !this.integrationHold.has(story.id),
         )
 
         let levels
@@ -3119,7 +3126,10 @@ export class CollectiveBoard extends SerializedObserver {
         const checkpointBase = this.checkpointBaseFor(story, recovery)
         // A checkpoint withdrawn since admission, or a resume that re-bases
         // instead of creating: wait until the prerequisites integrate.
-        if (checkpointBase === null) return
+        if (checkpointBase === null) {
+            this.unadmit(story.id)
+            return
+        }
         const offerId = this.offers.nextOfferId(story.id)
         const basePrompt = buildStoryOfferPrompt(this.prd, story)
         const recoveryPrompt = recovery
@@ -3351,8 +3361,19 @@ export class CollectiveBoard extends SerializedObserver {
                 affected,
             }),
         )
+        // Admitted on the checkpoint but not yet running: back to waiting for
+        // integration, or the wave would hold a story nothing can start.
+        for (const story of this.prd?.userStories ?? []) {
+            if (
+                story.dependsOn.includes(storyId) &&
+                this.wave?.pending.has(story.id) &&
+                !this.leases.has(story.id) &&
+                !this.integrationHold.has(story.id)
+            ) this.unadmit(story.id)
+        }
         for (const id of affected) {
             if (!this.integrationHold.has(id)) continue
+            this.rejoinWave(id)
             this.failStory(
                 id,
                 `started on ${storyId}'s checkpoint, which was withdrawn (${reason}); retrying from the run branch`,
@@ -3383,6 +3404,11 @@ export class CollectiveBoard extends SerializedObserver {
             return true
         }
         this.integrationHold.set(result.storyId, { result, ...(quality ? { quality } : {}) })
+        // A held story is settled for its wave, like a suspended one: keeping
+        // it pending would keep the wave open while the prerequisite it waits
+        // for needs exactly that wave to close to be retried (a run stalled
+        // for an hour on that cycle). It rejoins a wave when released.
+        this.wave?.pending.delete(result.storyId)
         this.emit(
             ConductorState.create({
                 phase: "running_level",
@@ -3391,7 +3417,38 @@ export class CollectiveBoard extends SerializedObserver {
                 storyIds: this.wave?.storyIds ?? [],
             }),
         )
+        this.maybeCompleteWave()
         return true
+    }
+
+    /** Undo an admission that can no longer start; reconcileReadyStories
+     * admits the story again once its prerequisites integrate. */
+    private unadmit(storyId: string): void {
+        if (!this.wave) return
+        this.offers.cancelContextRequests(storyId)
+        this.offers.deleteOffer(storyId)
+        this.wave.pending.delete(storyId)
+        this.wave.storyIds = this.wave.storyIds.filter((id) => id !== storyId)
+        this.startedOn.delete(storyId)
+        this.maybeCompleteWave()
+    }
+
+    /** Back into the current wave (or a wave of its own) so the ordinary
+     * integration, failure and merge handlers apply to a released held story. */
+    private rejoinWave(storyId: string): void {
+        if (!this.wave) {
+            this.wave = {
+                ordinal: ++this.waveOrdinal,
+                storyIds: [],
+                pending: new Set(),
+                passed: [],
+                failed: [],
+                blocked: [],
+                recovery: false,
+            }
+        }
+        this.wave.pending.add(storyId)
+        if (!this.wave.storyIds.includes(storyId)) this.wave.storyIds.push(storyId)
     }
 
     private releaseIntegrationHolds(): void {
@@ -3402,6 +3459,7 @@ export class CollectiveBoard extends SerializedObserver {
                 continue
             }
             this.integrationHold.delete(storyId)
+            this.rejoinWave(storyId)
             this.requestIntegration(held.result, held.quality)
         }
     }
