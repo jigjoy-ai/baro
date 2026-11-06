@@ -210,6 +210,80 @@ describe("CollectiveBoard progressive planning", () => {
         assert.match(rejected?.payload.reason ?? "", /unknown invariant.*G-A99/i)
     })
 
+    it("gives the sole story of a focused one-story plan every goal invariant", () => {
+        const admittedInvariants = (mode: PrdFile["executionMode"]) => {
+            const runId = "run-progressive-sole-owner"
+            const planningId = "planning-sole-owner"
+            const prd: PrdFile = {
+                ...bootstrapPrd(),
+                executionMode: mode,
+                goalEnvelope: {
+                    objective: "Add one route.",
+                    acceptanceCriteria: ["Found returns 200", "Unknown returns 404"],
+                    constraints: ["Keep the existing routes"],
+                    nonGoals: [],
+                    assumptions: [],
+                },
+                runtimeGraph: {
+                    runId,
+                    version: 1,
+                    dynamicStories: 0,
+                    policyStories: 0,
+                    appliedDecisions: [],
+                    planning: {
+                        schemaVersion: 1,
+                        runId,
+                        planningId,
+                        status: "open",
+                        nextOrdinal: 1,
+                        admittedStoryIds: [],
+                        fragments: [],
+                    },
+                },
+            }
+            let admitted: readonly string[] | undefined
+            const coordinator = new ProgressivePlanningCoordinator({
+                runId,
+                planningId,
+                host: {
+                    snapshot: () => ({ phase: "running", prd, graphVersion: 1, wave: null }),
+                    commitPrd: () => undefined,
+                    admitGraph: ({ proposal }) => {
+                        admitted = proposal.mutation.addedStories?.[0]?.goalInvariantIds
+                        return {
+                            event: RuntimeReplanRejected.create({
+                                runId,
+                                proposalId: proposal.proposalId,
+                                sourceStoryId: proposal.sourceStoryId,
+                                leaseId: proposal.leaseId,
+                                generation: proposal.generation,
+                                baseGraphVersion: proposal.baseGraphVersion,
+                                currentGraphVersion: 1,
+                                code: "invalid_proposal",
+                                reason: "test stopped at graph admission",
+                            }),
+                        }
+                    },
+                    emit: () => undefined,
+                    afterAdmission: () => undefined,
+                    afterClose: () => undefined,
+                    terminate: () => undefined,
+                },
+            })
+            coordinator.handleEvent(fragment(runId, planningId, "F1", 1, [story("S1")]))
+            return admitted
+        }
+
+        assert.deepEqual(
+            admittedInvariants({ mode: "focused", reason: "one route", maxStories: 1, source: "llm" }),
+            ["G-A1", "G-A2", "G-C1"],
+        )
+        assert.deepEqual(
+            admittedInvariants({ mode: "parallel", reason: "split", maxStories: 8, source: "llm" }) ?? [],
+            [],
+        )
+    })
+
     it("closes an incomplete final union so GoalGuardian can remediate it", () => {
         const runId = "run-progressive-goal-complete"
         const planningId = "planning-goal-complete"
