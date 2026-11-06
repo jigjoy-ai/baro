@@ -271,7 +271,6 @@ describe("orchestrate — integration worktree gate", () => {
             cwd: repo,
             runId,
             continueRun,
-            coordinationMode: "legacy",
             publishRemote: false,
             withGit: true,
             withWorktrees: true,

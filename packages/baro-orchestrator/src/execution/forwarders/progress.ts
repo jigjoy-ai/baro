@@ -3,10 +3,8 @@ import { BusMember } from "../../runtime/coordination.js"
 
 import {
     ConductorState,
-    Critique,
     LevelCompleted,
     Replan,
-    ReplanApplied,
     RunStarted,
     RuntimeReplanApplied,
     RuntimeReplanRejected,
@@ -16,7 +14,6 @@ import {
     WorkLeaseReleased,
     type ConductorStateData,
     type CritiqueData,
-    type ReplanData,
     type RuntimeReplanAppliedData,
     type RuntimeReplanRejectedData,
 } from "../../semantic-events.js"
@@ -24,14 +21,12 @@ import { emit } from "../../tui-protocol.js"
 import { ActiveLeaseRegistry } from "../../runtime/active-lease-registry.js"
 
 /**
- * Mirrors Conductor lifecycle as a `progress` BaroEvent — the Rust TUI
+ * Mirrors Board lifecycle as a `progress` BaroEvent — the Rust TUI
  * doesn't understand `conductor_state` directly.
  */
 export class ProgressForwarder extends BusMember {
-    private legacyReplanAuthority: BusMember | null = null
     private runtimeReplanAuthority: BusMember | null = null
     private repositoryAuthority: BusMember | null = null
-    private critiqueAuthority: BusMember | null = null
     private collectiveAuthorities: Readonly<CollectiveProgressAuthorities> | null = null
     private readonly leases = new ActiveLeaseRegistry()
     private readonly seenRuntimeDecisions = new Set<string>()
@@ -40,7 +35,6 @@ export class ProgressForwarder extends BusMember {
     private totalStories: number | null = null
     private knownStories: Set<string> | null = null
     private readonly completedStories = new Set<string>()
-    private requireMergedCompletion = false
 
     constructor(private readonly collectiveFailClosed = false) {
         super()
@@ -71,18 +65,6 @@ export class ProgressForwarder extends BusMember {
         this.collectiveAuthorities = Object.freeze({ ...authorities })
     }
 
-    setLegacyReplanAuthority(authority: BusMember): void {
-        if (
-            this.legacyReplanAuthority &&
-            this.legacyReplanAuthority !== authority
-        ) {
-            throw new Error(
-                "Progress forwarder legacy replan authority is already bound",
-            )
-        }
-        this.legacyReplanAuthority = authority
-    }
-
     setRuntimeReplanAuthority(authority: BusMember): void {
         if (
             this.runtimeReplanAuthority &&
@@ -102,15 +84,6 @@ export class ProgressForwarder extends BusMember {
             )
         }
         this.repositoryAuthority = authority
-    }
-
-    setCritiqueAuthority(authority: BusMember): void {
-        if (this.critiqueAuthority && this.critiqueAuthority !== authority) {
-            throw new Error(
-                "Progress forwarder critique authority is already bound",
-            )
-        }
-        this.critiqueAuthority = authority
     }
 
     override async onExternalEvent(
@@ -137,10 +110,7 @@ export class ProgressForwarder extends BusMember {
             return
         }
         if (RunStarted.is(event)) {
-            const expectedAuthority = event.payload.coordinationMode === "collective"
-                ? this.runtimeReplanAuthority
-                : this.legacyReplanAuthority
-            if (!expectedAuthority || source !== expectedAuthority) return
+            if (!this.runtimeReplanAuthority || source !== this.runtimeReplanAuthority) return
             this.totalStories = event.payload.storyCount
             this.knownStories = event.payload.storyIds
                 ? new Set(event.payload.storyIds)
@@ -149,8 +119,6 @@ export class ProgressForwarder extends BusMember {
             for (const storyId of event.payload.completedStoryIds ?? []) {
                 this.completedStories.add(storyId)
             }
-            this.requireMergedCompletion =
-                event.payload.coordinationMode === "collective"
             this.emitStoryProgress()
             return
         }
@@ -171,30 +139,18 @@ export class ProgressForwarder extends BusMember {
             return
         }
         if (LevelCompleted.is(event)) {
-            const expectedAuthority = this.requireMergedCompletion
-                ? this.runtimeReplanAuthority
-                : this.legacyReplanAuthority
-            if (!expectedAuthority || source !== expectedAuthority) return
+            if (!this.runtimeReplanAuthority || source !== this.runtimeReplanAuthority) return
             for (const storyId of event.payload.passed) this.completeStory(storyId)
             return
         }
         if (ConductorState.is(event)) {
-            if (
-                source !== this.legacyReplanAuthority &&
-                source !== this.runtimeReplanAuthority
-            ) return
+            if (source !== this.runtimeReplanAuthority) return
             this.handleConductorState(event.payload)
             return
         }
         if (Replan.is(event)) {
-            // Raw legacy and collective Replan events are proposals. Legacy
-            // Conductor emits ReplanApplied after persistence; collective
-            // Board emits RuntimeReplanApplied after its transaction.
-            return
-        }
-        if (ReplanApplied.is(event)) {
-            if (source !== this.legacyReplanAuthority) return
-            this.handleReplan(event.payload)
+            // Raw Replan is a proposal; the Board emits RuntimeReplanApplied
+            // after its transaction.
             return
         }
         if (RuntimeReplanApplied.is(event)) {
@@ -218,19 +174,6 @@ export class ProgressForwarder extends BusMember {
             ) return
             this.seenRuntimeDecisions.add(event.payload.proposalId)
             this.handleRuntimeReplanRejected(event.payload)
-            return
-        }
-        if (Critique.is(event)) {
-            if (this.isCollective()) {
-                // Collective presentation uses AcceptanceGate's correlated
-                // StoryQualityCompleted projection below. Raw Critique cannot
-                // prove which run/lease/generation it describes.
-                return
-            } else if (
-                this.critiqueAuthority &&
-                source !== this.critiqueAuthority
-            ) return
-            this.handleCritique(event.payload)
             return
         }
         if (StoryQualityCompleted.is(event)) {
@@ -292,19 +235,6 @@ export class ProgressForwarder extends BusMember {
                 text: item.detail,
             })
         }
-    }
-
-    private handleReplan(item: ReplanData): void {
-        this.updateKnownStories(item.addedStories, item.removedStoryIds)
-        this.adjustStoryTotal(item.addedStories.length, item.removedStoryIds.length)
-        const added = item.addedStories.length
-        const removed = item.removedStoryIds.length
-        emit({
-            type: "activity",
-            id: "plan",
-            kind: "warn",
-            text: `Replanned (${item.source}): +${added}/-${removed} — ${item.reason}`,
-        })
     }
 
     private handleRuntimeReplanApplied(item: RuntimeReplanAppliedData): void {

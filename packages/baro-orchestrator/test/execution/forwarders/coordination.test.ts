@@ -236,7 +236,7 @@ function rawWorkClaim(): SemanticEvent<string, unknown> {
 }
 
 describe("CoordinationForwarder", () => {
-    it("emits story_log BaroEvents for coordination notices and critiques", async () => {
+    it("emits story_log BaroEvents for coordination notices", async () => {
         const forwarder = new CoordinationForwarder()
         const lines = await captureStdout(async () => {
             await forwarder.onExternalEvent(
@@ -249,17 +249,6 @@ describe("CoordinationForwarder", () => {
                     payload: {},
                 }),
             )
-            await forwarder.onExternalEvent(
-                source("critic"),
-                Critique.create({
-                    agentId: "S9",
-                    verdict: "fail",
-                    reasoning: "missing test coverage",
-                    violatedCriteria: ["tests"],
-                    turn: 1,
-                    modelUsed: "test-model",
-                }),
-            )
         })
 
         const events = lines.map((line) => JSON.parse(line) as BaroEvent)
@@ -268,19 +257,6 @@ describe("CoordinationForwarder", () => {
                 type: "story_log",
                 id: "S9",
                 line: "[sentry/wait] blocked by S8",
-            },
-            {
-                type: "critique",
-                id: "S9",
-                verdict: "fail",
-                reasoning: "missing test coverage",
-                violated: ["tests"],
-            },
-            // story_log mirror stays for one release alongside `critique`.
-            {
-                type: "story_log",
-                id: "S9",
-                line: "[critic/fail] missing test coverage",
             },
         ])
     })
@@ -312,32 +288,6 @@ describe("CoordinationForwarder", () => {
             events.slice(1).map((e) => e.type),
             ["story_log", "activity"],
         )
-    })
-
-    it("source-binds intervention UI evidence when an authority is configured", async () => {
-        const forwarder = new CoordinationForwarder()
-        const supervisor = source("supervisor")
-        forwarder.setInterventionAuthority(supervisor)
-        forwarder.setInterventionAuthority(supervisor)
-        assert.throws(
-            () => forwarder.setInterventionAuthority(source("supervisor")),
-            /already bound/,
-        )
-        const intervention = StoryIntervention.create({
-            storyId: "S7",
-            source: "supervisor",
-            action: "abort",
-            reason: "exact authority only",
-        })
-
-        const lines = await captureStdout(async () => {
-            await forwarder.onExternalEvent(source("supervisor"), intervention)
-            await forwarder.onExternalEvent(supervisor, intervention)
-        })
-
-        assert.equal(lines.length, 3)
-        const events = lines.map((line) => JSON.parse(line) as BaroEvent)
-        assert.equal(events[0]?.type, "intervention")
     })
 
     it("emits exact story_log shape for merge coordination", async () => {

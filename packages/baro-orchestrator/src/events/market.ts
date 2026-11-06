@@ -4,11 +4,9 @@ import { defineSemanticEvent } from "./define.js"
 import type { WorkBidEstimate } from "../market/work-market.js"
 import type { StorySpawnRequestData } from "./execution.js"
 
-export type CoordinationMode = "legacy" | "collective"
-
 export interface CoordinationModeSelectedData {
     runId: string
-    mode: CoordinationMode
+    mode: "collective"
 }
 
 export const CoordinationModeSelected =

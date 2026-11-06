@@ -39,17 +39,9 @@ export interface ReplanData {
 export const Replan = defineSemanticEvent<ReplanData>("replan")
 
 /**
- * Legacy Conductor acknowledgement emitted only after a buffered Replan has
- * passed policy checks and been persisted. Raw Replan remains a proposal;
- * observers that project operator-visible state must consume this event.
- */
-export const ReplanApplied =
-    defineSemanticEvent<ReplanData>("replan_applied")
-
-/**
  * A leased story's structured proposal to mutate the not-yet-started portion
  * of the collective DAG. This is deliberately separate from `Replan`: that
- * older event is the Surgeon/Conductor recovery contract, while runtime
+ * older event is the Surgeon recovery contract, while runtime
  * proposals require optimistic graph-version and lease correlation.
  */
 export interface RuntimeReplanMutation {

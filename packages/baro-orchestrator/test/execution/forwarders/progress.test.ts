@@ -4,9 +4,7 @@ import { describe, it } from "node:test"
 import {
     ConductorState,
     Critique,
-    LevelCompleted,
     Replan,
-    ReplanApplied,
     RunStarted,
     RuntimeReplanApplied,
     RuntimeReplanRejected,
@@ -32,7 +30,6 @@ describe("ProgressForwarder", () => {
                 RunStarted.create({
                     project: "forged",
                     storyCount: 999,
-                    coordinationMode: "collective",
                 }),
             )
             await forwarder.onExternalEvent(
@@ -41,7 +38,6 @@ describe("ProgressForwarder", () => {
                     project: "p",
                     storyCount: 14,
                     storyIds: Array.from({ length: 14 }, (_, index) => `S${index + 1}`),
-                    coordinationMode: "collective",
                 }),
             )
             await forwarder.onExternalEvent(
@@ -87,7 +83,6 @@ describe("ProgressForwarder", () => {
                 RunStarted.create({
                     project: "p",
                     storyCount: 2,
-                    coordinationMode: "collective",
                 }),
             )
             await forwarder.onExternalEvent(
@@ -134,100 +129,13 @@ describe("ProgressForwarder", () => {
         ])
     })
 
-    it("starts resumed progress from persisted passes and only adjusts legacy totals after apply", async () => {
+    it("emits progress BaroEvents for running Board levels", async () => {
         const forwarder = new ProgressForwarder()
-        const conductor = source("conductor")
-        forwarder.setLegacyReplanAuthority(conductor)
+        const board = source("board")
+        forwarder.setRuntimeReplanAuthority(board)
         const lines = await captureStdout(async () => {
             await forwarder.onExternalEvent(
-                conductor,
-                RunStarted.create({
-                    project: "p",
-                    storyCount: 3,
-                    storyIds: ["S1", "S2", "S3"],
-                    completedStoryIds: ["S1"],
-                    coordinationMode: "legacy",
-                }),
-            )
-            const proposal = {
-                source: "surgeon",
-                reason: "replace future work",
-                addedStories: [
-                    {
-                        id: "S4",
-                        priority: 1,
-                        title: "replacement",
-                        description: "replacement",
-                        dependsOn: ["S1"],
-                        acceptance: ["The replacement works."],
-                        tests: ["npm test"],
-                    },
-                    {
-                        id: "S1",
-                        priority: 1,
-                        title: "duplicate persisted pass",
-                        description: "ignored by persistence",
-                        dependsOn: [],
-                        acceptance: ["The duplicate work works."],
-                        tests: ["npm test"],
-                    },
-                ],
-                removedStoryIds: ["S3", "S1"],
-                modifiedDeps: { "S-missing": [] },
-            }
-            const effective = {
-                ...proposal,
-                addedStories: [proposal.addedStories[0]!],
-                removedStoryIds: ["S3"],
-                modifiedDeps: {},
-            }
-            await forwarder.onExternalEvent(
-                source("surgeon"),
-                Replan.create(proposal),
-            )
-            await forwarder.onExternalEvent(
-                source("forged-conductor"),
-                ReplanApplied.create(proposal),
-            )
-            await forwarder.onExternalEvent(
-                conductor,
-                ReplanApplied.create(effective),
-            )
-            await forwarder.onExternalEvent(
-                source("forged-conductor"),
-                LevelCompleted.create({
-                    ordinal: 1,
-                    passed: ["S2"],
-                    failed: [],
-                }),
-            )
-            await forwarder.onExternalEvent(
-                conductor,
-                LevelCompleted.create({
-                    ordinal: 1,
-                    passed: ["S2"],
-                    failed: [],
-                }),
-            )
-        })
-
-        const progress = lines
-            .map((line) => JSON.parse(line) as BaroEvent)
-            .filter((event) => event.type === "progress")
-        assert.deepEqual(progress, [
-            { type: "progress", completed: 1, total: 3, percentage: 33 },
-            { type: "progress", completed: 1, total: 3, percentage: 33 },
-            { type: "progress", completed: 2, total: 3, percentage: 67 },
-        ])
-    })
-
-    it("emits progress BaroEvents for running conductor levels", async () => {
-        const forwarder = new ProgressForwarder()
-        const conductor = source("conductor")
-        forwarder.setLegacyReplanAuthority(conductor)
-        const lines = await captureStdout(async () => {
-            await forwarder.onExternalEvent(
-                conductor,
+                board,
                 ConductorState.create({
                     phase: "running_level",
                     currentLevel: 3,
@@ -244,11 +152,11 @@ describe("ProgressForwarder", () => {
 
     it("emits zero-percent progress for the first running level", async () => {
         const forwarder = new ProgressForwarder()
-        const conductor = source("conductor")
-        forwarder.setLegacyReplanAuthority(conductor)
+        const board = source("board")
+        forwarder.setRuntimeReplanAuthority(board)
         const lines = await captureStdout(async () => {
             await forwarder.onExternalEvent(
-                conductor,
+                board,
                 ConductorState.create({
                     phase: "running_level",
                     currentLevel: 1,
@@ -369,7 +277,6 @@ describe("ProgressForwarder", () => {
                 RunStarted.create({
                     project: "pre-seal",
                     storyCount: 99,
-                    coordinationMode: "collective",
                 }),
             )
             forwarder.sealCollectiveAuthorities({
@@ -385,7 +292,6 @@ describe("ProgressForwarder", () => {
                     project: "p",
                     storyCount: 1,
                     storyIds: ["S1"],
-                    coordinationMode: "collective",
                 }),
             )
             const critique = Critique.create({

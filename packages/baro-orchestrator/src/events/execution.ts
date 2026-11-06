@@ -1,7 +1,6 @@
 /** Story execution lifecycle: runs, levels, spawns, results, discovery, recovery. Wire `type` strings are frozen (see ../semantic-events.ts). */
 
 import { defineSemanticEvent } from "./define.js"
-import type { CoordinationMode } from "./market.js"
 import type { RunVerificationEvidence, RunVerificationStatus } from "./verification.js"
 
 // Orchestration control events
@@ -148,20 +147,11 @@ export interface RunStartedData {
     storyIds?: readonly string[]
     /** Stories already passed before this resume/continue run began. */
     completedStoryIds?: readonly string[]
-    /** Determines whether progress requires authoritative repository merge. */
-    coordinationMode?: CoordinationMode
     /** Execution mode from the intake contract ("focused" | "sequential" | "parallel"), when one was decided. */
     mode?: string
 }
 
 export const RunStarted = defineSemanticEvent<RunStartedData>("run_started")
-
-export interface LevelComputeRequestData {
-    reason: string
-}
-
-export const LevelComputeRequest =
-    defineSemanticEvent<LevelComputeRequestData>("level_compute_request")
 
 export interface LevelStartedData {
     ordinal: number

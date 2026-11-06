@@ -14,7 +14,7 @@ import type { BaroCommand, BaroEvent } from "../src/tui-protocol.js"
 import { joinWithCapture } from "./execution/helpers.js"
 
 function wired() {
-    const operator = new Operator({}, { runId: "run-stdin" })
+    const operator = new Operator({ runId: "run-stdin" })
     const env = joinWithCapture(operator)
     const emitted: BaroEvent[] = []
     const ctx = {

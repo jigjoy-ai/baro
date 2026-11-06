@@ -120,7 +120,7 @@ import {
     StoryCheckpointWithdrawn,
     type StoryCheckpointRequestedData,
 } from "../semantic-events.js"
-import type { ConductorRunSummary } from "./conductor.js"
+import type { RunSummary } from "./run-summary.js"
 import {
     toRuntimeReplanProposal,
     validateConversationDelegationProposal,
@@ -420,8 +420,8 @@ export class CollectiveBoard extends SerializedObserver {
     private readonly clock: AwakeClock
     private softDeadline: AwakeDeadline | null = null
     private operationalRetryDueAt: number | null = null
-    readonly done: Promise<ConductorRunSummary>
-    private resolveDone!: (summary: ConductorRunSummary) => void
+    readonly done: Promise<RunSummary>
+    private resolveDone!: (summary: RunSummary) => void
 
     constructor(private readonly opts: CollectiveBoardOptions) {
         super()
@@ -1160,7 +1160,6 @@ export class CollectiveBoard extends SerializedObserver {
                 completedStoryIds: this.prd.userStories
                     .filter((story) => story.passes)
                     .map((story) => story.id),
-                coordinationMode: "collective",
                 ...(this.prd.executionMode ? { mode: this.prd.executionMode.mode } : {}),
             }),
         )
@@ -3718,7 +3717,7 @@ export class CollectiveBoard extends SerializedObserver {
                       this.lastFailureCodeByStory.get(id),
                   ),
               )
-        const summary: ConductorRunSummary = {
+        const summary: RunSummary = {
             success,
             abortReason,
             ...(abortCode ? { abortCode } : {}),

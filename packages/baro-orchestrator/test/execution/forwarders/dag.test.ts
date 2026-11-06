@@ -6,7 +6,6 @@ import {
     LevelStarted,
     RecoveryStarted,
     Replan,
-    ReplanApplied,
     RuntimeReplanApplied,
 } from "../../../src/semantic-events.js"
 import type { BaroEvent } from "../../../src/tui-protocol.js"
@@ -18,76 +17,13 @@ function parseEvents(lines: string[]): BaroEvent[] {
 }
 
 describe("DagForwarder", () => {
-    it("emits a structured replan only after the legacy Conductor applies it", async () => {
-        const forwarder = new DagForwarder()
-        const conductor = source("conductor")
-        forwarder.setLegacyReplanAuthority(conductor)
-        const proposal = {
-            source: "surgeon",
-            reason: "S2 too large",
-            addedStories: [
-                {
-                    id: "S2a",
-                    priority: 2,
-                    title: "First half of S2",
-                    description: "Split from S2.",
-                    dependsOn: ["S1"],
-                    acceptance: ["The first half of S2 works."],
-                    tests: ["npm test"],
-                },
-                {
-                    id: "S-existing",
-                    priority: 2,
-                    title: "Duplicate",
-                    description: "Ignored by persistence.",
-                    dependsOn: [],
-                    acceptance: ["The duplicate work works."],
-                    tests: ["npm test"],
-                },
-            ],
-            removedStoryIds: ["S2", "S-passed"],
-            modifiedDeps: { S3: ["S2a"], "S-missing": [] },
-        }
-        const effective = {
-            ...proposal,
-            addedStories: [proposal.addedStories[0]!],
-            removedStoryIds: ["S2"],
-            modifiedDeps: { S3: ["S2a"] },
-        }
-        const events = parseEvents(await captureStdout(async () => {
-            await forwarder.onExternalEvent(
-                source("surgeon"),
-                Replan.create(proposal),
-            )
-            await forwarder.onExternalEvent(
-                source("forged-conductor"),
-                ReplanApplied.create(proposal),
-            )
-            await forwarder.onExternalEvent(
-                conductor,
-                ReplanApplied.create(effective),
-            )
-        }))
-
-        assert.deepEqual(events, [
-            {
-                type: "replan",
-                source: "surgeon",
-                reason: "S2 too large",
-                added: [{ id: "S2a", title: "First half of S2", depends_on: ["S1"] }],
-                removed: ["S2"],
-                rewired: [{ id: "S3", depends_on: ["S2a"] }],
-            },
-        ])
-    })
-
     it("emits level_started, level_completed, and recovery_started", async () => {
         const forwarder = new DagForwarder()
-        const conductor = source("conductor")
-        forwarder.setLegacyReplanAuthority(conductor)
+        const board = source("board")
+        forwarder.setRuntimeReplanAuthority(board)
         const events = parseEvents(await captureStdout(async () => {
             await forwarder.onExternalEvent(
-                source("forged-conductor"),
+                source("forged-board"),
                 LevelStarted.create({
                     ordinal: 99,
                     totalLevelsHint: 99,
@@ -95,7 +31,7 @@ describe("DagForwarder", () => {
                 }),
             )
             await forwarder.onExternalEvent(
-                conductor,
+                board,
                 LevelStarted.create({
                     ordinal: 1,
                     totalLevelsHint: 3,
@@ -103,7 +39,7 @@ describe("DagForwarder", () => {
                 }),
             )
             await forwarder.onExternalEvent(
-                conductor,
+                board,
                 LevelCompleted.create({
                     ordinal: 1,
                     passed: ["S1"],
@@ -112,7 +48,7 @@ describe("DagForwarder", () => {
                 }),
             )
             await forwarder.onExternalEvent(
-                conductor,
+                board,
                 RecoveryStarted.create({ attempt: 1, storyIds: ["S2"] }),
             )
         }))

@@ -30,15 +30,6 @@ export type OperatorCommand =
     | { kind: "abort_all" }
     | { kind: "shutdown" }
 
-export interface OperatorHooks {
-    /** Called when an `abort` command arrives. */
-    onAbort?: (storyId: string) => void
-    /** Called when `abort_all` arrives. */
-    onAbortAll?: () => void
-    /** Called when `shutdown` arrives. */
-    onShutdown?: () => void
-}
-
 export interface OperatorOptions {
     /** Enables correlated conversation requests for this run. */
     runId?: string
@@ -48,10 +39,7 @@ export class Operator extends BusMember {
     private envRef: CoordinationBus | null = null
     private conversationSequence = 0
 
-    constructor(
-        private readonly hooks: OperatorHooks = {},
-        private readonly opts: OperatorOptions = {},
-    ) {
+    constructor(private readonly opts: OperatorOptions = {}) {
         super()
     }
 
@@ -63,7 +51,7 @@ export class Operator extends BusMember {
     // never reacts to bus events. Default BusMember no-op handlers
     // cover everything.
 
-    /** Translate an external command into bus action / hook callback. */
+    /** Translate an external command into a bus action. */
     dispatch(cmd: OperatorCommand): void {
         switch (cmd.kind) {
             case "redirect": {
@@ -93,18 +81,11 @@ export class Operator extends BusMember {
                 )
                 return
             }
-            case "abort": {
-                this.hooks.onAbort?.(cmd.storyId)
+            // Control commands have no source-bound semantic lane yet.
+            case "abort":
+            case "abort_all":
+            case "shutdown":
                 return
-            }
-            case "abort_all": {
-                this.hooks.onAbortAll?.()
-                return
-            }
-            case "shutdown": {
-                this.hooks.onShutdown?.()
-                return
-            }
         }
     }
 

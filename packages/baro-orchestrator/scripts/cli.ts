@@ -30,7 +30,6 @@ import {
     flushTuiProtocolWithTimeout,
     type BaroCommand,
 } from "../src/tui-protocol.js"
-import type { CoordinationMode } from "../src/semantic-events.js"
 import { loadPrd } from "../src/prd.js"
 import { loadConversationContextFile } from "../src/conversation/session/conversation-context.js"
 import { resumeRunRequested } from "../src/runtime/resume-mode.js"
@@ -54,7 +53,6 @@ interface CliArgs {
     cwd: string
     parallel: number
     timeout: number
-    coordinationMode?: CoordinationMode
     progressivePlanningId?: string
     collectiveWorkersFile?: string
     collectiveBidWindowMs?: number
@@ -77,7 +75,6 @@ interface CliArgs {
     withSurgeon: boolean
     surgeonUseLlm: boolean
     withSupervisor: boolean
-    withDialogue: boolean
     dialogueLlm?: "claude" | "openai" | "codex" | "opencode" | "pi" | "devin"
     dialogueModel?: string
     conversationContextFile?: string
@@ -120,7 +117,6 @@ function parseArgs(argv: string[]): CliArgs {
         withSurgeon: true,
         surgeonUseLlm: true,
         withSupervisor: true,
-        withDialogue: false,
         endpointSpecs: [],
         llm: "claude",
         help: false,
@@ -144,17 +140,6 @@ function parseArgs(argv: string[]): CliArgs {
             case "--timeout":
                 args.timeout = parseInt(required(argv, ++i, "--timeout"), 10)
                 break
-            case "--coordination": {
-                const value = required(argv, ++i, "--coordination")
-                if (value !== "legacy" && value !== "collective") {
-                    process.stderr.write(
-                        `[cli] --coordination must be 'legacy' or 'collective', got '${value}'\n`,
-                    )
-                    process.exit(2)
-                }
-                args.coordinationMode = value
-                break
-            }
             case "--progressive-planning":
                 args.progressivePlanningId = required(
                     argv,
@@ -247,7 +232,6 @@ function parseArgs(argv: string[]): CliArgs {
                 args.withSupervisor = true
                 break
             case "--with-dialogue":
-                args.withDialogue = true
                 break
             case "--dialogue-llm": {
                 const value = required(argv, ++i, "--dialogue-llm")
@@ -399,7 +383,6 @@ function printHelp(): void {
             "  --cwd <path>          Working directory (default: .)",
             "  --parallel <N>        Max parallel stories per level (0 = unlimited)",
             "  --timeout <secs>      Per-story timeout (default: auto — effort-scaled; any value overrides)",
-            "  --coordination <mode> Coordination engine: collective|legacy (default: collective)",
             "  --progressive-planning <id>  Open a private Planner stream and dispatch dependency-closed fragments early",
             "  --local-only          Disable Baro-owned pushes/PRs (use a remote-free clone for hard isolation)",
             "  --base <ref>          Start the goal branch from <ref> instead of the checkout's HEAD",
@@ -414,7 +397,7 @@ function printHelp(): void {
             "  --audit-log <path>    Persist all bus events to JSONL",
             "  --with-critic         Enable Critic (live acceptance evaluator)",
             "  --critic-model <name> Model for Critic (default: haiku)",
-            "  --with-dialogue       Enable conversation participant explicitly (automatic in collective mode)",
+            "  --with-dialogue       Accepted for compatibility; the conversation participant always runs",
             "  --dialogue-llm <name> Text-only dialogue backend: claude|openai|codex|opencode|pi (default: follows --llm)",
             "  --dialogue-model <id> Model for the optional DialogueAgent",
             "  --conversation-context-file <path>  Ephemeral front-door context for DialogueAgent (or BARO_CONVERSATION_CONTEXT_FILE)",
@@ -469,34 +452,10 @@ async function main(): Promise<void> {
         )
     }
 
-    const envCoordination = process.env.BARO_COORDINATION
-    if (
-        !args.coordinationMode &&
-        envCoordination &&
-        envCoordination !== "legacy" &&
-        envCoordination !== "collective"
-    ) {
-        process.stderr.write(
-            `[cli] BARO_COORDINATION must be 'legacy' or 'collective', got '${envCoordination}'\n`,
-        )
-        process.exit(2)
-    }
-    const coordinationMode =
-        args.coordinationMode ??
-        (envCoordination as CoordinationMode | undefined) ??
-        "collective"
     const progressivePlanningId =
         args.progressivePlanningId ??
         process.env.BARO_PROGRESSIVE_PLANNING_ID
-    if (progressivePlanningId && coordinationMode !== "collective") {
-        process.stderr.write(
-            "[cli] --progressive-planning requires --coordination collective\n",
-        )
-        process.exit(2)
-    }
     const localOnly = args.localOnly || process.env.BARO_LOCAL_ONLY === "1"
-    const withDialogue = coordinationMode === "collective" ||
-        args.withDialogue || process.env.BARO_WITH_DIALOGUE === "1"
     const dialogueLlm = resolveDialogueBackend(
         args.dialogueLlm ?? parseDialogueBackend(
             process.env.BARO_DIALOGUE_LLM,
@@ -505,10 +464,6 @@ async function main(): Promise<void> {
         args.llm,
     )
     const dialogueModel = args.dialogueModel ?? process.env.BARO_DIALOGUE_MODEL
-    if (withDialogue && coordinationMode !== "collective") {
-        process.stderr.write("[cli] --with-dialogue requires --coordination collective\n")
-        process.exit(2)
-    }
     const collectiveBidWindowMs = args.collectiveBidWindowMs ?? optionalEnvNumber(
         "BARO_COLLECTIVE_BID_WINDOW_MS",
         nonNegativeNumber,
@@ -612,12 +567,6 @@ async function main(): Promise<void> {
     // The path is an orchestrator intake seam, not ambient worker context.
     // Remove it before any harness subprocess inherits this environment.
     delete process.env.BARO_CONVERSATION_CONTEXT_FILE
-    if (conversationContext && !withDialogue) {
-        process.stderr.write(
-            "[cli] conversation context requires collective DialogueAgent\n",
-        )
-        process.exit(2)
-    }
     const workersFile =
         args.collectiveWorkersFile ?? process.env.BARO_COLLECTIVE_WORKERS_FILE
     let collectiveWorkers: CollectiveWorkerCandidateConfig[] | undefined
@@ -629,11 +578,7 @@ async function main(): Promise<void> {
                 throw new Error("top-level JSON value must be an array")
             }
             collectiveWorkers = parsed as CollectiveWorkerCandidateConfig[]
-            validateCollectiveWorkers(
-                collectiveWorkers,
-                coordinationMode,
-                args.storyModel,
-            )
+            validateCollectiveWorkers(collectiveWorkers, args.storyModel)
             for (const [index, worker] of collectiveWorkers.entries()) {
                 if (worker?.estimate?.estimateSource !== "configured") {
                     throw new Error(
@@ -654,13 +599,6 @@ async function main(): Promise<void> {
         collectiveMaxLatencyMs !== undefined
     if (workersFile && collectiveWorkers?.length === 0) {
         process.stderr.write("[cli] collective workers file must contain at least one candidate\n")
-        process.exit(2)
-    }
-    if (
-        (workersFile || collectiveBidWindowMs !== undefined || hasMarketPolicy) &&
-        coordinationMode !== "collective"
-    ) {
-        process.stderr.write("[cli] collective market options require --coordination collective\n")
         process.exit(2)
     }
     if (
@@ -728,7 +666,7 @@ async function main(): Promise<void> {
     ) {
         billingRoutes.push({ backend: "openai", model: args.surgeonModel })
     }
-    if (withDialogue && dialogueLlm === "openai") {
+    if (dialogueLlm === "openai") {
         billingRoutes.push({ backend: "openai", model: dialogueModel })
     }
 
@@ -788,7 +726,6 @@ async function main(): Promise<void> {
             // every lane that has one. `0` remains for bisecting against the
             // MCP-relay shape; the host sets it when it runs the planner itself.
             process.env.BARO_PLANNER_BUS !== "0" &&
-            coordinationMode === "collective" &&
             !ONE_SHOT_ONLY_BACKENDS.has(plannerBackend)
                 ? {
                       backend: plannerBackend,
@@ -813,7 +750,6 @@ async function main(): Promise<void> {
         },
         parallel: args.parallel,
         timeoutSecs: args.timeout,
-        coordinationMode,
         publishRemote: !localOnly,
         collectiveWorkers,
         collectiveBidWindowMs,
@@ -834,7 +770,7 @@ async function main(): Promise<void> {
         auditLogPath: args.auditLog,
         withCritic: args.withCritic,
         criticModel: args.criticModel,
-        withDialogue,
+        withDialogue: true,
         dialogueLlm,
         dialogueModel,
         conversationContext,
@@ -871,7 +807,7 @@ async function main(): Promise<void> {
     }
 
     process.stderr.write(
-        `[cli] starting orchestrator: prd=${prdPath} cwd=${cwd} parallel=${args.parallel} timeout=${args.timeout}s llm=${args.llm} coordination=${coordinationMode}${localOnly ? " local-only" : ""}\n`,
+        `[cli] starting orchestrator: prd=${prdPath} cwd=${cwd} parallel=${args.parallel} timeout=${args.timeout}s llm=${args.llm}${localOnly ? " local-only" : ""}\n`,
     )
 
     const startedAt = Date.now()
