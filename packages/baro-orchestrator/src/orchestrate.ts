@@ -1013,7 +1013,7 @@ export async function orchestrate(
                 snapshot,
                 resolveRoute,
                 escalationRoute,
-                model: config.surgeonModel ?? "gpt-5.5",
+                model: config.surgeonModel ?? openAICompatibleOverride(config) ?? "gpt-5.5",
                 runId,
                 emitRecoveryDecisions: true,
                 outcomeAuthority,
@@ -1164,7 +1164,7 @@ export async function orchestrate(
         if (criticLlm === "openai") {
             critic = new CriticOpenAI({
                 targets: criticTargets,
-                model: config.criticModel ?? "gpt-5.4-mini",
+                model: config.criticModel ?? openAICompatibleOverride(config) ?? "gpt-5.4-mini",
                 runId,
                 evidence: criticEvidence,
                 outcomeAuthority,
@@ -1426,7 +1426,9 @@ export async function orchestrate(
             responder = createDialogueResponder({
                 backend: criticLlm,
                 cwd: goalReviewRuntimeCwd,
-                model: config.criticModel ?? goalReviewDefaultModel(criticLlm),
+                model: config.criticModel ??
+                    (criticLlm === "openai" ? openAICompatibleOverride(config) : undefined) ??
+                    goalReviewDefaultModel(criticLlm),
                 // The adapter owns TERM/KILL settlement. Its watchdog must
                 // win before the outer reviewer watchdog so the latter is
                 // only a hard safety backstop, never the normal timeout.
@@ -1442,7 +1444,11 @@ export async function orchestrate(
             runId,
             cwd: integrationRoot,
             responder,
-            modelUsed: goalReviewModelName(criticLlm, config.criticModel),
+            modelUsed: goalReviewModelName(
+                criticLlm,
+                config.criticModel ??
+                    (criticLlm === "openai" ? openAICompatibleOverride(config) : undefined),
+            ),
             timeoutMs: goalReviewTimeoutMs,
             maxAttempts: goalReviewMaxAttempts,
             overallTimeoutMs: goalReviewOverallTimeoutMs,
@@ -2065,6 +2071,18 @@ export function resolveDialogueBackend(
 ): DialogueBackend {
     if (configured !== undefined) return configured
     return runBackend
+}
+
+/**
+ * `--model` names every phase's model, but the OpenAI Critic and Surgeon fell
+ * back to gpt-* names, which a compatible endpoint (the Hermes subscription
+ * proxy) neither serves nor reaches: gpt-* goes to /v1/responses. A Claude
+ * alias here is the routing default, not a model for this endpoint.
+ */
+export function openAICompatibleOverride(config: OrchestrateConfig): string | undefined {
+    const model = config.overrideModel?.trim()
+    if (!model || ["opus", "sonnet", "haiku"].includes(model)) return undefined
+    return model
 }
 
 /* The run-level review reads every criterion against the whole merged run
