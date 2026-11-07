@@ -151,7 +151,7 @@ describe("Architecture obligation contract", () => {
             )
             assert.ok(prompt.split("\n").includes(criterion))
         }
-        assert.match(prompt, /byte-for-byte into exactly one story acceptance/u)
+        assert.match(prompt, /writing ONLY its bracketed id as the whole entry/u)
         assert.match(prompt, /Parent metadata is never acceptance text/u)
         assert.doesNotMatch(prompt, /Parents G-[AC]\d+: \[O-\d{3}\]/u)
     })
@@ -285,6 +285,19 @@ describe("Architecture obligation contract", () => {
             }], "partial"),
             /unknown architecture obligation O-099/u,
         )
+    })
+
+    it("expands a bare id claim into its canonical criterion", () => {
+        // The Planner claims obligations by id alone so it never spends output
+        // re-typing host-owned text; the host restores the exact criterion.
+        const contract = architectureObligationsFromDecision(decision(), goal)!
+        const repaired = canonicalObligationAcceptance(contract, ["[O-002]", "a local criterion"])
+        assert.deepEqual(repaired.acceptance, [
+            renderArchitectureObligationCriterion(contract.obligations[1]!),
+            "a local criterion",
+        ])
+        assert.deepEqual(repaired.invariantIds, contract.obligations[1]!.invariantIds)
+        assert.equal(repaired.changed, true)
     })
 
     it("expands a compound claim into one canonical criterion per id", () => {
