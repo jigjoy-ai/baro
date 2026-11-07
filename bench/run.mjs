@@ -15,7 +15,7 @@ import { metrics, parseStream } from "./metrics.mjs"
 const here = dirname(fileURLToPath(import.meta.url))
 
 function parseArgs(argv) {
-    const opts = { model: "sonnet", timeoutMin: 30, only: null, label: null, baro: null, out: null, trace: false, repeat: 1, env: {} }
+    const opts = { model: "sonnet", llm: "claude", timeoutMin: 30, only: null, label: null, baro: null, out: null, trace: false, repeat: 1, env: {} }
     for (let i = 0; i < argv.length; i++) {
         const key = argv[i].replace(/^--/, "")
         if (key === "trace") {
@@ -35,7 +35,7 @@ function parseArgs(argv) {
         else throw new Error(`unknown option --${key}`)
     }
     if (!opts.label || !opts.baro) {
-        throw new Error('usage: node bench/run.mjs --label <name> --baro "<command>" [--model sonnet] [--only a,b] [--timeout-min 30] [--out dir] [--trace] [--repeat 3] [--env KEY=VALUE]')
+        throw new Error('usage: node bench/run.mjs --label <name> --baro "<command>" [--model sonnet] [--only a,b] [--timeout-min 30] [--out dir] [--trace] [--repeat 3] [--env KEY=VALUE] [--llm openai]')
     }
     opts.out ??= join(here, "results", opts.label)
     return opts
@@ -68,7 +68,7 @@ function runCase(opts, testCase, dir, streamPath, errPath, tracePath) {
     const roles = opts.model === "default"
         ? []
         : ["architect", "planner", "story", "surgeon", "critic"].flatMap((r) => [`--${r}-model`, opts.model])
-    const args = [...pre, "--headless", "--local-only", "--llm", "claude", ...roles, "--cwd", dir, testCase.goal]
+    const args = [...pre, "--headless", "--local-only", "--llm", opts.llm, ...roles, "--cwd", dir, testCase.goal]
     return new Promise((done) => {
         const startedAt = Date.now()
         // --trace: every Node process Baro starts records its own child processes.

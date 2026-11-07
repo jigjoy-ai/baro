@@ -27,6 +27,7 @@ import {
 } from "../../semantic-events.js"
 import type { ModelInvocationMeasuredData } from "../../telemetry/model-telemetry.js"
 import { runnerMeasurement } from "../../telemetry/runner-measurement.js"
+import type { RunnerInvocationObservation } from "../../harness/runner-invocation.js"
 import {
     normalizeClaudeRunnerObservation,
     normalizeOpenAIRunnerObservation,
@@ -744,21 +745,7 @@ export function plannerTurnMeasurement(input: {
     result: AgentResultData
 }): ModelInvocationMeasuredData {
     const { runId, backend, requestedModel, turn, result } = input
-    const observation = isNativeLane(backend)
-        ? normalizeOpenAIRunnerObservation(
-              nativeTurnUsage(result.usage),
-              requestedModel,
-              true,
-          )
-        : normalizeClaudeRunnerObservation(
-              {
-                  usage: result.usage ?? undefined,
-                  modelUsage: result.modelUsage ?? undefined,
-                  duration_ms: result.durationMs ?? undefined,
-                  total_cost_usd: result.totalCostUsd ?? undefined,
-              },
-              requestedModel,
-          )
+    const observation = busTurnObservation(backend, requestedModel, result)
     return runnerMeasurement(
         {
             invocationBaseId: `${runId}:planner:${turn}`,
@@ -776,6 +763,29 @@ export function plannerTurnMeasurement(input: {
             status: result.isError ? "failed" : "succeeded",
         },
     )
+}
+
+/** One bus participant's turn, read the way its lane reports usage. */
+export function busTurnObservation(
+    backend: string,
+    requestedModel: string,
+    result: AgentResultData,
+): RunnerInvocationObservation {
+    return isNativeLane(backend)
+        ? normalizeOpenAIRunnerObservation(
+              nativeTurnUsage(result.usage),
+              requestedModel,
+              true,
+          )
+        : normalizeClaudeRunnerObservation(
+              {
+                  usage: result.usage ?? undefined,
+                  modelUsage: result.modelUsage ?? undefined,
+                  duration_ms: result.durationMs ?? undefined,
+                  total_cost_usd: result.totalCostUsd ?? undefined,
+              },
+              requestedModel,
+          )
 }
 
 /**

@@ -29,6 +29,8 @@ import { createDialogueResponder } from "../src/conversation/dialogue-responder.
 import { withTransientRetry } from "../src/harness/transient-retry.js"
 import { runArchitectClaude } from "../src/planning/adapters/architect-claude.js"
 import { runArchitectBusSession } from "../src/planning/adapters/architect-bus-session.js"
+import { busTurnObservation } from "../src/planning/adapters/planner-bus-session.js"
+import type { AgentResultData } from "../src/semantic-events.js"
 import { ONE_SHOT_ONLY_BACKENDS } from "../src/harness/lane-registry.js"
 import {
     ARCHITECT_DECISION_OUTCOME_SYSTEM_PROMPT,
@@ -380,6 +382,23 @@ async function main(): Promise<void> {
             metadata.phase ?? "architect",
         )
     }
+    let busTurnOrdinal = 0
+    const publishBusTurn: BusTurnPublisher = (role, result) => {
+        // Scouts run on the Architect's lane and model.
+        const requestedModel =
+            architectDecisionModel(args, modeContract, resolvedArchitectRoute.model) ?? args.llm
+        publishArchitectInvocation(
+            billingRunId,
+            role === "scout" ? "scout" : "decision",
+            ++busTurnOrdinal,
+            1,
+            {
+                backend: args.llm,
+                requestedModel,
+                observation: busTurnObservation(args.llm, requestedModel, result),
+            },
+        )
+    }
     try {
         if (args.llm === "openai") {
             billing = createGatewayBillingCoordinatorFromEnv({
@@ -402,6 +421,7 @@ async function main(): Promise<void> {
                         billing,
                         resolvedArchitectRoute,
                         observeDecisionInvocation,
+                        publishBusTurn,
                     ),
                 {
                     // Losing the architect kills the whole run, and billing
@@ -589,6 +609,7 @@ async function runInitialArchitect(
     billing: GatewayBillingCoordinator | null,
     resolvedArchitectRoute: { model?: string },
     onInvocation: ArchitectInvocationObserver,
+    publishBusTurn: BusTurnPublisher,
 ): Promise<string> {
     const outcomeContractMode = args.outcomeFile ? "decision" as const : undefined
     const timeoutMs = args.timeoutMs ??
@@ -607,6 +628,7 @@ async function runInitialArchitect(
             trustedGoalEnvelope,
             outcomeContractMode,
             billing,
+            publishBusTurn,
         })
     }
 
@@ -725,6 +747,7 @@ async function runArchitectOnBus(input: {
     outcomeContractMode: "decision" | undefined
     /** Meters the session's own rounds; a CLI lane reports its own spend. */
     billing: GatewayBillingCoordinator | null
+    publishBusTurn: BusTurnPublisher
 }): Promise<string> {
     const {
         args,
@@ -733,6 +756,7 @@ async function runArchitectOnBus(input: {
         trustedGoalEnvelope,
         outcomeContractMode,
         billing,
+        publishBusTurn,
     } = input
     const outcomeMode = args.outcomeFile !== undefined
     // Read once, before the session opens: the canon is whatever the trusted
@@ -770,6 +794,8 @@ async function runArchitectOnBus(input: {
               }
             : {}),
         onProgress: (line) => process.stderr.write(`${line}\n`),
+        // The gateway meters its own rounds; a CLI lane's spend is only in its turn results.
+        ...(billing ? {} : { onTurnResult: publishBusTurn }),
     })
     process.stderr.write(
         `[architect-bus] ${session.researchRounds} research round(s), ` +
@@ -976,7 +1002,7 @@ function architectResponderEffort(
 
 function publishArchitectInvocation(
     runId: string,
-    lane: "decision" | "obligations",
+    lane: "decision" | "obligations" | "scout",
     callOrdinal: number,
     attempt: number,
     invocation: DialogueResponderInvocation,
@@ -1003,6 +1029,8 @@ function publishArchitectInvocation(
         ),
     })
 }
+
+type BusTurnPublisher = (role: "architect" | "scout", result: AgentResultData) => void
 
 main().catch((e) => {
     process.stderr.write(`[run-architect] crashed: ${safeErrorForStderr(e, true)}\n`)

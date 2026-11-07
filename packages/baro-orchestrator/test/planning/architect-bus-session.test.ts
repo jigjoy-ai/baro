@@ -309,6 +309,7 @@ describe("architect bus session", () => {
                 return (previousWrite as (...args: unknown[]) => boolean)(chunk, ...rest)
             }) as typeof process.stdout.write
 
+            const turns: string[] = []
             const result = await runArchitectBusSession({
                 systemPrompt: "You are the architect for this engineering run.",
                 userMessage: "Migrate validation to zod.",
@@ -316,6 +317,7 @@ describe("architect bus session", () => {
                 cwd: dir,
                 claudeBin: writeFakeClaude(dir),
                 environment: env,
+                onTurnResult: (role) => turns.push(role),
                 roundBudgetMs: 20_000,
                 normalizeOutcome: (raw) => raw.slice(raw.indexOf("{")),
                 validateOutcome: (raw) => {
@@ -332,6 +334,10 @@ describe("architect bus session", () => {
             assert.equal(result.findings.length, 2)
             assert.ok(result.findings.every((finding) => finding.ok))
             assert.match(result.outcome, /"saw":"scout answer"/)
+            // Usage telemetry sees every turn: ask, rejected outcome, repair, and
+            // each scout (a peer's note can give a scout another turn).
+            assert.equal(turns.filter((role) => role === "architect").length, 3)
+            assert.ok(turns.filter((role) => role === "scout").length >= 2)
 
             const published = capture.events.filter(ScoutFindingPublished.is)
             assert.equal(

@@ -175,6 +175,11 @@ describe("ArchitectOutcomeV1", () => {
             ARCHITECT_DECISION_OUTCOME_SYSTEM_PROMPT,
             /Do not generate a semantic obligation/u,
         )
+        // Every story and Critic reads the document, so its prose is bounded.
+        assert.match(
+            ARCHITECT_DECISION_OUTCOME_SYSTEM_PROMPT,
+            /consequences: one sentence of constraints the decision does not already\s+state/u,
+        )
         assert.doesNotMatch(
             ARCHITECT_DECISION_OUTCOME_SYSTEM_PROMPT,
             /SEMANTIC OBLIGATION APPENDIX — REQUIRED/u,

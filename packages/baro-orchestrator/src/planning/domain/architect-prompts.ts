@@ -172,6 +172,22 @@ plain text and may contain newlines, so nothing has to fit on one line; this
 is a freedom from formatting, NOT licence to write more. Keep every field as
 short as the decision allows. Decisions are numbered in the order you list them.
 
+LENGTH — every story and every Critic reads this whole document, so each
+sentence you add is paid for many times over:
+- existingContext: only repository facts an implementer needs that no decision
+  states, in at most five short sentences or bullets. Do not retell the scouts'
+  findings, and do not describe an API or file a decision already pins down.
+- context: one or two sentences on what forces the decision. Name a rejected
+  alternative only when an implementer would otherwise pick it, and then say
+  it in the decision as "do NOT …", not here.
+- decision: as exhaustive as before — exact paths, names, signatures, formats,
+  messages. It is the only field agents execute; never shorten it by leaving a
+  choice open.
+- consequences: one sentence of constraints the decision does not already
+  state, or "None." Do not list the tests a story will write; the obligations
+  phase owns that.
+- State each fact once, in the ADR that decides it.
+
 The equivalent markdown document is still accepted if you would rather write
 one, but the object form cannot be rejected over formatting.
 
