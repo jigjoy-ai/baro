@@ -75,13 +75,14 @@ nearby story sounds related. For goals without a confirmed Goal envelope, use
 an empty \`goalInvariantIds\` array.
 
 When the Architect handoff contains a Semantic obligation contract, its exact
-canonical [O-NNN] criteria are a non-narrowable minimum contract. Copy every
-canonical criterion byte-for-byte into the \`acceptance\` array of exactly one
-implementation story. That story's \`goalInvariantIds\` must include every
-parent G-A/G-C id shown for the obligation. Parent metadata is not acceptance
-text and must never be prefixed or appended to the canonical criterion. You may
-add stricter or more local criteria, but never paraphrase, split, weaken,
-duplicate, or omit a canonical criterion. If one owner cannot produce all
+canonical [O-NNN] criteria are a non-narrowable minimum contract. Claim every
+obligation in the \`acceptance\` array of exactly one implementation story by
+writing ONLY its bracketed id as the whole entry, e.g. "[O-007]": the host
+replaces it with the exact canonical criterion, so never copy, paraphrase,
+prefix or append text to it. That story's \`goalInvariantIds\` must include
+every parent G-A/G-C id shown for the obligation. You may add stricter or more
+local criteria as separate entries, but never split, weaken, duplicate, or omit
+an obligation. If one owner cannot produce all
 required evidence, split the obligations across appropriately scoped
 implementation stories. An obligation that quantifies over MANY stories'
 surfaces ("all controllers", "every module") belongs to the story that
@@ -501,7 +502,7 @@ export function buildPlannerUserMessage(args: {
             sections.push("ARCHITECT SEMANTIC OBLIGATIONS (exact, non-narrowable):")
             sections.push("")
             sections.push(
-                "Copy every exact canonical criterion below byte-for-byte into exactly one story acceptance array. The owner story must also list every parent GoalContract id in goalInvariantIds. Parent metadata is never acceptance text. Additional local acceptance is allowed; changing or omitting canonical criterion lines is not.",
+                "Claim every obligation below in exactly one story acceptance array by writing ONLY its bracketed id as the whole entry (e.g. \"[O-001]\"); the host inserts the exact canonical criterion, so do not copy its text. The owner story must also list every parent GoalContract id in goalInvariantIds. Parent metadata is never acceptance text. Additional local acceptance is allowed as separate entries; omitting an obligation is not.",
             )
             sections.push("")
             for (const obligation of obligationContract.obligations) {
@@ -551,7 +552,7 @@ export function buildPlannerUserMessage(args: {
 export const PLANNER_FINAL_PRD_SCHEMA_SUMMARY = [
     '{"project": string, "branchName": string, "description": string, "userStories": [...]}',
     'userStories[i]: {"id": string, "title": string, "description": string, "acceptance": string[]}',
-    'acceptance[i] claiming an obligation starts with the bracketed id, e.g. "[O-001] <criterion text>"',
+    'acceptance[i] claiming an obligation is exactly its bracketed id, e.g. "[O-001]"; the host inserts the canonical criterion',
 ].join("\n")
 
 /**
