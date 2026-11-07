@@ -20,7 +20,7 @@ import {
     type SemanticEvent,
 } from "../../runtime/mozaik.js"
 import { BusMember, CoordinationBus } from "../../runtime/coordination.js"
-import { AgentResult } from "../../semantic-events.js"
+import { AgentResult, type AgentResultData } from "../../semantic-events.js"
 import { laneAdapterFor } from "../../harness/lane-registry.js"
 import type { InteractiveModelParticipant } from "../../harness/interactive-participant.js"
 import type { OpenAIConnection } from "../../harness/openai/runtime.js"
@@ -99,6 +99,8 @@ export interface ArchitectBusSessionOptions {
     outcomeSchemaSummary?: string
     onFinding?: (finding: ScoutFinding) => void
     onProgress?: (line: string) => void
+    /** Every finished Architect or scout turn, for usage telemetry. */
+    onTurnResult?: (role: "architect" | "scout", result: AgentResultData) => void
     /** Test seam, and the seam a run-wide environment plugs into. */
     environment?: CoordinationBus
 }
@@ -132,6 +134,33 @@ class ResearchNarrator extends BusMember {
                 `scout ${event.payload.ok ? "answered" : "FAILED"}: ` +
                     `${event.payload.question} — ${event.payload.answer.slice(0, 400)}`,
             )
+        }
+    }
+}
+
+/** Reports each finished turn on the phase's bus; scouts never surface their usage otherwise. */
+class TurnMeter extends BusMember {
+    constructor(
+        private readonly architectId: string,
+        private readonly report: (role: "architect" | "scout", result: AgentResultData) => void,
+    ) {
+        super()
+    }
+
+    override onExternalEvent(
+        _source: BusMember,
+        event: SemanticEvent<string, unknown>,
+    ): void {
+        if (!AgentResult.is(event)) return
+        const { agentId } = event.payload
+        const role = agentId === this.architectId
+            ? "architect"
+            : agentId.startsWith("scout:") ? "scout" : null
+        if (!role) return
+        try {
+            this.report(role, event.payload)
+        } catch {
+            // Telemetry never changes the phase.
         }
     }
 }
@@ -220,6 +249,7 @@ export async function runArchitectBusSession(
     const env = opts.environment ?? new CoordinationBus("architect-bus")
     const replies = new ReplyStream(agentId)
     const narrator = new ResearchNarrator()
+    const meter = opts.onTurnResult ? new TurnMeter(agentId, opts.onTurnResult) : null
     const lane = laneAdapterFor({
         backend: opts.backend ?? "claude",
         ...(opts.connection ? { connection: opts.connection } : {}),
@@ -262,6 +292,7 @@ export async function runArchitectBusSession(
     try {
         replies.join(env)
         narrator.join(env)
+        meter?.join(env)
         architect.join(env)
         architect.start(env)
         watchdog = new IdleWatchdog(opts.idleTimeoutMs ?? llmIdleTimeoutMs(), () => {
@@ -343,6 +374,7 @@ export async function runArchitectBusSession(
         void architect.abortAndWait()
         replies.leave(env)
         narrator.leave(env)
+        meter?.leave(env)
         if (architect.getBuses().includes(env)) architect.leave(env)
     }
 }
