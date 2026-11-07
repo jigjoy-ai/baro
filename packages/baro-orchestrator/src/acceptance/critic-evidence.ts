@@ -1,7 +1,9 @@
+import { execFile } from "node:child_process"
 import { createHash, type Hash } from "node:crypto"
 import { constants } from "node:fs"
-import { lstat, open, readlink, realpath } from "node:fs/promises"
+import { lstat, open, readdir, readlink, realpath } from "node:fs/promises"
 import { isAbsolute, relative, resolve, sep } from "node:path"
+import { promisify } from "node:util"
 
 import { CollaborationNote, PathsClaimed } from "../semantic-events.js"
 import {
@@ -19,6 +21,7 @@ import {
 import type { StoryOutcomeAuthority } from "../runtime/story-outcome-authority.js"
 import { emit } from "../tui-protocol.js"
 import { collectAltitudeFindings } from "./altitude-probe.js"
+import { contentPreservingCommand } from "./content-preserving-command.js"
 import type { ContractConflict } from "./critic-verdict.js"
 import {
     altitudeActivityText,
@@ -255,6 +258,9 @@ export class CriticCommandEvidenceCollector extends BusMember {
     private readonly pending = new Map<string, RetainedCommand>()
     private readonly fingerprintTasks = new Map<string, Set<Promise<void>>>()
     private readonly fallbackRevisions = new Map<string, number>()
+    /** What advanced each revision, so a fingerprint raced only by commands
+     * that cannot change content (git add/commit, git status, reads) is kept. */
+    private readonly activity = new Map<string, Map<number, { preserving: boolean; commits: boolean }>>()
 
     constructor(
         private readonly opts: CriticCommandEvidenceCollectorOptions = {},
@@ -285,7 +291,7 @@ export class CriticCommandEvidenceCollector extends BusMember {
         if (!agentId) return
         if (!this.acceptsSource(source, agentId)) return
         if (isWorkspaceWriteTool(item.name)) {
-            this.advanceFallbackRevision(agentId)
+            this.advanceFallbackRevision(agentId, { preserving: false, commits: false })
             return
         }
         if (!isShellTool(item.name)) return
@@ -296,7 +302,7 @@ export class CriticCommandEvidenceCollector extends BusMember {
             existing.command = redactSensitiveText(extractCommand(item.args))
             return
         }
-        this.advanceFallbackRevision(agentId)
+        this.advanceFallbackRevision(agentId, contentPreservingCommand(extractCommand(item.args)))
 
         const entry: RetainedCommand = {
             callId: item.callId,
@@ -416,6 +422,7 @@ export class CriticCommandEvidenceCollector extends BusMember {
     private resetAttempt(agentId: string): void {
         this.commands.delete(agentId)
         this.fallbackRevisions.delete(agentId)
+        this.activity.delete(agentId)
         const prefix = `${agentId}\u0000`
         for (const key of this.pending.keys()) {
             if (key.startsWith(prefix)) this.pending.delete(key)
@@ -458,18 +465,21 @@ export class CriticCommandEvidenceCollector extends BusMember {
             return
         }
         const task = (async () => {
+            const resolved = await target
             const fingerprint = await this.fingerprintResolvedTarget(
-                await target,
+                resolved,
                 fallbackRevision,
             )
             const completedRevision = this.fallbackRevisions.get(agentId) ?? 0
-            entry.fingerprint = completedRevision === fallbackRevision
-                ? fingerprint
-                : {
-                      state: "unavailable",
-                      reason:
-                          "shell/write activity advanced while the command fingerprint was being captured",
-                  }
+            entry.fingerprint =
+                completedRevision === fallbackRevision ||
+                (await this.onlyContentPreservingSince(agentId, fallbackRevision, completedRevision, resolved))
+                    ? fingerprint
+                    : {
+                          state: "unavailable",
+                          reason:
+                              "shell/write activity advanced while the command fingerprint was being captured",
+                      }
         })()
         let tasks = this.fingerprintTasks.get(agentId)
         if (!tasks) {
@@ -524,11 +534,41 @@ export class CriticCommandEvidenceCollector extends BusMember {
         }
     }
 
-    private advanceFallbackRevision(agentId: string): void {
-        this.fallbackRevisions.set(
-            agentId,
-            (this.fallbackRevisions.get(agentId) ?? 0) + 1,
-        )
+    private advanceFallbackRevision(
+        agentId: string,
+        kind: { preserving: boolean; commits: boolean },
+    ): void {
+        const revision = (this.fallbackRevisions.get(agentId) ?? 0) + 1
+        this.fallbackRevisions.set(agentId, revision)
+        let log = this.activity.get(agentId)
+        if (!log) {
+            log = new Map()
+            this.activity.set(agentId, log)
+        }
+        log.set(revision, kind)
+        for (const old of log.keys()) {
+            if (old > revision - MAX_ACTIVITY_LOG) break
+            log.delete(old)
+        }
+    }
+
+    /** True when every activity in (from, to] provably left the working tree
+     * as it was, so a fingerprint taken meanwhile still describes the command. */
+    private async onlyContentPreservingSince(
+        agentId: string,
+        from: number,
+        to: number,
+        target: CriticRepositoryTarget | null,
+    ): Promise<boolean> {
+        if (!target) return false
+        const log = this.activity.get(agentId)
+        let commits = false
+        for (let revision = from + 1; revision <= to; revision++) {
+            const kind = log?.get(revision)
+            if (!kind?.preserving) return false
+            commits ||= kind.commits
+        }
+        return !commits || !(await hasCommitHooks(target.cwd))
     }
 
     private async drainFingerprintTasks(agentId: string): Promise<void> {
@@ -1773,6 +1813,30 @@ interface GitResult {
     stdout: string
     stderr: string
     timedOut: boolean
+}
+
+const MAX_ACTIVITY_LOG = 256
+const execFileAsync = promisify(execFile)
+const COMMIT_HOOKS = new Set(["pre-commit", "prepare-commit-msg", "commit-msg", "post-commit"])
+
+/** A commit hook may rewrite files (formatters), so a commit is only content
+ * preserving without one. Any doubt counts as a hook. */
+async function hasCommitHooks(cwd: string): Promise<boolean> {
+    try {
+        // Not runGit: it pins core.hooksPath to the null device, and the question
+        // is which hooks the agent's own `git commit` runs.
+        const { stdout } = await execFileAsync("git", ["rev-parse", "--git-path", "hooks"], {
+            cwd: resolve(cwd),
+            timeout: DEFAULT_GIT_TIMEOUT_MS,
+        })
+        const names = await readdir(resolve(cwd, stdout.trim())).catch((error: NodeJS.ErrnoException) => {
+            if (error.code === "ENOENT") return [] as string[]
+            throw error
+        })
+        return names.some((name) => COMMIT_HOOKS.has(name))
+    } catch {
+        return true
+    }
 }
 
 async function runGit(
