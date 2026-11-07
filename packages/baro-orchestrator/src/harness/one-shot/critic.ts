@@ -17,7 +17,13 @@ import {
     Critique,
     ModelInvocationMeasured,
 } from "../../semantic-events.js"
-import { buildCorrectiveMessage, extractVerdictJson } from "../../acceptance/critic-verdict.js"
+import {
+    applyContractConflicts,
+    buildCorrectiveMessage,
+    extractVerdictJson,
+    parseContractConflicts,
+    type ContractConflict,
+} from "../../acceptance/critic-verdict.js"
 import {
     inconclusiveEvidenceVerdict,
     mergeSegmentVerdicts,
@@ -37,6 +43,7 @@ export interface OneShotCriticEvaluation {
     verdict: "pass" | "fail"
     reasoning: string
     violatedCriteria: string[]
+    contractConflicts?: ContractConflict[]
 }
 
 export interface OneShotCriticCoreOptions extends TerminalTurnAuthorityOptions {
@@ -108,7 +115,9 @@ export abstract class OneShotCritic extends BusMember {
             verdict: "pass" | "fail"
             reasoning: string
             violated_criteria: string[]
+            contract_conflicts?: unknown
         }
+        const conflicts = parseContractConflicts(parsed.contract_conflicts)
         return {
             status: "evaluated",
             verdict: parsed.verdict === "pass" ? "pass" : "fail",
@@ -116,6 +125,7 @@ export abstract class OneShotCritic extends BusMember {
             violatedCriteria: Array.isArray(parsed.violated_criteria)
                 ? parsed.violated_criteria
                 : [],
+            ...(conflicts.length > 0 ? { contractConflicts: conflicts } : {}),
         }
     }
 
@@ -174,12 +184,15 @@ export abstract class OneShotCritic extends BusMember {
                 staleCommands = preparation.staleCommands
                 preparationReady = preparation.status === "ready"
                 evaluation = preparationReady
-                    ? mergeSegmentVerdicts(
-                          await Promise.all(
-                              preparation.prompts.map((prompt) =>
-                                  this.evaluate(prompt, agentId, turn),
+                    ? applyContractConflicts(
+                          mergeSegmentVerdicts(
+                              await Promise.all(
+                                  preparation.prompts.map((prompt) =>
+                                      this.evaluate(prompt, agentId, turn),
+                                  ),
                               ),
                           ),
+                          criteria,
                       )
                     : inconclusiveEvidenceVerdict(preparation.issues)
             } catch (error) {
@@ -209,6 +222,9 @@ export abstract class OneShotCritic extends BusMember {
                 modelUsed: this.requestedModel ?? this.spec.defaultModelLabel,
                 ...(repositoryFingerprint ? { repositoryFingerprint } : {}),
                 ...(staleCommands.length > 0 ? { staleCommands } : {}),
+                ...(evaluation.contractConflicts?.length
+                    ? { contractConflicts: evaluation.contractConflicts }
+                    : {}),
             })
             for (const env of this.getBuses()) {
                 env.publish(this, critiqueEvent)

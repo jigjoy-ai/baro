@@ -1,0 +1,235 @@
+{
+  "label": "contract-fix",
+  "baro": "/Users/miodrag.todorovic/.baro/local-v4/baro",
+  "model": "sonnet",
+  "cases": {
+    "modules-then-docs": {
+      "success": true,
+      "verification": "passed",
+      "abort_reason": null,
+      "total_secs": 294.65,
+      "architect_secs": 78.7,
+      "to_first_story_secs": 171.55,
+      "stories_secs": 103.44999999999999,
+      "finalize_secs": 19.65,
+      "story_count": 3,
+      "retries": 0,
+      "replans": 1,
+      "critic_reviews": {
+        "total": 3,
+        "rejected": 0,
+        "stale_evidence": 0
+      },
+      "cost_usd": 0.8875,
+      "tokens": {
+        "input": 479009,
+        "cached_input": 314408,
+        "cache_write": 164561,
+        "output": 21611
+      },
+      "cache_hit_ratio": 0.6564,
+      "phases": {
+        "architect": {
+          "calls": 3,
+          "cost_usd": 0.0966,
+          "model_secs": 35
+        },
+        "planner": {
+          "calls": 1,
+          "cost_usd": 0.2259,
+          "model_secs": 52
+        },
+        "story": {
+          "calls": 3,
+          "cost_usd": 0.3875,
+          "model_secs": 68
+        },
+        "critic": {
+          "calls": 3,
+          "cost_usd": 0.1958,
+          "model_secs": 21
+        }
+      },
+      "stories": [
+        {
+          "id": "S2",
+          "secs": 49.7,
+          "attempts": 1,
+          "reviews": 1,
+          "cost_usd": 0.2006
+        },
+        {
+          "id": "S1",
+          "secs": 44.1,
+          "attempts": 1,
+          "reviews": 1,
+          "cost_usd": 0.1738
+        },
+        {
+          "id": "S3",
+          "secs": 45,
+          "attempts": 1,
+          "reviews": 1,
+          "cost_usd": 0.2089
+        }
+      ],
+      "wall_secs": 295.20000000000005,
+      "exit_code": 0,
+      "timed_out": false,
+      "ran_at": "2026-11-06T21:01:02.973Z",
+      "repeats": 2,
+      "runs": [
+        {
+          "success": true,
+          "verification": "passed",
+          "abort_reason": null,
+          "total_secs": 284.6,
+          "architect_secs": 68.4,
+          "to_first_story_secs": 164.8,
+          "stories_secs": 102.1,
+          "finalize_secs": 17.7,
+          "story_count": 3,
+          "retries": 0,
+          "replans": 1,
+          "critic_reviews": {
+            "total": 3,
+            "rejected": 0,
+            "stale_evidence": 0
+          },
+          "cost_usd": 0.9059,
+          "tokens": {
+            "input": 479009,
+            "cached_input": 314408,
+            "cache_write": 164561,
+            "output": 21611
+          },
+          "cache_hit_ratio": 0.6564,
+          "phases": {
+            "architect": {
+              "calls": 3,
+              "cost_usd": 0.0966,
+              "model_secs": 35
+            },
+            "planner": {
+              "calls": 1,
+              "cost_usd": 0.2259,
+              "model_secs": 52
+            },
+            "story": {
+              "calls": 3,
+              "cost_usd": 0.3875,
+              "model_secs": 68
+            },
+            "critic": {
+              "calls": 3,
+              "cost_usd": 0.1958,
+              "model_secs": 21
+            }
+          },
+          "stories": [
+            {
+              "id": "S2",
+              "secs": 49.7,
+              "attempts": 1,
+              "reviews": 1,
+              "cost_usd": 0.2006
+            },
+            {
+              "id": "S1",
+              "secs": 44.1,
+              "attempts": 1,
+              "reviews": 1,
+              "cost_usd": 0.1738
+            },
+            {
+              "id": "S3",
+              "secs": 45,
+              "attempts": 1,
+              "reviews": 1,
+              "cost_usd": 0.2089
+            }
+          ],
+          "wall_secs": 285.1,
+          "exit_code": 0,
+          "timed_out": false,
+          "ran_at": "2026-11-06T21:01:02.973Z"
+        },
+        {
+          "success": true,
+          "verification": "passed",
+          "abort_reason": null,
+          "total_secs": 304.7,
+          "architect_secs": 89,
+          "to_first_story_secs": 178.3,
+          "stories_secs": 104.8,
+          "finalize_secs": 21.6,
+          "story_count": 3,
+          "retries": 0,
+          "replans": 1,
+          "critic_reviews": {
+            "total": 3,
+            "rejected": 0,
+            "stale_evidence": 0
+          },
+          "cost_usd": 0.8691,
+          "tokens": {
+            "input": 604254,
+            "cached_input": 450872,
+            "cache_write": 153334,
+            "output": 21058
+          },
+          "cache_hit_ratio": 0.7462,
+          "phases": {
+            "architect": {
+              "calls": 3,
+              "cost_usd": 0.0994,
+              "model_secs": 40
+            },
+            "planner": {
+              "calls": 1,
+              "cost_usd": 0.1818,
+              "model_secs": 47
+            },
+            "story": {
+              "calls": 3,
+              "cost_usd": 0.4103,
+              "model_secs": 79
+            },
+            "critic": {
+              "calls": 3,
+              "cost_usd": 0.1776,
+              "model_secs": 15
+            }
+          },
+          "stories": [
+            {
+              "id": "S2",
+              "secs": 41.5,
+              "attempts": 1,
+              "reviews": 1,
+              "cost_usd": 0.2
+            },
+            {
+              "id": "S1",
+              "secs": 37.3,
+              "attempts": 1,
+              "reviews": 1,
+              "cost_usd": 0.1729
+            },
+            {
+              "id": "S3",
+              "secs": 54.8,
+              "attempts": 1,
+              "reviews": 1,
+              "cost_usd": 0.215
+            }
+          ],
+          "wall_secs": 305.3,
+          "exit_code": 0,
+          "timed_out": false,
+          "ran_at": "2026-11-06T21:05:48.599Z"
+        }
+      ]
+    }
+  }
+}

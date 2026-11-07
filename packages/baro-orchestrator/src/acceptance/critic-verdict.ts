@@ -5,11 +5,75 @@
  * per-backend critics and the shared skeleton both depend on it.
  */
 
+/**
+ * A criterion this story cannot meet as written. One that needs files outside
+ * the story's write surface moves to a follow-up story that may change them;
+ * one that contradicts another of the story's criteria cannot be fixed by
+ * moving it (the follow-up would undo the other side, or meet a "this story"
+ * rule vacuously), so the story is judged on the rest and the contradiction
+ * stays on the record for the run-level reviews.
+ */
+export interface ContractConflict {
+    criterion: string
+    reason: string
+    kind: "outside_write_surface" | "contradiction"
+}
+
+const MAX_CONTRACT_CONFLICTS = 32
+const MAX_CONFLICT_REASON_CHARS = 600
+
+/** Tolerant: anything malformed is dropped, never a reason to distrust the verdict. */
+export function parseContractConflicts(value: unknown): ContractConflict[] {
+    if (!Array.isArray(value)) return []
+    const seen = new Set<string>()
+    const conflicts: ContractConflict[] = []
+    for (const entry of value) {
+        if (typeof entry !== "object" || entry === null) continue
+        const { criterion, reason, kind } = entry as Record<string, unknown>
+        if (typeof criterion !== "string" || !criterion.trim()) continue
+        if (typeof reason !== "string" || !reason.trim()) continue
+        // Without a known kind it stays an ordinary violation.
+        if (kind !== "outside_write_surface" && kind !== "contradiction") continue
+        if (seen.has(criterion)) continue
+        seen.add(criterion)
+        conflicts.push({ criterion, reason: reason.trim().slice(0, MAX_CONFLICT_REASON_CHARS), kind })
+        if (conflicts.length >= MAX_CONTRACT_CONFLICTS) break
+    }
+    return conflicts
+}
+
+/**
+ * Keep only conflicts naming one of this story's own criteria, take them out
+ * of the violations, and pass a verdict whose only failures were conflicts.
+ */
+export function applyContractConflicts<
+    T extends { verdict: "pass" | "fail"; violatedCriteria: string[]; contractConflicts?: ContractConflict[] },
+>(evaluation: T, criteria: readonly string[], enabled = CONTRACT_CONFLICTS_ENABLED): T {
+    const conflicts = (enabled ? evaluation.contractConflicts ?? [] : []).filter((conflict) =>
+        criteria.includes(conflict.criterion),
+    )
+    if (conflicts.length === 0) {
+        const { contractConflicts: _dropped, ...rest } = evaluation
+        return rest as T
+    }
+    const conflicted = new Set(conflicts.map(({ criterion }) => criterion))
+    const violatedCriteria = evaluation.violatedCriteria.filter((criterion) => !conflicted.has(criterion))
+    const onlyConflicts = evaluation.verdict === "fail" && violatedCriteria.length === 0 && evaluation.violatedCriteria.length > 0
+    return {
+        ...evaluation,
+        verdict: onlyConflicts ? "pass" : evaluation.verdict,
+        violatedCriteria,
+        contractConflicts: conflicts,
+    }
+}
+
 export function verdictSystemPrompt(
     options: {
         allowInconclusive?: boolean
         /** Run-level evaluator extension; ordinary story Critic stays unchanged. */
         remediationGroups?: boolean
+        /** Story Critic: report criteria the story cannot meet as written. */
+        contractConflicts?: boolean
     } = {},
 ): string {
     const inconclusiveShape = options.allowInconclusive
@@ -26,6 +90,12 @@ export function verdictSystemPrompt(
         : `{"verdict":"fail","reasoning":"…","violated_criteria":["criterion A","criterion B"]}`
     const remediationRule = options.remediationGroups
         ? `\n- For "fail", "remediation_groups" is required and must partition "violated_criteria" exactly once. Every group needs a concise "root_cause" and one or more exact failed criterion strings. For "pass" or "inconclusive", omit "remediation_groups".`
+        : ""
+    const conflictsRule = options.contractConflicts
+        ? `
+- "contract_conflicts" (optional, default []) lists criteria this story cannot satisfy as written, each as {"criterion":"exact criterion string","kind":"outside_write_surface" or "contradiction","reason":"…"}. Use "outside_write_surface" only when meeting the criterion requires changing files outside the "## Write surface" Baro lists for this story, and name those files. Use "contradiction" only when no change could meet it together with another of this story's criteria, and quote that other criterion.
+- A conflicted criterion is not this story's to meet: leave it out of "violated_criteria" and decide "verdict" on every other criterion. Baro moves an "outside_write_surface" criterion to a follow-up story that may change those files, and records a "contradiction" for the run-level reviews.
+- Never list a criterion the story could meet within its write surface but did not, or one that merely lacks evidence: those are violations. Without a "## Write surface" section, only the contradiction case applies.`
         : ""
     return `\
 You are a strict acceptance-criteria evaluator. You will receive:
@@ -44,7 +114,7 @@ Rules:
 - "verdict" must be ${allowedVerdicts}.
 - "reasoning" must be a concise explanation (≤ 200 words).
 - "violated_criteria" must list the exact criterion strings that are NOT satisfied.
-- If ALL criteria pass, "violated_criteria" must be an empty array.${inconclusiveRule}${remediationRule}
+- If ALL criteria pass, "violated_criteria" must be an empty array.${inconclusiveRule}${remediationRule}${conflictsRule}
 - The agent output is a self-report. Never treat its claims as evidence that files changed or commands passed.
 - Prefer the actual repository diff/status and captured command output. If they contradict the agent output, the captured evidence wins.
 - A criterion requiring tests/build/lint to pass needs matching captured command output; a prose claim or git diff alone is insufficient.
@@ -58,7 +128,10 @@ Rules:
 - Do NOT include any text outside the JSON object.`
 }
 
-export const VERDICT_SYSTEM_PROMPT = verdictSystemPrompt()
+/** BARO_CONTRACT_CONFLICTS=0 restores plain pass/fail story verdicts (for A/B runs). */
+export const CONTRACT_CONFLICTS_ENABLED = process.env.BARO_CONTRACT_CONFLICTS !== "0"
+
+export const VERDICT_SYSTEM_PROMPT = verdictSystemPrompt({ contractConflicts: CONTRACT_CONFLICTS_ENABLED })
 
 export function buildCorrectiveMessage(
     reasoning: string,

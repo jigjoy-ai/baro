@@ -217,6 +217,7 @@ export type BaroEvent =
           reasoning: string
           violated: string[]
           stale_commands?: string[]
+          contract_conflicts?: { criterion: string; reason: string; kind: "outside_write_surface" | "contradiction" }[]
       }
     | {
           type: "conversation_request"

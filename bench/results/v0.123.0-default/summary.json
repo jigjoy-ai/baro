@@ -1,0 +1,235 @@
+{
+  "label": "v0.123.0-default",
+  "baro": "npx --yes baro-ai@0.123.0",
+  "model": "default",
+  "cases": {
+    "modules-then-docs": {
+      "success": true,
+      "verification": "passed",
+      "abort_reason": null,
+      "total_secs": 368.5,
+      "architect_secs": 76.9,
+      "to_first_story_secs": 170.65,
+      "stories_secs": 177.8,
+      "finalize_secs": 20.05,
+      "story_count": 3,
+      "retries": 0,
+      "replans": 1.5,
+      "critic_reviews": {
+        "total": 4,
+        "rejected": 1,
+        "stale_evidence": 0
+      },
+      "cost_usd": 1.05725,
+      "tokens": {
+        "input": 587003,
+        "cached_input": 432386,
+        "cache_write": 154565,
+        "output": 25625
+      },
+      "cache_hit_ratio": 0.7366,
+      "phases": {
+        "architect": {
+          "calls": 3,
+          "cost_usd": 0.1824,
+          "model_secs": 37
+        },
+        "planner": {
+          "calls": 1,
+          "cost_usd": 0.3241,
+          "model_secs": 50
+        },
+        "story": {
+          "calls": 4,
+          "cost_usd": 0.5038,
+          "model_secs": 75
+        },
+        "critic": {
+          "calls": 4,
+          "cost_usd": 0.0137,
+          "model_secs": 39
+        }
+      },
+      "stories": [
+        {
+          "id": "S2",
+          "secs": 70.5,
+          "attempts": 1,
+          "reviews": 1,
+          "cost_usd": 0.1331
+        },
+        {
+          "id": "S1",
+          "secs": 82.9,
+          "attempts": 1,
+          "reviews": 2,
+          "cost_usd": 0.2432
+        },
+        {
+          "id": "S3",
+          "secs": 67.7,
+          "attempts": 1,
+          "reviews": 1,
+          "cost_usd": 0.1412
+        }
+      ],
+      "wall_secs": 369.15,
+      "exit_code": 0,
+      "timed_out": false,
+      "ran_at": "2026-11-06T21:12:46.062Z",
+      "repeats": 2,
+      "runs": [
+        {
+          "success": true,
+          "verification": "passed",
+          "abort_reason": null,
+          "total_secs": 367.5,
+          "architect_secs": 75.6,
+          "to_first_story_secs": 177,
+          "stories_secs": 169.5,
+          "finalize_secs": 21,
+          "story_count": 3,
+          "retries": 0,
+          "replans": 1,
+          "critic_reviews": {
+            "total": 4,
+            "rejected": 1,
+            "stale_evidence": 0
+          },
+          "cost_usd": 1.024,
+          "tokens": {
+            "input": 587003,
+            "cached_input": 432386,
+            "cache_write": 154565,
+            "output": 25625
+          },
+          "cache_hit_ratio": 0.7366,
+          "phases": {
+            "architect": {
+              "calls": 3,
+              "cost_usd": 0.1824,
+              "model_secs": 37
+            },
+            "planner": {
+              "calls": 1,
+              "cost_usd": 0.3241,
+              "model_secs": 50
+            },
+            "story": {
+              "calls": 4,
+              "cost_usd": 0.5038,
+              "model_secs": 75
+            },
+            "critic": {
+              "calls": 4,
+              "cost_usd": 0.0137,
+              "model_secs": 39
+            }
+          },
+          "stories": [
+            {
+              "id": "S2",
+              "secs": 70.5,
+              "attempts": 1,
+              "reviews": 1,
+              "cost_usd": 0.1331
+            },
+            {
+              "id": "S1",
+              "secs": 82.9,
+              "attempts": 1,
+              "reviews": 2,
+              "cost_usd": 0.2432
+            },
+            {
+              "id": "S3",
+              "secs": 67.7,
+              "attempts": 1,
+              "reviews": 1,
+              "cost_usd": 0.1412
+            }
+          ],
+          "wall_secs": 368.2,
+          "exit_code": 0,
+          "timed_out": false,
+          "ran_at": "2026-11-06T21:12:46.062Z"
+        },
+        {
+          "success": true,
+          "verification": "passed",
+          "abort_reason": null,
+          "total_secs": 369.5,
+          "architect_secs": 78.2,
+          "to_first_story_secs": 164.3,
+          "stories_secs": 186.1,
+          "finalize_secs": 19.1,
+          "story_count": 3,
+          "retries": 0,
+          "replans": 2,
+          "critic_reviews": {
+            "total": 4,
+            "rejected": 1,
+            "stale_evidence": 0
+          },
+          "cost_usd": 1.0905,
+          "tokens": {
+            "input": 677992,
+            "cached_input": 516096,
+            "cache_write": 161838,
+            "output": 31805
+          },
+          "cache_hit_ratio": 0.7612,
+          "phases": {
+            "architect": {
+              "calls": 3,
+              "cost_usd": 0.1768,
+              "model_secs": 32
+            },
+            "planner": {
+              "calls": 1,
+              "cost_usd": 0.3532,
+              "model_secs": 57
+            },
+            "story": {
+              "calls": 4,
+              "cost_usd": 0.5437,
+              "model_secs": 89
+            },
+            "critic": {
+              "calls": 4,
+              "cost_usd": 0.0168,
+              "model_secs": 63
+            }
+          },
+          "stories": [
+            {
+              "id": "S2",
+              "secs": 59.8,
+              "attempts": 1,
+              "reviews": 1,
+              "cost_usd": 0.1406
+            },
+            {
+              "id": "S1",
+              "secs": 54.3,
+              "attempts": 1,
+              "reviews": 1,
+              "cost_usd": 0.1225
+            },
+            {
+              "id": "S3",
+              "secs": 116.9,
+              "attempts": 1,
+              "reviews": 2,
+              "cost_usd": 0.2975
+            }
+          ],
+          "wall_secs": 370.1,
+          "exit_code": 0,
+          "timed_out": false,
+          "ran_at": "2026-11-06T21:18:54.457Z"
+        }
+      ]
+    }
+  }
+}

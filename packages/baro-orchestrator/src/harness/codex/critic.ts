@@ -9,7 +9,11 @@
  */
 
 import { runCodexOneShot } from "./one-shot.js"
-import { VERDICT_SYSTEM_PROMPT, extractVerdictJson } from "../../acceptance/critic-verdict.js"
+import {
+    VERDICT_SYSTEM_PROMPT,
+    extractVerdictJson,
+    parseContractConflicts,
+} from "../../acceptance/critic-verdict.js"
 import {
     OneShotCritic,
     type OneShotCriticCoreOptions,
@@ -71,11 +75,13 @@ export class CriticCodex extends OneShotCritic {
         if (!isCodexVerdict(parsed)) {
             throw new Error("Codex critic returned an invalid verdict object")
         }
+        const conflicts = parseContractConflicts(parsed.contract_conflicts)
         return {
             status: "evaluated",
             verdict: parsed.verdict,
             reasoning: parsed.reasoning,
             violatedCriteria: [...parsed.violated_criteria],
+            ...(conflicts.length > 0 ? { contractConflicts: conflicts } : {}),
         }
     }
 }
@@ -84,6 +90,7 @@ interface CodexVerdict {
     verdict: "pass" | "fail"
     reasoning: string
     violated_criteria: string[]
+    contract_conflicts?: unknown
 }
 
 function isCodexVerdict(value: unknown): value is CodexVerdict {
@@ -91,7 +98,9 @@ function isCodexVerdict(value: unknown): value is CodexVerdict {
         return false
     }
     const candidate = value as Record<string, unknown>
-    const keys = Object.keys(candidate).sort()
+    const keys = Object.keys(candidate)
+        .filter((key) => key !== "contract_conflicts")
+        .sort()
     const exactKeys = ["reasoning", "verdict", "violated_criteria"]
     if (
         keys.length !== exactKeys.length ||

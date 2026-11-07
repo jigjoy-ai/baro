@@ -88,7 +88,14 @@ surfaces ("all controllers", "every module") belongs to the story that
 implements the cross-cutting verification artifact (the coverage/spec story),
 never to one surface's implementer — demanding whole-set evidence from a
 single-surface story forces its agent outside its declared write surface and
-into siblings' files.
+into siblings' files. That cross-cutting rule is for obligations that only
+verify (run, inspect, measure) other stories' surfaces. An obligation that
+requires content in specific files — what they define, how they are written,
+what they assert — belongs to the story that writes those files, never to a
+documentation or verification story whose write surface excludes them; a
+documentation story owns only obligations about the documentation it writes.
+If such an obligation names files that several stories write, give it to one
+story whose write surface includes all of them.
 
 For every run, do NOT create a final verification-only story whose job is to
 run tests, typecheck, build, or lint after the

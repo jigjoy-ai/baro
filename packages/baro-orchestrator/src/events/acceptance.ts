@@ -29,6 +29,16 @@ export interface CritiqueData {
     /** Present when the sole blocker is evidence the agent invalidated by
      * editing after it ran these commands — repairable by another turn. */
     staleCommands?: readonly string[]
+    /** Criteria this story cannot meet as written (outside its write surface,
+     * or contradicting another of its criteria). They are not violations;
+     * Baro moves them to a follow-up story. */
+    contractConflicts?: readonly ContractConflictData[]
+}
+
+export interface ContractConflictData {
+    criterion: string
+    reason: string
+    kind: "outside_write_surface" | "contradiction"
 }
 
 export const Critique = defineSemanticEvent<CritiqueData>("critique")
@@ -42,6 +52,7 @@ export interface StoryQualityCritiqueSnapshot {
     modelUsed: string
     /** Stable repository identity carried from the authoritative Critic. */
     repositoryFingerprint?: string
+    contractConflicts?: readonly ContractConflictData[]
 }
 
 export interface StoryQualityCompletedData {

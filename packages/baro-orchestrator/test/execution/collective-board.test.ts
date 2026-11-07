@@ -1315,6 +1315,96 @@ describe("CollectiveBoard", () => {
         })
     })
 
+    it("moves criteria a passed story could not meet into a story of their own after it merges", async () => {
+        await withTempDir("collective-contract-transfer-", async (dir) => {
+            const prdPath = join(dir, "prd.json")
+            const readme = "README.md documents both modules"
+            const suites = "both test suites use assert.deepStrictEqual"
+            const base = prd()
+            base.userStories[0] = { ...base.userStories[0]!, acceptance: [readme, suites], tests: ["npm test"] }
+            writeFileSync(prdPath, JSON.stringify(base, null, 2) + "\n")
+            const qualityGate = source("quality-gate")
+            const board = new CollectiveBoard({
+                runId: "run-transfer",
+                prdPath,
+                cwd: dir,
+                timeoutSecs: 60,
+                expectQualityDecisions: true,
+                qualityAuthority: qualityGate,
+            })
+            const env = joinWithCapture(board)
+            env.publish(source("operator"), RunStartRequest.create({ reason: "test" }))
+            env.publish(source("repo"), RunPrepared.create({ runId: "run-transfer", baseSha: null }))
+            await provideContext(env, "run-transfer", 1)
+            const offer = await waitFor(env.events, WorkOffered.is)
+            env.publish(
+                source("broker"),
+                WorkLeaseGranted.create({
+                    runId: "run-transfer",
+                    offerId: offer.payload.offerId,
+                    leaseId: "lease-transfer",
+                    workerId: "worker",
+                    generation: offer.payload.generation,
+                    request: offer.payload.request,
+                }),
+            )
+            env.publish(source("S1"), pass("run-transfer", "S1", "lease-transfer", offer.payload.generation))
+            await flush()
+            env.publish(
+                qualityGate,
+                StoryQualityCompleted.create({
+                    runId: "run-transfer",
+                    evaluationId: "quality-transfer",
+                    storyId: "S1",
+                    leaseId: "lease-transfer",
+                    generation: offer.payload.generation,
+                    status: "passed",
+                    targetTurn: 1,
+                    reason: "README criteria passed",
+                    critique: {
+                        verdict: "pass",
+                        reasoning: "README criteria passed",
+                        violatedCriteria: [],
+                        turn: 1,
+                        modelUsed: "critic-test",
+                        contractConflicts: [
+                            { criterion: suites, reason: "lib/export.test.mjs is outside the write surface", kind: "outside_write_surface" },
+                            { criterion: readme, reason: "contradicts the suites rule", kind: "contradiction" },
+                        ],
+                    },
+                }),
+            )
+            await waitFor(env.events, StoryIntegrationRequested.is)
+            assert.equal(env.events.some(RuntimeReplanApplied.is), false, "nothing moves before S1 merges")
+
+            env.publish(
+                source("repo"),
+                StoryMerged.create({ storyId: "S1", mode: "worktree", runId: "run-transfer", leaseId: "lease-transfer" }),
+            )
+            const applied = await waitFor(env.events, RuntimeReplanApplied.is)
+            const [added] = applied.payload.mutation.addedStories
+            assert.match(added!.id, /^XFER-[0-9a-f]{12}$/)
+            assert.deepEqual(added!.acceptance, [suites], "a contradiction is never moved")
+            assert.deepEqual(added!.dependsOn, [])
+            assert.deepEqual(added!.tests, ["npm test"])
+            assert.equal(added!.writes, undefined, "the follow-up may change whichever files it needs")
+            assert.match(added!.description, /outside the write surface/)
+            assert.match(applied.payload.reason, /contract transfer from S1/)
+
+            await provideContext(env, "run-transfer", 2)
+            const followUp = await waitFor(
+                env.events,
+                (event): event is ReturnType<typeof WorkOffered.create> =>
+                    WorkOffered.is(event) && event.payload.request.storyId === added!.id,
+            )
+            assert.equal(followUp.payload.request.storyId, added!.id)
+            assert.equal(env.events.some(RunPushRequested.is), false, "the run is not done while the moved criteria are open")
+            const saved = JSON.parse(readFileSync(prdPath, "utf8")) as PrdFile
+            assert.equal(saved.userStories.find(({ id }) => id === "S1")?.passes, true)
+            assert.deepEqual(saved.userStories.find(({ id }) => id === added!.id)?.acceptance, [suites])
+        })
+    })
+
     it("turns a failed acceptance verdict into a bounded recovery wave", async () => {
         await withTempDir("collective-quality-fail-", async (dir) => {
             const prdPath = join(dir, "prd.json")

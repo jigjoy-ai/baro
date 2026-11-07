@@ -104,6 +104,74 @@ describe("CriticCodex", () => {
         })
     })
 
+    it("passes a story whose only failures are criteria it cannot meet, and reports them", async () => {
+        await withTempDir("baro-critic-codex-conflict-", async (dir) => {
+            const tests = "both test suites use assert.deepStrictEqual"
+            const readme = "README.md documents both modules"
+            const critic = new CriticCodex({
+                targets: new Map([["agent-a", [readme, tests]]]),
+                codexBin: writeFakeCodex(dir, {
+                    verdict: {
+                        verdict: "fail",
+                        reasoning: "README is complete; the suites belong to other stories",
+                        violated_criteria: [tests],
+                        contract_conflicts: [
+                            { criterion: tests, kind: "outside_write_surface", reason: "lib/export.test.mjs is outside the write surface" },
+                            { criterion: "a criterion of some other story", kind: "contradiction", reason: "not this story's" },
+                        ],
+                    },
+                }),
+                timeoutMs: 60_000,
+            })
+            const env = joinWithCapture(critic)
+
+            await critic.onExternalEvent(source("runner"), resultEvent())
+            await critic.idle()
+
+            const [critique] = env.events.filter(Critique.is)
+            assert.equal(critique!.payload.status, "evaluated")
+            assert.equal(critique!.payload.verdict, "pass")
+            assert.deepEqual(critique!.payload.violatedCriteria, [])
+            assert.deepEqual(critique!.payload.contractConflicts, [
+                { criterion: tests, reason: "lib/export.test.mjs is outside the write surface", kind: "outside_write_surface" },
+            ])
+            assert.equal(env.events.filter(AgentTargetedMessage.is).length, 0)
+        })
+    })
+
+    it("keeps failing on real violations while reporting a conflict beside them", async () => {
+        await withTempDir("baro-critic-codex-conflict-fail-", async (dir) => {
+            const tests = "both test suites use assert.deepStrictEqual"
+            const readme = "README.md documents both modules"
+            const critic = new CriticCodex({
+                targets: new Map([["agent-a", [readme, tests]]]),
+                codexBin: writeFakeCodex(dir, {
+                    verdict: {
+                        verdict: "fail",
+                        reasoning: "README misses the validator",
+                        violated_criteria: [readme],
+                        contract_conflicts: [
+                            { criterion: tests, kind: "outside_write_surface", reason: "lib/export.test.mjs is outside the write surface" },
+                        ],
+                    },
+                }),
+                timeoutMs: 60_000,
+            })
+            const env = joinWithCapture(critic)
+
+            await critic.onExternalEvent(source("runner"), resultEvent())
+            await critic.idle()
+
+            const [critique] = env.events.filter(Critique.is)
+            assert.equal(critique!.payload.verdict, "fail")
+            assert.deepEqual(critique!.payload.violatedCriteria, [readme])
+            assert.equal(critique!.payload.contractConflicts?.[0]?.criterion, tests)
+            const [message] = env.events.filter(AgentTargetedMessage.is)
+            assert.match(message!.payload.text, /README\.md documents both modules/)
+            assert.doesNotMatch(message!.payload.text, /deepStrictEqual/)
+        })
+    })
+
     it("fails closed when the backend cannot start", async () => {
         await withTempDir("baro-critic-codex-missing-", async (dir) => {
             const critic = new CriticCodex({

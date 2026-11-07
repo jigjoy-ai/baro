@@ -367,6 +367,9 @@ export class CoordinationForwarder extends BusMember {
             reasoning: item.reasoning,
             violated: [...item.violatedCriteria],
             ...(item.staleCommands?.length ? { stale_commands: [...item.staleCommands] } : {}),
+            ...(item.contractConflicts?.length
+                ? { contract_conflicts: item.contractConflicts.map((conflict) => ({ ...conflict })) }
+                : {}),
         })
     }
 

@@ -56,6 +56,11 @@ import {
     extractVerdictJson,
 } from "../claude/critic.js"
 import {
+    applyContractConflicts,
+    parseContractConflicts,
+    type ContractConflict,
+} from "../../acceptance/critic-verdict.js"
+import {
     inconclusiveEvidenceVerdict,
     mergeSegmentVerdicts,
     prepareCriticEvaluation,
@@ -99,6 +104,7 @@ interface CriticOpenAIEvaluation {
     violatedCriteria: string[]
     /** Optional only so existing test/subclass overrides remain compatible. */
     telemetry?: CriticOpenAITelemetry
+    contractConflicts?: ContractConflict[]
 }
 
 interface CriticOpenAITelemetry {
@@ -197,12 +203,15 @@ export class CriticOpenAI extends BusMember {
                 this.opts.evidence,
             )
             const evaluation = preparation.status === "ready"
-                ? mergeSegmentVerdicts(
-                      await Promise.all(
-                          preparation.prompts.map((prompt) =>
-                              this.evaluate(prompt, agentId, turn, correlation),
+                ? applyContractConflicts(
+                      mergeSegmentVerdicts(
+                          await Promise.all(
+                              preparation.prompts.map((prompt) =>
+                                  this.evaluate(prompt, agentId, turn, correlation),
+                              ),
                           ),
                       ),
+                      criteria,
                   )
                 : inconclusiveEvidenceVerdict(preparation.issues)
             const { verdict, reasoning, violatedCriteria } = evaluation
@@ -239,6 +248,9 @@ export class CriticOpenAI extends BusMember {
                     : {}),
                 ...(preparation.staleCommands.length > 0
                     ? { staleCommands: preparation.staleCommands }
+                    : {}),
+                ...("contractConflicts" in evaluation && evaluation.contractConflicts?.length
+                    ? { contractConflicts: evaluation.contractConflicts }
                     : {}),
             })
             for (const env of this.getBuses()) {
@@ -400,7 +412,9 @@ export class CriticOpenAI extends BusMember {
                 verdict: "pass" | "fail"
                 reasoning: string
                 violated_criteria: string[]
+                contract_conflicts?: unknown
             }
+            const conflicts = parseContractConflicts(parsed.contract_conflicts)
             return {
                 status: "evaluated",
                 verdict: parsed.verdict === "pass" ? "pass" : "fail",
@@ -408,6 +422,7 @@ export class CriticOpenAI extends BusMember {
                 violatedCriteria: Array.isArray(parsed.violated_criteria)
                     ? parsed.violated_criteria
                     : [],
+                ...(conflicts.length > 0 ? { contractConflicts: conflicts } : {}),
                 telemetry,
             }
         } catch (err) {

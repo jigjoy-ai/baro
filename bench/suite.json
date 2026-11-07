@@ -29,6 +29,33 @@
       "fixture": "notes-api",
       "shape": "two features that both edit server.mjs",
       "goal": "Add two features to server.mjs, each with node:test tests in its own test file: (1) request logging that writes one line per request (method, path, status, duration in ms) to stderr, tested in test/logging.test.mjs; (2) a per-IP rate limit of 20 requests per 10 seconds that answers 429 with a Retry-After header, tested in test/rate-limit.test.mjs."
+    },
+    {
+      "id": "modules-then-docs",
+      "fixture": "notes-api",
+      "shape": "two modules with test-style rules, then a README story (catches content rules given to the docs story)",
+      "goal": "As separate parallel stories: (1) a lib/export.mjs module that turns a notes array into Markdown, with node:test tests; (2) a lib/validate.mjs module that validates a note body (non-empty text, max 500 chars), with node:test tests. After both, (3) document both modules in README.md."
+    },
+    {
+      "id": "shared-module-bug",
+      "fixture": "billing",
+      "shape": "two features failing through one shared module, plus regression tests",
+      "goal": "Invoice totals lose cents for some prices, and receipts print refunds wrong. Fix the bugs so every test in test/ passes, add tests that pin both fixes, and note in README.md how amounts are rounded."
+    },
+    {
+      "id": "python-cli",
+      "fixture": "empty",
+      "shape": "a stdlib Python CLI from scratch: storage, CLI, tests, packaging, docs",
+      "goal": "Build a small command-line expense tracker in Python (stdlib only): an `expenses` package with a SQLite-backed store (add, list by month, delete, monthly totals per category), a CLI using argparse (`python -m expenses add 12.5 food \"lunch\"`, `list --month 2026-11`, `summary --month 2026-11`, `delete <id>`), pytest tests for the store and for the CLI, a pyproject.toml declaring pytest as a test dependency, and a README with usage examples."
+    },
+    {
+      "id": "plugin-feature",
+      "repo": {
+        "path": "~/Projects/hermes-baro",
+        "commit": "d939715"
+      },
+      "shape": "a real repository (the hermes-baro plugin, 219 tests): a new tool across code, manifest, catalog, tests and docs",
+      "goal": "Add a baro_runs tool that lists the stored Baro runs (run id, goal, status, start and end time, and how many stories are in each state), newest first, with an optional limit. Register it like the other tools, including plugin.yaml and the catalog draft, cover it with pytest tests in the existing style, and document it in the README's Tools section."
     }
   ]
 }
