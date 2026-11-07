@@ -60,26 +60,56 @@ function getVersion() {
     return pkg.version
 }
 
-async function download(url, dest) {
+const IDLE_TIMEOUT_MS = 30_000
+const TOTAL_TIMEOUT_MS = 5 * 60_000
+const ATTEMPTS = 3
+
+// A stalled connection used to hang install forever after the old binary was
+// already gone; every attempt now has an idle and a total deadline.
+function download(url, dest) {
     return new Promise((resolve, reject) => {
-        const follow = (url) => {
-            https.get(url, { headers: { "User-Agent": "baro-cli" } }, (res) => {
+        let request
+        const deadline = setTimeout(() => {
+            if (request) request.destroy(new Error(`download exceeded ${TOTAL_TIMEOUT_MS / 1000}s`))
+        }, TOTAL_TIMEOUT_MS)
+        const fail = (err) => { clearTimeout(deadline); reject(err) }
+        const follow = (url, redirects) => {
+            request = https.get(url, { headers: { "User-Agent": "baro-cli" } }, (res) => {
                 if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-                    follow(res.headers.location)
+                    res.resume()
+                    if (redirects >= 5) return fail(new Error(`too many redirects from ${url}`))
+                    follow(res.headers.location, redirects + 1)
                     return
                 }
                 if (res.statusCode !== 200) {
-                    reject(new Error(`Download failed: ${res.statusCode} from ${url}`))
+                    res.resume()
+                    fail(new Error(`Download failed: ${res.statusCode} from ${url}`))
                     return
                 }
                 const file = fs.createWriteStream(dest)
                 res.pipe(file)
-                file.on("finish", () => { file.close(); resolve() })
-                file.on("error", reject)
-            }).on("error", reject)
+                res.on("error", fail)
+                file.on("finish", () => { clearTimeout(deadline); file.close(() => resolve()) })
+                file.on("error", fail)
+            })
+            request.setTimeout(IDLE_TIMEOUT_MS, () => request.destroy(new Error(`no data for ${IDLE_TIMEOUT_MS / 1000}s`)))
+            request.on("error", fail)
         }
-        follow(url)
+        follow(url, 0)
     })
+}
+
+async function downloadWithRetry(url, dest) {
+    for (let attempt = 1; ; attempt++) {
+        try {
+            return await download(url, dest)
+        } catch (err) {
+            try { fs.unlinkSync(dest) } catch {}
+            if (attempt >= ATTEMPTS) throw err
+            console.warn(`Download attempt ${attempt} failed (${err.message}); retrying...`)
+            await new Promise((r) => setTimeout(r, 2000 * attempt))
+        }
+    }
 }
 
 async function main() {
@@ -96,23 +126,25 @@ async function main() {
 
     fs.mkdirSync(BARO_HOME, { recursive: true })
 
-    // Clean up old binary. Windows cannot delete a running executable but can
-    // rename it, so an update started from baro itself moves it aside.
+    // Download beside the old binary first, so a failed download keeps it.
+    const partial = `${binaryPath}.download`
     try {
-        fs.unlinkSync(binaryPath)
-    } catch (err) {
-        if (err.code !== "ENOENT") {
-            const aside = `${binaryPath}.old`
-            try { fs.unlinkSync(aside) } catch {}
-            try { fs.renameSync(binaryPath, aside) } catch {}
-        }
-    }
-
-    try {
-        await download(url, binaryPath)
+        await downloadWithRetry(url, partial)
         if (process.platform !== "win32") {
-            fs.chmodSync(binaryPath, 0o755)
+            fs.chmodSync(partial, 0o755)
         }
+        // Windows cannot delete a running executable but can rename it, so an
+        // update started from baro itself moves it aside.
+        try {
+            fs.unlinkSync(binaryPath)
+        } catch (err) {
+            if (err.code !== "ENOENT") {
+                const aside = `${binaryPath}.old`
+                try { fs.unlinkSync(aside) } catch {}
+                try { fs.renameSync(binaryPath, aside) } catch {}
+            }
+        }
+        fs.renameSync(partial, binaryPath)
         console.log(`baro installed to ${BARO_HOME}`)
     } catch (err) {
         console.warn(`Warning: Could not download baro: ${err.message}`)

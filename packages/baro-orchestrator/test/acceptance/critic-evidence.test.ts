@@ -1138,6 +1138,58 @@ describe("Critic repository evidence", () => {
         })
     })
 
+    it("keeps test evidence fresh when only a commit or a read races its fingerprint", async () => {
+        // 79% of Critic rejections in the bench were tests that passed and were
+        // then discarded because the agent committed while the fingerprint ran.
+        const race = async (racing: string, hooks = false): Promise<string> => {
+            let block = ""
+            await withTempDir("baro-critic-fingerprint-commit-race-", async (repo) => {
+                git(repo, "init", "--quiet")
+                writeFileSync(join(repo, "feature.ts"), "export const value = 1\n")
+                git(repo, "add", "feature.ts")
+                git(repo, "-c", "user.name=Baro Test", "-c", "user.email=baro@example.invalid", "commit", "--quiet", "-m", "baseline")
+                const baseSha = git(repo, "rev-parse", "HEAD").trim()
+                writeFileSync(join(repo, "feature.ts"), "export const value = 2\n")
+                if (hooks) writeFileSync(join(repo, ".git", "hooks", "pre-commit"), "#!/bin/sh\nexit 0\n")
+
+                let releaseResolver!: () => void
+                const resolverGate = new Promise<void>((resolve) => { releaseResolver = resolve })
+                let signalResolverStarted!: () => void
+                const resolverStarted = new Promise<void>((resolve) => { signalResolverStarted = resolve })
+                let delayFirstResolution = true
+                const collector = new CriticCommandEvidenceCollector({
+                    resolveRepositoryTarget: async () => {
+                        if (delayFirstResolution) {
+                            delayFirstResolution = false
+                            signalResolverStarted()
+                            await resolverGate
+                        }
+                        return { cwd: repo, baseSha }
+                    },
+                })
+                collector.onExternalFunctionCall(source("agent-a"), FunctionCallItem.rehydrate({
+                    callId: "tests", name: "bash", args: JSON.stringify({ command: "npm test" }),
+                }))
+                collector.onExternalFunctionCallOutput(source("agent-a"), FunctionCallOutputItem.create("tests", "192 tests passed"))
+                await resolverStarted
+                collector.onExternalFunctionCall(source("agent-a"), FunctionCallItem.rehydrate({
+                    callId: "racing", name: "bash", args: JSON.stringify({ command: racing }),
+                }))
+                releaseResolver()
+                const snapshot = (await collector.snapshot("agent-a")) ?? ""
+                block = snapshot.split("\n\n").find((part) => part.includes("192 tests passed")) ?? ""
+            })
+            return block
+        }
+
+        const commit = "git add -A && git commit -m \"$(cat <<'EOF'\nAdd value; tests -> green\nEOF\n)\""
+        assert.match(await race(commit), /freshness: fresh: changed-content fingerprint/)
+        assert.match(await race("git status --short && git diff --stat"), /freshness: fresh/)
+        assert.match(await race(commit, true), /STALE\/UNVERIFIABLE: command fingerprint failed/)
+        assert.match(await race("npm test -- --watch=false"), /STALE\/UNVERIFIABLE: command fingerprint failed/)
+        assert.match(await race("git commit -m \"$(touch x)\""), /STALE\/UNVERIFIABLE: command fingerprint failed/)
+    })
+
     it("marks command evidence unverifiable when a configured repository fingerprint fails", async () => {
         const collector = new CriticCommandEvidenceCollector({
             resolveRepositoryTarget: () => ({
