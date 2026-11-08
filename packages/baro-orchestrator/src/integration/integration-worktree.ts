@@ -141,6 +141,7 @@ export class IntegrationWorktree {
                         return false
                     },
                 )
+                if (branchExists) await this.releaseStaleHolders(goalBranch)
                 await git(
                     branchExists
                         ? ["worktree", "add", integrationRoot, goalBranch]
@@ -276,6 +277,29 @@ export class IntegrationWorktree {
         } finally {
             release?.()
         }
+    }
+
+    /**
+     * A run that was stopped (baro_plan stops Baro once it has the plan) leaves
+     * its integration worktree holding the goal branch, and git refuses to
+     * check one branch out twice, so resuming that goal died. Only another
+     * run's `__run` worktree is removed; anything else holding the branch is
+     * the user's and stays, with git's own error.
+     */
+    private async releaseStaleHolders(goalBranch: string): Promise<void> {
+        const listing = await git(["worktree", "list", "--porcelain"], this.repoRoot)
+        const own = canonicalPath(this.integrationRoot)
+        for (const entry of listing.split(/\n\s*\n/u)) {
+            const lines = entry.split("\n")
+            const path = lines.find((line) => line.startsWith("worktree "))?.slice("worktree ".length)
+            const branch = lines.find((line) => line.startsWith("branch "))?.slice("branch ".length)
+            if (!path || branch !== `refs/heads/${goalBranch}`) continue
+            if (canonicalPath(path) === own || !isIntegrationWorktreeRoot(path)) continue
+            this.log(`[integration] releasing ${goalBranch} from a stopped run's worktree ${path}`)
+            await gitQuiet(["worktree", "remove", "--force", path], this.repoRoot)
+            if (existsSync(path)) rmSync(path, { recursive: true, force: true })
+        }
+        await git(["worktree", "prune"], this.repoRoot)
     }
 
     private async isRegistered(): Promise<boolean> {
