@@ -128,6 +128,8 @@ async function main() {
 
     // Download beside the old binary first, so a failed download keeps it.
     const partial = `${binaryPath}.download`
+    const hadBinary = fs.existsSync(binaryPath)
+    let downloaded = false
     try {
         await downloadWithRetry(url, partial)
         if (process.platform !== "win32") {
@@ -145,10 +147,21 @@ async function main() {
             }
         }
         fs.renameSync(partial, binaryPath)
+        downloaded = true
         console.log(`baro installed to ${BARO_HOME}`)
     } catch (err) {
         console.warn(`Warning: Could not download baro: ${err.message}`)
         console.warn(`  Build manually: cargo build --release -p baro-tui`)
+    }
+
+    // The old binary only runs with its own bundles: staging this release's
+    // next to it would leave a pair that refuses to start. Keep the whole old
+    // install instead, and say how to finish the update.
+    if (!downloaded && hadBinary) {
+        console.warn(`Warning: kept the installed baro unchanged; this release (${version}) is not installed.`)
+        console.warn(`  Retry when github.com is reachable: npm install -g baro-ai@${version} (or npm rebuild baro-ai)`)
+        wireMemoryDeps()
+        return
     }
 
     // Stage the bundled TS subprocess code alongside the binary so the
