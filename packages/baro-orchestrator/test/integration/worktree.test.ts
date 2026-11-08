@@ -1103,3 +1103,49 @@ describe("WorktreeManager — isolated integration tree", () => {
         assert.equal(git(integrationRoot, "branch", "--show-current"), "baro/goal")
     })
 })
+
+describe("IntegrationWorktree — resuming a stopped run", () => {
+    it("takes the goal branch back from a stopped run's integration worktree", async () => {
+        const repo = initRepo()
+        const gate = new GitGate()
+        const logs: string[] = []
+        git(repo, "branch", "baro/goal", "HEAD")
+        // baro_plan stops Baro once the plan is out; its worktree stays behind.
+        const stopped = await new IntegrationWorktree({
+            repoRoot: repo, gitGate: gate, runId: `stopped-${Date.now()}`, goalBranch: "baro/goal", push: false, onLog: () => {},
+        }).prepare()
+        try {
+            const resumed = await new IntegrationWorktree({
+                repoRoot: repo, gitGate: gate, runId: `resumed-${Date.now()}`, goalBranch: "baro/goal", push: false, onLog: (l) => logs.push(l),
+            }).prepare()
+            assert.equal(git(resumed.integrationRoot, "branch", "--show-current"), "baro/goal")
+            assert.equal(existsSync(stopped.integrationRoot), false)
+            assert.ok(logs.some((l) => l.includes("releasing baro/goal")))
+            rmSync(resumed.integrationRoot, { recursive: true, force: true })
+        } finally {
+            rmSync(stopped.integrationRoot, { recursive: true, force: true })
+            rmSync(repo, { recursive: true, force: true })
+        }
+    })
+
+    it("leaves a worktree the user made on the goal branch alone", async () => {
+        const repo = initRepo()
+        const gate = new GitGate()
+        git(repo, "branch", "baro/goal", "HEAD")
+        const mine = mkdtempSync(join(tmpdir(), "users-own-worktree-"))
+        rmSync(mine, { recursive: true, force: true })
+        git(repo, "worktree", "add", mine, "baro/goal")
+        try {
+            await assert.rejects(
+                new IntegrationWorktree({
+                    repoRoot: repo, gitGate: gate, runId: `resumed-${Date.now()}`, goalBranch: "baro/goal", push: false, onLog: () => {},
+                }).prepare(),
+                /already used by worktree|already checked out/,
+            )
+            assert.equal(existsSync(mine), true)
+        } finally {
+            rmSync(mine, { recursive: true, force: true })
+            rmSync(repo, { recursive: true, force: true })
+        }
+    })
+})
