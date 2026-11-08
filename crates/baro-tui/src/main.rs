@@ -123,6 +123,30 @@ fn preferred_jigjoy_gateway_url(
         .unwrap_or_else(|| JIGJOY_GATEWAY_URL.to_string())
 }
 
+const LOCAL_ENDPOINT_KEY: &str = "local-endpoint";
+
+/// True for an OpenAI-compatible base URL served from this machine.
+fn local_openai_endpoint(base_url: Option<&str>) -> bool {
+    let env_url = std::env::var("OPENAI_BASE_URL").ok();
+    let url = match base_url
+        .filter(|u| !u.is_empty())
+        .or(env_url.as_deref().filter(|u| !u.is_empty()))
+    {
+        Some(u) => u,
+        None => return false,
+    };
+    let rest = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+        .unwrap_or(url);
+    let host = if let Some(stripped) = rest.strip_prefix('[') {
+        stripped.split(']').next().unwrap_or("")
+    } else {
+        rest.split(['/', ':']).next().unwrap_or("")
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "::1") || host.ends_with(".localhost")
+}
+
 fn reconcile_jigjoy_phase_overrides(
     app: &mut App,
     architect_model_explicit: bool,
@@ -1296,7 +1320,10 @@ async fn run_app(
         }
     }
 
-    if app.llm == app::LlmProvider::OpenAI && std::env::var("OPENAI_API_KEY").is_err() {
+    if app.llm == app::LlmProvider::OpenAI
+        && std::env::var("OPENAI_API_KEY").is_err()
+        && !local_openai_endpoint(cli.openai_base_url.as_deref())
+    {
         eprintln!(
             "[baro] WARNING: --llm openai requested but OPENAI_API_KEY is not set. \
              Interactive mode will request it before the first turn; \
@@ -1447,6 +1474,12 @@ async fn run_app(
         if !env_url.is_empty() {
             app.openai_base_url = Some(env_url);
         }
+    }
+    // A proxy on this machine (the Hermes subscription proxy) attaches its own
+    // credential and ignores the bearer; the SDK still needs one to send.
+    if app.openai_api_key.is_none() && local_openai_endpoint(app.openai_base_url.as_deref()) {
+        app.openai_api_key = Some(LOCAL_ENDPOINT_KEY.to_string());
+        std::env::set_var("OPENAI_API_KEY", LOCAL_ENDPOINT_KEY);
     }
 
     // An explicit new goal wins over an unfinished local intake. Interactive
@@ -4979,6 +5012,21 @@ fn message_command_line(id: &str, text: &str, message_id: Option<&str>) -> Strin
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_proxy_on_this_machine_needs_no_openai_key() {
+        for url in [
+            "http://127.0.0.1:8645/v1",
+            "http://localhost:8645/v1",
+            "http://[::1]:8645/v1",
+            "https://proxy.localhost/v1",
+        ] {
+            assert!(super::local_openai_endpoint(Some(url)), "{url}");
+        }
+        for url in ["https://api.openai.com/v1", "https://127.0.0.1.example.com/v1", "https://openrouter.ai/api/v1"] {
+            assert!(!super::local_openai_endpoint(Some(url)), "{url}");
+        }
+    }
+
     #[test]
     fn update_check_skips_headless_and_ci_runs() {
         assert!(super::update_check_enabled(false, false));
