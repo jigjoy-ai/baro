@@ -1382,6 +1382,31 @@ async fn run_app(
         // the existing branch; the environment flag is not branch authority.
         std::env::set_var("BARO_CONTINUE", "1");
     }
+    // Pre-fill OpenAI key/base URL from env BEFORE resume and the goal
+    // branching: a CLI-goal run skips the ApiKeyInput screen, and a headless
+    // resume starts execution right below, so this is their only chance.
+    // Filled after resume, a resumed run's stories ran without the base URL
+    // and went to api.openai.com.
+    if let Ok(env_key) = std::env::var("OPENAI_API_KEY") {
+        if !env_key.is_empty() {
+            app.openai_api_key = Some(env_key);
+        }
+    }
+    // --openai-base-url flag wins over the env var when both are set.
+    if let Some(ref url) = cli.openai_base_url {
+        app.openai_base_url = Some(url.clone());
+    } else if let Ok(env_url) = std::env::var("OPENAI_BASE_URL") {
+        if !env_url.is_empty() {
+            app.openai_base_url = Some(env_url);
+        }
+    }
+    // A proxy on this machine (the Hermes subscription proxy) attaches its own
+    // credential and ignores the bearer; the SDK still needs one to send.
+    if app.openai_api_key.is_none() && local_openai_endpoint(app.openai_base_url.as_deref()) {
+        app.openai_api_key = Some(LOCAL_ENDPOINT_KEY.to_string());
+        std::env::set_var("OPENAI_API_KEY", LOCAL_ENDPOINT_KEY);
+    }
+
     let mut entered_resume = false;
     // The operator has no run of its own to resume; a prd.json here belongs to
     // a run it delegated (or one killed midway, whose branch may be gone).
@@ -1457,29 +1482,6 @@ async fn run_app(
             }
             Err(_) => {}
         }
-    }
-
-    // Pre-fill OpenAI key/base URL from env BEFORE the goal branching —
-    // a CLI-goal run skips the ApiKeyInput screen, so this is its only
-    // chance to pick up OPENAI_API_KEY.
-    if let Ok(env_key) = std::env::var("OPENAI_API_KEY") {
-        if !env_key.is_empty() {
-            app.openai_api_key = Some(env_key);
-        }
-    }
-    // --openai-base-url flag wins over the env var when both are set.
-    if let Some(ref url) = cli.openai_base_url {
-        app.openai_base_url = Some(url.clone());
-    } else if let Ok(env_url) = std::env::var("OPENAI_BASE_URL") {
-        if !env_url.is_empty() {
-            app.openai_base_url = Some(env_url);
-        }
-    }
-    // A proxy on this machine (the Hermes subscription proxy) attaches its own
-    // credential and ignores the bearer; the SDK still needs one to send.
-    if app.openai_api_key.is_none() && local_openai_endpoint(app.openai_base_url.as_deref()) {
-        app.openai_api_key = Some(LOCAL_ENDPOINT_KEY.to_string());
-        std::env::set_var("OPENAI_API_KEY", LOCAL_ENDPOINT_KEY);
     }
 
     // An explicit new goal wins over an unfinished local intake. Interactive
