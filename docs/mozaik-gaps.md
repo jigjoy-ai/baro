@@ -82,19 +82,69 @@ retries (a retry would be billed twice through the gateway) and so it can stream
 and set transport options. *Mozaik could:* let the caller supply the client or its
 retry and transport policy per endpoint.
 
+## The agent loop
+
+Baro does not use Mozaik's `runLoop`: the native lane has its own loop
+(`harness/openai/story-agent.ts`) and the Claude lane wraps the Claude Code CLI
+as a participant (`harness/claude/cli-participant.ts`). These are the reasons, read
+from `@mozaik-ai/core@4.2.0`.
+
+**11. One tool call per inference** — `harness/openai/story-agent.ts`,
+`harness/openai/runtime.ts` (`withParallelToolCalls`).
+`runLoop` executes the first `function_call` of a reply and drops the rest, and
+puts only that call and its output back into the context, so reasoning items are
+lost between rounds. Baro asks the provider for parallel calls, runs every call of
+a round (read-only ones concurrently), and keeps reasoning in the context.
+*Mozaik could:* run all calls of a reply, concurrently where the tool declares it
+safe, and append every inference item to the context.
+
+**12. Forking a context** — `harness/session-lineage.ts`.
+`ModelContext` is mutated in place and has no copy. A story that builds on another
+story starts from that story's context (native lane: the parent's items up to its
+last completed round; Claude lane: `claude --resume <id> --fork-session`), so it
+does not re-read what its parent studied, and the provider's prompt cache serves
+the shared prefix. *Mozaik could:* offer `context.fork()` at a consistent point (no
+call without its output) and a fork of a running agent as a runtime operation.
+
+**13. Cache hints** — not worked around.
+The Anthropic and OpenAI mappers send no `cache_control` or `prompt_cache_key`.
+Baro's native lane relies on OpenAI's automatic prefix cache; a native Anthropic
+lane would pay for the whole context on every round. *Mozaik could:* mark the
+stable prefix for providers that need it.
+
+**14. Cancellation, retries, messages between rounds** —
+`harness/openai/story-agent.ts` (`abortController`, `runRoundWithTransportRetries`,
+`pendingPeerNotes`). `runLoop` takes no abort signal, has no retry or timeout, and
+no place to hand an agent a peer's message between two rounds short of writing an
+`InterceptionHandler`. Baro's loop has all three. *Mozaik could:* accept a signal,
+a retry policy, and an inbox drained at round boundaries.
+
+**15. Agents whose loop runs elsewhere** — `harness/claude/`, `harness/codex/`,
+`harness/opencode/`, `harness/pi/`, `harness/devin/`.
+A participant is an `agent` or a `human`; Baro wraps CLI agents as bus members and
+maps their output to context items itself. *Mozaik could:* define a session
+interface (send a message, observe items, fork, stop) with the native loop as one
+implementation and an external agent as another.
+
 ## Coordination features Baro built itself
 
 These are not workarounds but candidates for Mozaik, because any multi-agent
 runtime with shared resources needs them:
 
-**11. Resource ownership and claims** — `execution/write-surface.ts`,
+**16. Resource ownership and claims** — `execution/write-surface.ts`,
 `execution/collective-board.ts` (`claimPaths`). Agents declare and claim the
 resources (files) they write; a resource another active agent holds is refused,
 and ownership is released when the holder finishes.
 
-**12. Checkpoints and early start** — `execution/collective-board.ts`
+**17. Checkpoints and early start** — `execution/collective-board.ts`
 (`onCheckpointRequested`, `holdForPrerequisites`). A running agent publishes a
 stable part of its work; dependents start on it and finish only after it does.
 A Mozaik primitive for "this participant's partial output is ready for these
 dependents" would let other Mozaik applications coordinate dependent work the
 same way.
+
+**18. Delegate and join** — `execution/collective-board.ts`
+(`sessionSourceFor`, `splitSelfDependency`), `harness/session-lineage.ts`.
+An agent adds stories for independent parts of its task and makes them its own
+prerequisites; they run in parallel as forks of its session, and it is resumed in
+that session when they have integrated.

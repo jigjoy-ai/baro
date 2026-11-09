@@ -333,6 +333,32 @@ contract, a fixed `--mode`, `--confirm-mode`, or
 `BARO_ARCHITECT_FAST_PATH=0` keeps the Architect. In `bench/`, a one-route
 goal went from 231 s and $0.64 to 146 s and $0.18.
 
+## Session inheritance
+
+A story does not have to start cold. When the Board offers a story it names
+whose session the agent starts from (`sessionSource` on the spawn request):
+
+- a story resumed after suspending on its prerequisites continues its own
+  session (`continue`);
+- otherwise it forks the story it builds on: the checkpoint it starts from,
+  the agent that proposed it, or its only prerequisite (`fork`).
+
+The factory resolves that against the run's session ledger. The Claude lane
+starts the process with `--resume <id>` (plus `--fork-session` for a fork); the
+native lane starts from the parent's context items. Other lanes, a parent on a
+different lane, a session over `BARO_SESSION_FORK_MAX_TOKENS` (default
+120000), or a session that cannot be resumed start cold, and the story log
+says why (`[session] ...`). Only the first attempt inherits; a resume that
+fails is rerun cold without using a retry. `BARO_SESSION_FORK=0` turns
+inheritance off.
+
+A run with a single story (`--quick`, or the Architect fast path) tells that
+story it may split the goal: one replan adds a story per independent part and
+makes them its prerequisites, the parts run in parallel as forks of its
+session, and it is resumed in that session to connect and verify them. At most
+three stories can be added this way (`maxDynamicStories`). `BARO_LEAD_SPLIT=0`
+removes the instruction.
+
 ## Progressive planning (experimental opt-in)
 
 Progressive planning removes the complete-plan startup barrier for one narrow
