@@ -3282,6 +3282,11 @@ export class CollectiveBoard extends SerializedObserver {
                 ...(surface ? { surface } : {}),
                 ...(checkpointBase.length > 0 ? { checkpointBase } : {}),
                 ...(sessionSource ? { sessionSource } : {}),
+                ...(!recovery &&
+                this.prd?.userStories.length === 1 &&
+                (this.opts.maxDynamicStories ?? 3) > 0
+                    ? { mayDelegate: true }
+                    : {}),
                 ...(recovery ? { recovery } : {}),
                 // A host-suspended or unjudged story re-bases through the
                 // host-owned step rather than starting from a fresh worktree

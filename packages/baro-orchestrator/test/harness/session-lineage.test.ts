@@ -9,6 +9,8 @@ import { mainThreadRequestTokens } from "../../src/harness/claude/cli-participan
 import { OpenAIStoryAgent } from "../../src/harness/openai/story-agent.js"
 import {
     SessionLedger,
+    delegationEnabled,
+    delegationInstructions,
     inheritancePreamble,
     resolveInheritance,
     type SessionInheritance,
@@ -76,6 +78,20 @@ describe("which session a story starts from", () => {
         const resumed = inheritancePreamble({ mode: "continue", fromStoryId: "S2", parentCwd: "/wt/S2" }, "S2", "/wt/S2")
         assert.match(resumed, /You are resuming story S2/)
         assert.match(resumed, /re-based onto the run branch/)
+    })
+
+    it("tells a lone story how to hand parts to forks and wait for them", () => {
+        const text = delegationInstructions("S1", 3)
+        assert.match(text, /split it if it has independent parts/)
+        // One replan both adds the parts and suspends the lead on them.
+        assert.match(text, /"modifiedDeps":\{"S1":\["S2"\]\}/)
+        assert.match(text, /at most 3; ids S2, S3/)
+        assert.match(text, /resumed in this same session/)
+        assert.match(text, /starts as a fork of your session/)
+        assert.match(text, /Do not split a small task/)
+        assert.equal(delegationEnabled({}), true)
+        assert.equal(delegationEnabled({ BARO_LEAD_SPLIT: "0" }), false)
+        assert.equal(delegationEnabled({ BARO_SESSION_FORK: "0" }), false)
     })
 
     it("measures a session by its main thread's last request", () => {

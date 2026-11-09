@@ -95,6 +95,12 @@ export function createRuntimeReplanTool(graphVersion: number): Tool {
                                 items: { type: "string" },
                             },
                             model: { type: "string" },
+                            writes: {
+                                type: "array",
+                                items: { type: "string" },
+                                description:
+                                    "Repository-relative files this story owns; stories running in parallel must not share any.",
+                            },
                             goalInvariantIds: {
                                 type: "array",
                                 items: { type: "string" },

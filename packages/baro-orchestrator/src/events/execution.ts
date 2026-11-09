@@ -226,6 +226,9 @@ export interface StorySpawnRequestData {
     checkpointBase?: ReadonlyArray<{ readonly storyId: string; readonly sha: string }>
     /** Whose session this story's agent starts from (harness/session-lineage.ts). */
     sessionSource?: StorySessionSource
+    /** The run's only story: nobody divided the goal, so it may hand
+     * independent parts to stories it adds and resume when they integrate. */
+    mayDelegate?: boolean
     /** Present only on a re-offer of a host-suspended or unjudged story: the
      * spawn must go through the host-owned resume step so the recorded
      * creation SHA moves with the re-base instead of staying on a stale one. */

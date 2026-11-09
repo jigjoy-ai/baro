@@ -151,3 +151,52 @@ export function inheritancePreamble(
         `differ from what ${inherit.fromStoryId} last saw: check with git before relying on a line number.`,
     ].join("\n")
 }
+
+export function delegationEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+    return sessionForkEnabled(env) && env.BARO_LEAD_SPLIT !== "0"
+}
+
+/**
+ * Told to a run's only story. The parts run in parallel as forks of its
+ * session; it is suspended on them and resumed, in that session, to join.
+ */
+export function delegationInstructions(storyId: string, maxParts: number): string {
+    const example = JSON.stringify({
+        addedStories: [
+            {
+                id: "S2",
+                priority: 1,
+                title: "…",
+                description: "the part's task",
+                dependsOn: [],
+                acceptance: ["…"],
+                tests: [],
+                writes: ["src/a.ts", "test/a.test.ts"],
+            },
+        ],
+        removedStoryIds: [],
+        modifiedDeps: { [storyId]: ["S2"] },
+    })
+    return [
+        "## You hold the whole goal: split it if it has independent parts",
+        "",
+        "No one divided this work into stories; you are its only agent. Explore first. If the goal then",
+        "has two or more parts that touch different files and are each substantial, hand those parts",
+        "to parallel agents instead of doing them one after another:",
+        "",
+        `1. With ONE replan (the replan command above, or the propose_replan tool), add a story for each part`,
+        `   (at most ${maxParts}; ids S2, S3, …) and`,
+        "   make them your prerequisites by setting `modifiedDeps` for your own id to their ids:",
+        `   ${example}`,
+        "   Give each part only the files it owns in `writes`; parts must not share files. If one part",
+        "   must come first, make the others depend on it.",
+        "2. Once the replan is applied, stop: leave nothing half-done and end your session without",
+        "   claiming completion. The parts run in parallel.",
+        "3. You are resumed in this same session when they have integrated, with their work in your",
+        "   worktree. Connect the parts, verify the whole goal, and finish.",
+        "",
+        "Each added story starts as a fork of your session: it already knows everything you have read",
+        "and decided, so write only its task and acceptance. Do not split a small task, a change to one",
+        "or two files, or parts that must edit the same files: do that work yourself.",
+    ].join("\n")
+}

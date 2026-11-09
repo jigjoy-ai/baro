@@ -9,7 +9,12 @@ import {
 } from "../runtime/mozaik.js"
 
 import { SPAWN_GATES, announceGates } from "../execution/gate-registry.js"
-import { SessionLedger, resolveInheritance } from "../harness/session-lineage.js"
+import {
+    SessionLedger,
+    delegationEnabled,
+    delegationInstructions,
+    resolveInheritance,
+} from "../harness/session-lineage.js"
 import { emit } from "../tui-protocol.js"
 import { CoordinationBus, BusMember } from "../runtime/coordination.js"
 import type { GatewayBillingCoordinator } from "../telemetry/billing/index.js"
@@ -1025,6 +1030,15 @@ export class StoryFactory extends BusMember {
                                     `--endpoint ${JSON.stringify(collaboration.endpoint)} ` +
                                         `--token ${JSON.stringify(collaboration.token)}`,
                                 ),
+                                // Needs both halves: a way to add stories and a way to wait for them.
+                                req.mayDelegate &&
+                                req.graphVersion !== undefined &&
+                                this.opts.worktrees !== undefined &&
+                                this.supportsCooperativeSuspend(route) &&
+                                (route.backend === "claude" || route.backend === "openai") &&
+                                delegationEnabled()
+                                    ? delegationInstructions(req.storyId, 3)
+                                    : "",
                             ]
                           : []),
                   ].filter(Boolean).join("\n\n"),
