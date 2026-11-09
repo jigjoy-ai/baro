@@ -44,14 +44,9 @@ export function storyPackageCache(
 }
 
 /**
- * One cargo target dir per repository, shared by every story of every run.
- * A story worktree is a fresh checkout, so cargo's default target/ inside it
- * starts empty and each story rebuilt every dependency from scratch (a Rust
- * workspace spent minutes per story before its first test ran). Cargo keys
- * artifacts by package source, so stories in different worktrees reuse the
- * registry dependencies and keep their own workspace crates apart; concurrent
- * builds take cargo's own build-dir lock. It lives under the package cache,
- * which the story sandboxes may already write.
+ * One cargo target dir per repository for all stories: a fresh worktree's own
+ * target/ made every story rebuild all dependencies. Cargo keys artifacts by
+ * source path and locks the dir, so sharing is safe across worktrees.
  */
 export function storyCargoTargetDir(cacheRoot: string, worktreeRoot: string): string {
     const repository = gitSandboxPaths(worktreeRoot).commonWorktreeRoot ?? worktreeRoot
