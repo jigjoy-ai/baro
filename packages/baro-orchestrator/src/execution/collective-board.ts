@@ -3282,8 +3282,11 @@ export class CollectiveBoard extends SerializedObserver {
                 ...(surface ? { surface } : {}),
                 ...(checkpointBase.length > 0 ? { checkpointBase } : {}),
                 ...(sessionSource ? { sessionSource } : {}),
+                // "focused" is the planner's contract for one story; a lone
+                // first fragment of an open plan is not that.
                 ...(!recovery &&
-                this.prd?.userStories.length === 1 &&
+                this.prd?.executionMode?.mode === "focused" &&
+                this.prd.userStories.length === 1 &&
                 (this.opts.maxDynamicStories ?? 3) > 0
                     ? { mayDelegate: true }
                     : {}),

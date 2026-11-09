@@ -90,6 +90,17 @@ describe("CollectiveBoard checkpoints", () => {
             assert.equal(lead.request.mayDelegate, true)
             assert.equal(lead.request.sessionSource, undefined)
             await board.idle()
+        }, {
+            ...checkpointPrd(),
+            executionMode: { mode: "focused", source: "user", reason: "quick" },
+            userStories: [story("S1", [], ["src/a.ts"])],
+        } as PrdFile)
+    })
+
+    it("does not offer that to the first story of a plan that is not focused", async () => {
+        await withBoard(async (env, board) => {
+            assert.equal((await leaseStory(env, "S1", 1)).request.mayDelegate, undefined)
+            await board.idle()
         }, { ...checkpointPrd(), userStories: [story("S1", [], ["src/a.ts"])] })
     })
 
