@@ -67,11 +67,20 @@ describe("scopeCommandsToChange", () => {
         })
     })
 
+    it("runs everything rather than leave the gate with no suite at all", async () => {
+        await withTempDir("baro-scope-", async (root) => {
+            polyglot(root)
+            const docsOnly = scopeCommandsToChange([cargoTest, nodeTest, hygiene], ["NOTES.txt"], root, {})
+            assert.equal(docsOnly.run.length, 3)
+            assert.equal(docsOnly.notAffected.length, 0)
+        })
+    })
+
     it("always runs what a story declared and what it cannot classify", async () => {
         await withTempDir("baro-scope-", async (root) => {
             polyglot(root)
-            const scoped = scopeCommandsToChange([cargoTest, declaredJs, hygiene], ["packages/core/src/a.ts"], root, {})
-            assert.deepEqual(scoped.run.map((c) => c.label), ["declared", "git diff --check"])
+            const scoped = scopeCommandsToChange([cargoTest, nodeTest, declaredJs, hygiene], ["crates/tui/src/a.rs"], root, {})
+            assert.deepEqual(scoped.run.map((c) => c.label), ["cargo test", "declared", "git diff --check"])
         })
     })
 

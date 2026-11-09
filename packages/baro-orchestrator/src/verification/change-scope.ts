@@ -197,5 +197,10 @@ export function scopeCommandsToChange(
         if (ecosystem === null || affected.has(ecosystem)) run.push(command)
         else notAffected.push(command)
     }
+    // Narrow only to a gate that still checks something: a docs-only change
+    // that ran no suite would read as an unverified run.
+    if (!run.some((command) => commandEcosystem(command) !== null)) {
+        return { run: commands, notAffected: [] }
+    }
     return { run, notAffected }
 }
