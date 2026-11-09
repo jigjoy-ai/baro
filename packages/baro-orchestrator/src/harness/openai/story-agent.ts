@@ -60,6 +60,7 @@ import {
 import { acceptsTargetedMessage } from "../../runtime/targeted-message-authority.js"
 import { correlationOf, type StoryOutcome, type StorySpec } from "../story-contract.js"
 import { inheritancePreamble } from "../session-lineage.js"
+import { isReadOnlyTool } from "../tool-classification.js"
 import { pickInferenceModel as pickModel } from "../mozaik/pick-model.js"
 import { invokeTool, runBoundedRound } from "../mozaik/round.js"
 import {
@@ -1050,7 +1051,26 @@ export class OpenAIStoryAgent extends BusMember {
                     status === "timed_out" ||
                     status === "cancelled"
             }
-            for (const call of ordinaryCalls) {
+            // A model that asks for several reads at once gets them at once;
+            // anything that can write keeps the provider's order.
+            const concurrentReads =
+                toolsAllowed &&
+                ordinaryToolsAllowed &&
+                ordinaryCalls.length > 1 &&
+                ordinaryCalls.every((call) => isReadOnlyTool(call.name))
+            if (concurrentReads) {
+                const results = await Promise.all(
+                    ordinaryCalls.map((call) =>
+                        this.abortController.signal.aborted
+                            ? this.cancelledToolOutput()
+                            : this.withAbort(this.runOrdinaryTool(call)).catch(() =>
+                                  this.cancelledToolOutput(),
+                              ),
+                    ),
+                )
+                ordinaryCalls.forEach((call, index) => outputs.set(call.callId, results[index]!))
+            }
+            for (const call of concurrentReads ? [] : ordinaryCalls) {
                 let output: string
                 if (!toolsAllowed) {
                     output = finalizationToolOutput(call.name)

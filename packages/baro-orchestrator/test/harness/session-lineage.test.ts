@@ -15,6 +15,7 @@ import {
     resolveInheritance,
     type SessionInheritance,
 } from "../../src/harness/session-lineage.js"
+import { isReadOnlyTool } from "../../src/harness/tool-classification.js"
 import { captureEnv, FIXTURE_TIMEOUT_SECS, withTempDir } from "../execution/helpers.js"
 import { streamRequested, streamedCompletion } from "./openai/fake-completion.js"
 
@@ -254,16 +255,65 @@ describe("a native story that inherits a session", () => {
     })
 })
 
-async function recordingServer(bodies: unknown[]): Promise<Server> {
+describe("a native round that asks for several reads", () => {
+    it("runs them together and returns each output to its own call, in the provider's order", async () => {
+        await withTempDir("native-reads-", async (dir) => {
+            const cwd = join(dir, "cwd")
+            mkdirSync(cwd)
+            writeFileSync(join(cwd, "a.txt"), "ALPHA")
+            writeFileSync(join(cwd, "b.txt"), "BRAVO")
+            const bodies: Array<{ messages: Array<{ role: string; content?: unknown; tool_call_id?: string }> }> = []
+            const toolRound = [
+                { choices: [{ index: 0, delta: { role: "assistant", tool_calls: [
+                    { index: 0, id: "call_a", type: "function", function: { name: "read_file", arguments: '{"path":"a.txt"}' } },
+                    { index: 1, id: "call_b", type: "function", function: { name: "read_file", arguments: '{"path":"b.txt"}' } },
+                ] }, finish_reason: null }] },
+                { choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] },
+                { choices: [], usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 } },
+            ]
+            const server = await recordingServer(bodies, (index) => (index === 0 ? toolRound : null))
+            try {
+                const address = server.address()
+                const port = typeof address === "object" && address ? address.port : 0
+                const outcome = await new OpenAIStoryAgent(
+                    { id: "S1", prompt: "read both", cwd, retries: 0, quietTimeoutMs: 5, maxTurns: 1 },
+                    { model: "fake-model", baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: "k", maxRoundsPerTurn: 3, perRoundTimeoutSecs: 5 },
+                ).run(captureEnv())
+                assert.equal(outcome.success, true, outcome.error ?? "")
+                const outputs = bodies[1]!.messages.filter((message) => message.role === "tool")
+                assert.deepEqual(outputs.map((message) => message.tool_call_id), ["call_a", "call_b"])
+                assert.match(JSON.stringify(outputs[0]!.content), /ALPHA/)
+                assert.match(JSON.stringify(outputs[1]!.content), /BRAVO/)
+            } finally {
+                await new Promise<void>((resolve) => server.close(() => resolve()))
+            }
+        })
+    })
+
+    it("treats only tools that change nothing as safe to run together", () => {
+        for (const name of ["read_file", "read_files", "grep", "glob", "list_files", "file_tree", "Read", "Grep"]) {
+            assert.equal(isReadOnlyTool(name), true, name)
+        }
+        for (const name of ["bash", "write_file", "edit_file", "Write", "batch", "propose_replan"]) {
+            assert.equal(isReadOnlyTool(name), false, name)
+        }
+    })
+})
+
+async function recordingServer(
+    bodies: unknown[],
+    scripted: (index: number) => unknown[] | null = () => null,
+): Promise<Server> {
     const usage = { prompt_tokens: 1200, completion_tokens: 2, total_tokens: 1202 }
     const server = createServer((req, res) => {
         let body = ""
         req.on("data", (chunk: Buffer) => (body += chunk.toString("utf8")))
         req.on("end", () => {
             bodies.push(JSON.parse(body))
+            const chunks = scripted(bodies.length - 1)
             if (streamRequested(body)) {
                 res.writeHead(200, { "content-type": "text/event-stream" })
-                for (const chunk of streamedCompletion("story complete", usage)) {
+                for (const chunk of chunks ?? streamedCompletion("story complete", usage)) {
                     res.write(`data: ${JSON.stringify(chunk)}\n\n`)
                 }
                 res.end("data: [DONE]\n\n")
