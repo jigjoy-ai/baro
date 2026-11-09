@@ -30,6 +30,7 @@ import {
     prepareCriticEvaluation,
     type CriticEvidenceSource,
 } from "../../acceptance/critic-evidence.js"
+import { CriterionLedger, honorEstablished } from "../../acceptance/criterion-ledger.js"
 import { withIsolatedCriticCwd } from "../critic-cli-isolation.js"
 import { criticInput, criticReplayKey } from "../../acceptance/critic-input.js"
 import { drainCriticPending } from "../../acceptance/critic-pending.js"
@@ -76,6 +77,7 @@ export interface OneShotCriticInvocationContext {
 export abstract class OneShotCritic extends BusMember {
     private readonly terminalAuthorities: TerminalTurnAuthorityOptions
     private readonly maxEmissionsPerAgent: number
+    private readonly ledger = new CriterionLedger()
     private readonly targets: ReadonlyMap<string, readonly string[]>
     protected readonly runId: string | undefined
     private readonly evidence: CriticEvidenceSource | undefined
@@ -179,22 +181,29 @@ export abstract class OneShotCritic extends BusMember {
                     resultText,
                     agentId,
                     this.evidence,
+                    (fingerprint) => this.ledger.established(agentId, fingerprint),
                 )
                 repositoryFingerprint = preparation.repositoryFingerprint
                 staleCommands = preparation.staleCommands
                 preparationReady = preparation.status === "ready"
                 evaluation = preparationReady
-                    ? applyContractConflicts(
-                          mergeSegmentVerdicts(
-                              await Promise.all(
-                                  preparation.prompts.map((prompt) =>
-                                      this.evaluate(prompt, agentId, turn),
+                    ? honorEstablished(
+                          applyContractConflicts(
+                              mergeSegmentVerdicts(
+                                  await Promise.all(
+                                      preparation.prompts.map((prompt) =>
+                                          this.evaluate(prompt, agentId, turn),
+                                      ),
                                   ),
                               ),
+                              criteria,
                           ),
-                          criteria,
+                          preparation.established,
                       )
                     : inconclusiveEvidenceVerdict(preparation.issues)
+                if (preparationReady) {
+                    this.ledger.record(agentId, repositoryFingerprint, criteria, evaluation)
+                }
             } catch (error) {
                 evaluation = {
                     status: "inconclusive",

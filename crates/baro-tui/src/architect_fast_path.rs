@@ -1,8 +1,13 @@
 //! A goal the intake confidently sizes as one focused change skips the Architect:
 //! its job is aligning parallel stories, and a one-story run has none to align.
-//! Critic and Surgeon still run; only the design pass is skipped.
+//! A confident sequential goal runs the same way, as one story: its steps ran
+//! one at a time anyway, and splitting the chain paid a handoff, a Critic loop
+//! and a merge per step (a three-step refactor took 40 minutes against 15 for
+//! one agent). Critic and Surgeon still run; only the design pass is skipped.
 
 const MIN_CONFIDENCE: f64 = 0.85;
+/// Longer chains keep the Architect: one agent's context should hold the whole goal.
+const MAX_SEQUENTIAL_STEPS: u64 = 6;
 const DISABLE_ENV: &str = "BARO_ARCHITECT_FAST_PATH";
 
 #[derive(Debug, Clone, PartialEq)]
@@ -29,8 +34,8 @@ pub(crate) fn decide(contract_json: &str) -> Option<FastPath> {
     let mode = contract.get("mode")?.as_str()?;
     let source = contract.get("source")?.as_str()?;
     let confidence = contract.get("confidence")?.as_f64()?;
-    let max_stories = contract.get("maxStories")?.as_u64()?;
-    if mode != "focused" || source != "llm" || confidence < MIN_CONFIDENCE || max_stories != 1 {
+    let max_stories = contract.get("maxStories").and_then(|value| value.as_u64());
+    if source != "llm" || confidence < MIN_CONFIDENCE {
         return None;
     }
     let why = contract
@@ -39,12 +44,30 @@ pub(crate) fn decide(contract_json: &str) -> Option<FastPath> {
         .map(str::trim)
         .filter(|reason| !reason.is_empty())
         .unwrap_or("one focused change");
-    Some(FastPath {
-        contract_json: contract_json.to_string(),
-        reason: format!(
-            "Intake sized this goal as one focused change (confidence {confidence:.2}): {why} Planning without an Architect pass; set {DISABLE_ENV}=0 to always run it."
-        ),
-    })
+    match mode {
+        "focused" if max_stories == Some(1) => Some(FastPath {
+            contract_json: contract_json.to_string(),
+            reason: format!(
+                "Intake sized this goal as one focused change (confidence {confidence:.2}): {why} Planning without an Architect pass; set {DISABLE_ENV}=0 to always run it."
+            ),
+        }),
+        "sequential" if max_stories.map_or(true, |max| max <= MAX_SEQUENTIAL_STEPS) => {
+            let mut focused = contract.clone();
+            focused["mode"] = serde_json::json!("focused");
+            focused["maxStories"] = serde_json::json!(1);
+            focused["parallelism"] = serde_json::json!(1);
+            focused["reason"] = serde_json::json!(format!(
+                "Sequential steps, run by one agent in order: {why}"
+            ));
+            Some(FastPath {
+                contract_json: focused.to_string(),
+                reason: format!(
+                    "Intake sized this goal as sequential steps (confidence {confidence:.2}): {why} One agent does them in order, without an Architect pass; set {DISABLE_ENV}=0 to always run it."
+                ),
+            })
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -85,9 +108,28 @@ mod tests {
         assert_eq!(decide(&contract("focused", "user", 1.0, Some(1))), None);
         assert_eq!(decide(&contract("focused", "llm", 0.95, Some(2))), None);
         assert_eq!(decide(&contract("focused", "llm", 0.95, None)), None);
-        assert_eq!(decide(&contract("sequential", "llm", 0.95, Some(1))), None);
         assert_eq!(decide(&contract("parallel", "llm", 0.95, None)), None);
         assert_eq!(decide("not json"), None);
+    }
+
+    #[test]
+    fn a_confident_sequential_goal_runs_as_one_story_in_order() {
+        let fast = decide(&contract("sequential", "llm", 0.9, Some(3))).expect("fast path");
+        let focused: serde_json::Value = serde_json::from_str(&fast.contract_json).unwrap();
+        assert_eq!(focused["mode"], "focused");
+        assert_eq!(focused["maxStories"], 1);
+        assert_eq!(focused["parallelism"], 1);
+        assert_eq!(focused["source"], "llm");
+        assert!(focused["reason"].as_str().unwrap().contains("One route plus its tests."));
+        assert!(fast.reason.contains("sequential steps"));
+        assert!(decide(&contract("sequential", "llm", 0.9, None)).is_some());
+    }
+
+    #[test]
+    fn a_long_or_unsure_sequential_goal_keeps_the_architect() {
+        assert_eq!(decide(&contract("sequential", "llm", 0.95, Some(7))), None);
+        assert_eq!(decide(&contract("sequential", "llm", 0.8, Some(3))), None);
+        assert_eq!(decide(&contract("sequential", "heuristic", 1.0, Some(3))), None);
     }
 
     #[test]

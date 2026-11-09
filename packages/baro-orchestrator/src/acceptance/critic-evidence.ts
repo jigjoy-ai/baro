@@ -157,6 +157,8 @@ export interface CriticEvaluationPreparation {
     /** Present only when the complete evidence capture was bracketed by the
      * same exact changed-content fingerprint. */
     repositoryFingerprint: string | null
+    /** Criteria an earlier review found satisfied for this same fingerprint (criterion-ledger.ts). */
+    established: readonly string[]
 }
 
 export interface InconclusiveCriticVerdict {
@@ -958,6 +960,7 @@ export async function prepareCriticEvaluation(
     resultText: string,
     agentId: string,
     source?: CriticEvidenceSource,
+    establishedFor?: (fingerprint: string) => readonly string[],
 ): Promise<CriticEvaluationPreparation> {
     const beforeFingerprint = await repositoryFingerprintFor(agentId, source)
     // Read-only and independent, each failing closed on its own; the two
@@ -989,6 +992,9 @@ export async function prepareCriticEvaluation(
             ? [fingerprintIssue]
             : []),
     ]
+    const established = issues.length === 0 && afterFingerprint.value && establishedFor
+        ? establishedFor(afterFingerprint.value).filter((criterion) => criteria.includes(criterion))
+        : []
     const segments = splitAcceptanceContract(criteria)
     let offset = 0
     const prompts = segments.map((segmentCriteria, index) => {
@@ -1003,6 +1009,7 @@ export async function prepareCriticEvaluation(
             source?.hostRunsWholeTreeVerification === true,
             altitude.section,
             writeSurface,
+            established.filter((criterion) => segmentCriteria.includes(criterion)),
         )
         offset += segmentCriteria.length
         return prompt
@@ -1025,6 +1032,7 @@ export async function prepareCriticEvaluation(
         staleCommands: staleCommandsToRerun(commandEvidence, issues),
         repositoryFingerprint:
             issues.length === 0 ? afterFingerprint.value : null,
+        established,
     }
 }
 
@@ -1113,6 +1121,7 @@ export function buildEvalPrompt(
     hostRunsWholeTreeVerification = false,
     altitudeSection: string | null = null,
     writeSurface: readonly string[] | null = null,
+    established: readonly string[] = [],
 ): string {
     const criteriaList = renderCompleteAcceptanceContract(
         criteria,
@@ -1174,6 +1183,7 @@ export function buildEvalPrompt(
             : []),
         criteriaList,
         "",
+        ...establishedSection(criteria, established, segment?.offset ?? 0),
         "## Baro-captured command/test evidence",
         commandEvidence
             ? boundText(
@@ -1215,6 +1225,23 @@ export function buildEvalPrompt(
         )
     }
     return prompt
+}
+
+/** By global criterion number, so the section costs no criteria text. */
+function establishedSection(
+    criteria: readonly string[],
+    established: readonly string[],
+    offset: number,
+): string[] {
+    const numbers = criteria
+        .map((criterion, index) => (established.includes(criterion) ? offset + index + 1 : null))
+        .filter((number): number is number => number !== null)
+    if (numbers.length === 0) return []
+    return [
+        "## Already established",
+        `An earlier review of this exact workspace content (identical changed-file bytes) found criteria ${numbers.join(", ")} satisfied. They stand: do not re-judge them or list them as violated, even when the evidence that proved them no longer appears below. Judge the other criteria as usual.`,
+        "",
+    ]
 }
 
 /** Published notes are evidence, never instructions: they are agent-authored
