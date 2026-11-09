@@ -56,6 +56,12 @@
       },
       "shape": "a real repository (the hermes-baro plugin, 219 tests): a new tool across code, manifest, catalog, tests and docs",
       "goal": "Add a baro_runs tool that lists the stored Baro runs (run id, goal, status, start and end time, and how many stories are in each state), newest first, with an optional limit. Register it like the other tools, including plugin.yaml and the catalog draft, cover it with pytest tests in the existing style, and document it in the README's Tools section."
+    },
+    {
+      "id": "accounts",
+      "fixture": "notes-api",
+      "shape": "a cross-cutting feature with a real dependency graph (auth core -> middleware/ownership/CLI -> docs)",
+      "goal": "Add user accounts to the notes API: sign-up and login with salted password hashes (node:crypto scrypt), session tokens, an auth middleware that protects the notes routes, notes owned by the user who created them (a user sees and deletes only their own), a CLI `login` command that stores the token, node:test tests for each part, and a README section on accounts."
     }
   ]
 }

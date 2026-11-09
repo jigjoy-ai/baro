@@ -1,6 +1,8 @@
 import { mkdirSync, readdirSync, realpathSync, type Dirent } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
+import { gitSandboxPaths } from "../execution/shell-containment.js"
+import { repositoryCacheKey } from "../verification/cargo-env.js"
 
 /**
  * Where a sandboxed story's package managers keep their caches. Story
@@ -15,7 +17,10 @@ export interface StoryPackageCache {
     env: Record<string, string>
 }
 
-export function storyPackageCache(env: NodeJS.ProcessEnv = process.env): StoryPackageCache {
+export function storyPackageCache(
+    env: NodeJS.ProcessEnv = process.env,
+    worktreeRoot: string | null = null,
+): StoryPackageCache {
     const configured = env.BARO_PACKAGE_CACHE?.trim()
     const requested = configured ? configured : join(homedir(), ".baro", "cache", "packages")
     mkdirSync(requested, { recursive: true })
@@ -33,8 +38,21 @@ export function storyPackageCache(env: NodeJS.ProcessEnv = process.env): StoryPa
             GOCACHE: at("go-build"),
             GOMODCACHE: at("go-mod"),
             CARGO_HOME: at("cargo"),
+            ...(worktreeRoot === null ? {} : { CARGO_TARGET_DIR: storyCargoTargetDir(root, worktreeRoot) }),
         },
     }
+}
+
+/**
+ * One cargo target dir per repository for all stories: a fresh worktree's own
+ * target/ made every story rebuild all dependencies. Cargo keys artifacts by
+ * source path and locks the dir, so sharing is safe across worktrees.
+ */
+export function storyCargoTargetDir(cacheRoot: string, worktreeRoot: string): string {
+    const repository = gitSandboxPaths(worktreeRoot).commonWorktreeRoot ?? worktreeRoot
+    const dir = join(cacheRoot, "cargo-target", repositoryCacheKey(repository))
+    mkdirSync(dir, { recursive: true })
+    return dir
 }
 
 const SHARED_DEPENDENCY_DIRS = new Set(["node_modules", ".venv", "vendor"])

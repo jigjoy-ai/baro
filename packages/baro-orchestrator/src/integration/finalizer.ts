@@ -525,6 +525,7 @@ export class Finalizer extends BusMember {
             verify = await verifyBuild(this.opts.integrationRoot, {
                 plan: mergeVerifyPlans(this.baselineVerifyPlan, finalVerifyPlan),
                 hostRepoRoot: this.opts.hostRepoRoot,
+                changedSince: this.baseSha,
             })
         }
         // Complete and unfailed, but nothing built or tested the merge: an

@@ -108,6 +108,15 @@ describe("Critic contract conflicts", () => {
         assert.doesNotMatch(verdictSystemPrompt({ remediationGroups: true }), /contract_conflicts/)
     })
 
+    it("judges failures that already fail at the base commit as pre-existing, and test weakening as a violation", () => {
+        // Story sandboxes deny `ps`; a run once turned five such tests green by returning early.
+        for (const prompt of [VERDICT_SYSTEM_PROMPT, buildEvalPrompt(["cargo test passes"], "done")]) {
+            assert.match(prompt, /failing the same way at the story's base commit[^.]*is pre-existing/)
+            assert.match(prompt, /never the agent's word/)
+            assert.match(prompt, /Skipping, ignoring, early-returning from[^.]*is a violation/)
+        }
+    })
+
     it("shows the Critic the story's write surface when one is known", () => {
         const withSurface = buildEvalPrompt(
             ["README.md documents both modules"],

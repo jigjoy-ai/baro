@@ -44,6 +44,8 @@ export interface RunVerifierOptions {
     createFinalPlan?: (cwd: string) => VerifyPlan
     /** Defaults to stories spawned on the bus without a StoryResult yet. */
     storyExecutorsActive?: () => boolean
+    /** The run's base commit, read per request; scopes the gate to what changed. */
+    changedSince?: () => string | null
 }
 
 /**
@@ -86,6 +88,7 @@ export class RunVerifier extends SerializedObserver {
                         createFinalPlan(cwd),
                     ),
                     hostRepoRoot: opts.hostRepoRoot,
+                    changedSince: opts.changedSince?.() ?? null,
                     signal,
                     storyExecutorsActive,
                     onRetryDecision: (info) =>

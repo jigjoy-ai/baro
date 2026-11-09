@@ -172,6 +172,8 @@ describe("a Claude story's OS sandbox", () => {
             // pnpm 12 ignores npm_config_store_dir, and npm warns about it.
             assert.equal(settings.env.pnpm_config_store_dir, join(cache, "pnpm-store"))
             assert.equal(settings.env.npm_config_store_dir, undefined)
+            // Stories share one cargo build per repository instead of a cold target/ each.
+            assert.ok(settings.env.CARGO_TARGET_DIR?.startsWith(join(cache, "cargo-target")))
             assert.equal(claudeStorySandbox(repo, undefined, { BARO_UNSAFE_NO_SANDBOX: "1" }), null)
         } finally {
             rmSync(repo, { recursive: true, force: true })
