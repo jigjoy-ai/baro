@@ -330,7 +330,10 @@ without an Architect pass, keeping the conversation's repository brief; that
 story owns every goal invariant, and Critic and Surgeon still review it. The
 stream carries `architect_skipped` with the intake's reason. Any other
 contract, a fixed `--mode`, `--confirm-mode`, or
-`BARO_ARCHITECT_FAST_PATH=0` keeps the Architect. In `bench/`, a one-route
+`BARO_ARCHITECT_FAST_PATH=0` keeps the Architect. The same path takes a
+confident `sequential` goal of at most six steps and a confident `parallel`
+goal of at most four parts: both run as one story, which may hand parts to
+forks of its session (see Session inheritance). In `bench/`, a one-route
 goal went from 231 s and $0.64 to 146 s and $0.18.
 
 ## Session inheritance
