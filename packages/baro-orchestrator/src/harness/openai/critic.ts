@@ -66,6 +66,7 @@ import {
     prepareCriticEvaluation,
     type CriticEvidenceSource,
 } from "../../acceptance/critic-evidence.js"
+import { CriterionLedger, honorEstablished } from "../../acceptance/criterion-ledger.js"
 import { criticInput, criticReplayKey } from "../../acceptance/critic-input.js"
 import { drainCriticPending } from "../../acceptance/critic-pending.js"
 import type { AgentTurnProjector } from "../../acceptance/agent-turn-projector.js"
@@ -133,6 +134,7 @@ export class CriticOpenAI extends BusMember {
     private readonly model: InferenceModel
     private readonly billingCoordinator: GatewayBillingCoordinator | null
 
+    private readonly ledger = new CriterionLedger()
     private readonly emissions = new Map<string, number>()
     private readonly turnCount = new Map<string, number>()
     private readonly seenTerminalIds = new Set<string>()
@@ -201,19 +203,26 @@ export class CriticOpenAI extends BusMember {
                 resultText,
                 agentId,
                 this.opts.evidence,
+                (fingerprint) => this.ledger.established(agentId, fingerprint),
             )
             const evaluation = preparation.status === "ready"
-                ? applyContractConflicts(
-                      mergeSegmentVerdicts(
-                          await Promise.all(
-                              preparation.prompts.map((prompt) =>
-                                  this.evaluate(prompt, agentId, turn, correlation),
+                ? honorEstablished(
+                      applyContractConflicts(
+                          mergeSegmentVerdicts(
+                              await Promise.all(
+                                  preparation.prompts.map((prompt) =>
+                                      this.evaluate(prompt, agentId, turn, correlation),
+                                  ),
                               ),
                           ),
+                          criteria,
                       ),
-                      criteria,
+                      preparation.established,
                   )
                 : inconclusiveEvidenceVerdict(preparation.issues)
+            if (preparation.status === "ready") {
+                this.ledger.record(agentId, preparation.repositoryFingerprint, criteria, evaluation)
+            }
             const { verdict, reasoning, violatedCriteria } = evaluation
             const status = evaluation.status ?? "evaluated"
 
