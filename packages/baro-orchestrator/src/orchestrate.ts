@@ -1298,6 +1298,7 @@ export async function orchestrate(
         cwd: integrationRoot,
         hostRepoRoot: repoRoot,
         plan: verifyPlan,
+        changedSince: () => gitCoordinator?.runBaseSha() ?? null,
         createFinalPlan: (cwd) => {
             // Full PRD validation remains authoritative for graph state;
             // raw inspection prevents its legacy normalization from

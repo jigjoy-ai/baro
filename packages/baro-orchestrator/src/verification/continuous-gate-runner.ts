@@ -32,6 +32,8 @@ import { verifyBuild, type VerifyPlan } from "./verify.js"
 export interface ContinuousGateTarget {
     /** The story's own worktree; gates must never run in the shared checkout. */
     readonly cwd: string
+    /** The story's creation commit; gates then run only for ecosystems it changed. */
+    readonly baseSha?: string | null
 }
 
 export interface ContinuousGateRunnerOptions {
@@ -141,7 +143,7 @@ export class ContinuousGateRunner extends BusMember {
         }
         this.running.add(agentId)
         try {
-            const commands = await this.serialized(() => this.execute(target.cwd))
+            const commands = await this.serialized(() => this.execute(target.cwd, target.baseSha ?? null))
             if (this.stopped) return
             const outcome = summarizeGate(commands)
             if (shouldDeliverGate(this.lastDelivered.get(agentId) ?? null, outcome)) {
@@ -174,7 +176,7 @@ export class ContinuousGateRunner extends BusMember {
         }
     }
 
-    private async execute(cwd: string): Promise<readonly GateCommandOutcome[]> {
+    private async execute(cwd: string, baseSha: string | null): Promise<readonly GateCommandOutcome[]> {
         if (this.opts.runGates) {
             return await this.opts.runGates(cwd, this.opts.plan, this.controller.signal)
         }
@@ -182,6 +184,7 @@ export class ContinuousGateRunner extends BusMember {
             signal: this.controller.signal,
             ...(this.opts.plan ? { plan: this.opts.plan } : {}),
             ...(this.opts.hostRepoRoot ? { hostRepoRoot: this.opts.hostRepoRoot } : {}),
+            changedSince: baseSha,
         })
         // A command we killed (no exit status) says nothing about the agent's
         // work. Reporting it as a failure once told an agent its tests were

@@ -24,6 +24,7 @@ import { activityIdleTimeoutMs } from "../harness/liveness.js"
 import { emit, type BaroEvent } from "../tui-protocol.js"
 import { resolvePytestRunner } from "./python-env.js"
 import { cargoEnvFor } from "./cargo-env.js"
+import { changedPathsSince, scopeCommandsToChange } from "./change-scope.js"
 import { resolveCommandCwd, RETRY_BACKOFF_MS, spawnRunCwd } from "./command-cwd.js"
 import type { VerifyCwdResolver } from "./command-cwd.js"
 import {
@@ -208,6 +209,8 @@ export interface VerifyBuildOptions {
     sleep?: (ms: number) => Promise<void>
     /** A timeout under story load is retried only once this reports false. */
     storyExecutorsActive?: () => boolean
+    /** Run only detected commands whose ecosystem changed since this commit (change-scope.ts). */
+    changedSince?: string | null
     /** Test seam: lowers the ABSOLUTE_COMMAND_TIMEOUT_MS ceiling floor. */
     ceilingFloorMs?: number
     /** Overrides `cwd`, re-read per spawn; see command-cwd.ts `spawnRunCwd`. */
@@ -1503,9 +1506,21 @@ export async function verifyBuild(
     const hostRepoRoot = options.hostRepoRoot ?? cwd
     const emitActivity = options.emitActivity ?? emit
     const ceilingFor = createCeilingResolver(cwd, hostRepoRoot, options.ceilingFloorMs)
+    const scoped = options.changedSince
+        ? scopeCommandsToChange(plan.commands, changedPathsSince(cwd, options.changedSince), cwd)
+        : { run: plan.commands, notAffected: [] }
+    if (scoped.notAffected.length > 0) {
+        emitActivity({
+            type: "activity",
+            id: "_verify",
+            kind: "test",
+            text: `not run, the change touches none of their files: ${scoped.notAffected.map((c) => c.label).join(", ")}`,
+        })
+    }
     // A gate run against a tree that predates the manifests judges the
     // install, not the work. Refresh first and keep it in the evidence.
-    const stale = dependencyRefreshEnabled(options) && plan.commands.length > 0
+    const stale = dependencyRefreshEnabled(options) &&
+        scoped.run.some((c) => c.tool !== "cargo" && c.tool !== "go" && c.tool !== "git")
         ? staleDependencyReasons(cwd)
         : []
     if (stale.length > 0) {
@@ -1537,7 +1552,7 @@ export async function verifyBuild(
             failures.push({ cmd: install.label, tail: outcome.tail })
         }
     }
-    for (const c of plan.commands) {
+    for (const c of scoped.run) {
         throwIfAborted(options.signal)
         const ceiling = ceilingFor(c)
         let outcome = await runCmd(cwd, c, hostRepoRoot, ceiling, options.signal, options.resolveRunCwd)

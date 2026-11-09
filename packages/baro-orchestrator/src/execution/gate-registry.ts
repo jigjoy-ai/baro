@@ -216,6 +216,10 @@ const RUN_VERIFICATION: GateDisclosure = {
             "  `cargo test`, repo-wide test globs) in this mode.",
             "- A whole-tree regression is the integration gate's verdict to give,",
             "  not yours to pre-empt mid-story.",
+            "- The shell sandbox denies some system access (for example `ps`). A",
+            "  test that fails only for that reason is not yours to fix: run the",
+            "  same command at your story's base commit to show it fails there too,",
+            "  then move on. Never skip, weaken or delete a test to get around it.",
         ].join("\n")
     },
 }

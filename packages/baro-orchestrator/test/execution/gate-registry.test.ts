@@ -77,6 +77,7 @@ describe("gate registry — enforced means announced", () => {
         assert.equal(announced.length, 1)
         assert.ok(announced[0]!.includes("[gate:run-verification]"))
         assert.match(announced[0]!, /Do NOT run the repository's full test suites/)
+        assert.match(announced[0]!, /Never skip, weaken or delete a test to get around it/)
     })
 
     it("the advisory altitude rule is disclosed to every story, and fails none", () => {
