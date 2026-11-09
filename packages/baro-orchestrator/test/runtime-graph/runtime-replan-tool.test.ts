@@ -67,6 +67,7 @@ describe("runtime replan function tool", () => {
                         tests: ["npm test"],
                         model: "gpt-5.4-mini",
                         goalInvariantIds: ["G-A1", "G-C1"],
+                        writes: ["db/migrate.sql"],
                     },
                 ],
                 removedStoryIds: ["S-future"],
@@ -92,6 +93,8 @@ describe("runtime replan function tool", () => {
                             tests: ["npm test"],
                             model: "gpt-5.4-mini",
                             goalInvariantIds: ["G-A1", "G-C1"],
+                            // Dropped, the story merges nothing its proposer still declares.
+                            writes: ["db/migrate.sql"],
                         },
                     ],
                     removedStoryIds: ["S-future"],

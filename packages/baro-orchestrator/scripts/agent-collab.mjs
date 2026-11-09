@@ -541,6 +541,7 @@ function validReplanMutation(value) {
                 "tests",
                 "model",
                 "goalInvariantIds",
+                "writes",
             ]),
         ) &&
         Array.isArray(value.removedStoryIds) &&

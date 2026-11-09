@@ -93,6 +93,8 @@ describe("agent-collab runtime replan transport", () => {
                         dependsOn: ["S1"],
                         acceptance: ["migration exists"],
                         tests: ["npm test"],
+                        // The files the added story owns travel with it.
+                        writes: ["db/migrate.sql"],
                     },
                 ],
                 removedStoryIds: [],

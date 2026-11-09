@@ -314,6 +314,10 @@ function parseAddedStories(
                 error: `addedStories[${index}].model must be a string`,
             }
         }
+        const writes = story.writes === undefined
+            ? undefined
+            : stringArray(story.writes, `addedStories[${index}].writes`)
+        if (writes && !writes.ok) return writes
         stories.push({
             id: story.id,
             priority: story.priority as number,
@@ -329,6 +333,9 @@ function parseAddedStories(
             ...(goalInvariantIds?.ok
                 ? { goalInvariantIds: goalInvariantIds.value }
                 : {}),
+            // Dropped here, the story has no surface and the merge gate
+            // refuses it every file its proposer still declares.
+            ...(writes?.ok ? { writes: writes.value } : {}),
         })
     }
     return { ok: true, value: stories }

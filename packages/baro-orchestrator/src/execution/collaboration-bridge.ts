@@ -2388,6 +2388,7 @@ function validReplanStory(value: unknown): boolean {
             "tests",
             "model",
             "goalInvariantIds",
+            "writes",
         ]) &&
         typeof story.id === "string" &&
         typeof story.priority === "number" &&
@@ -2401,7 +2402,8 @@ function validReplanStory(value: unknown): boolean {
         (story.tests === undefined || stringArray(story.tests)) &&
         (story.model === undefined || typeof story.model === "string") &&
         (story.goalInvariantIds === undefined ||
-            validGoalInvariantIds(story.goalInvariantIds))
+            validGoalInvariantIds(story.goalInvariantIds)) &&
+        (story.writes === undefined || stringArray(story.writes))
     )
 }
 

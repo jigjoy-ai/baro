@@ -1113,6 +1113,8 @@ describe("CollaborationBridge", () => {
                         dependsOn: ["S1"],
                         acceptance: ["migration exists"],
                         tests: ["npm test"],
+                        // Refused here, an agent could not hand files to a story it adds.
+                        writes: ["db/migrate.sql"],
                     },
                 ],
                 removedStoryIds: [],

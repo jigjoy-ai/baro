@@ -7,6 +7,7 @@
  * what was decided.
  */
 
+import { delegationEnabled } from "../../harness/session-lineage.js"
 import type { PrdExecutionMode, PrdFile, PrdStory } from "../../prd.js"
 import { disjointWidthEvidence, pruneUnsupportedEdges, writeSurfaceOf } from "./dependency-evidence.js"
 import { deriveGoalContract } from "../../goal/goal-contract.js"
@@ -21,12 +22,20 @@ import { pruneVerificationOnlyStories } from "./verification-stories.js"
 /**
  * Concurrency follows the DAG — a level's stories are independent by
  * construction, so they run in parallel up to `configParallel` (0 = unlimited,
- * hosted sends ~10). Only a DELIBERATE choice serializes: `focused` (single-fix
- * mode), or a USER-picked `sequential` (caution the DAG can't see). An AUTO
+ * hosted sends ~10). Only a DELIBERATE choice serializes: `focused` with
+ * delegation off, or a USER-picked `sequential` (caution the DAG can't see). An AUTO
  * `sequential` (intake's llm/heuristic guess) must NOT override the planner's DAG.
  */
-export function resolveEffectiveParallel(mode: PrdExecutionMode | undefined, configParallel: number | undefined): number {
-    const forcedSerial = mode?.mode === "focused" || (mode?.mode === "sequential" && mode.source === "user")
+export function resolveEffectiveParallel(
+    mode: PrdExecutionMode | undefined,
+    configParallel: number | undefined,
+    delegation: boolean = delegationEnabled(),
+): number {
+    // A focused plan is one story; the cap then only binds the parts that
+    // story hands out, which exist to run side by side.
+    const forcedSerial =
+        (mode?.mode === "focused" && !delegation) ||
+        (mode?.mode === "sequential" && mode.source === "user")
     return forcedSerial ? 1 : (configParallel ?? 0)
 }
 
