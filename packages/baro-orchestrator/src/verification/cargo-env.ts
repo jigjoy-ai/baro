@@ -9,7 +9,7 @@ import { homedir } from "node:os"
 import { basename, join, resolve } from "node:path"
 
 /** Stable per-checkout directory name; the hash keeps two same-named checkouts apart. */
-function repositoryCacheKey(hostRoot: string): string {
+export function repositoryCacheKey(hostRoot: string): string {
     let canonical: string
     try {
         canonical = realpathSync.native(hostRoot)

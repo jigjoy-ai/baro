@@ -6,6 +6,7 @@ import { join } from "node:path"
 import { describe, it } from "node:test"
 
 import { confinedSpawn, storyCredentialEnv } from "../../src/harness/os-sandbox.js"
+import { storyPackageCache } from "../../src/harness/package-cache.js"
 
 // Codex, OpenCode, Pi and Devin run their tools with approvals and their own
 // sandboxes off; an audit found nothing but a git/gh PATH shim around them.
@@ -57,6 +58,7 @@ describe("OS confinement of a story's CLI lane", () => {
                     `printf '[x]\\n' >> ${join(root, "repo", ".git", "config")} 2>/dev/null && echo config-WRITTEN`,
                     'ls "$HOME/.ssh" >/dev/null 2>&1 && echo ssh-READ',
                     'mkdir -p "$npm_config_cache" && echo c > "$npm_config_cache/probe" && echo cache-ok',
+                    'mkdir -p "$CARGO_TARGET_DIR/debug" && echo t > "$CARGO_TARGET_DIR/debug/probe" && echo cargo-target-ok',
                     `P="$HOME/Library/Caches/baro-probe-$$"; touch "$P" 2>/dev/null && rm -f "$P" && echo host-cache-WRITTEN`,
                     "exit 0",
                 ].join("\n"),
@@ -74,6 +76,7 @@ describe("OS confinement of a story's CLI lane", () => {
             assert.doesNotMatch(run.stdout, /config-WRITTEN/)
             assert.doesNotMatch(run.stdout, /ssh-READ/)
             assert.match(run.stdout, /cache-ok/, run.stderr)
+            assert.match(run.stdout, /cargo-target-ok/, run.stderr)
             assert.doesNotMatch(run.stdout, /host-cache-WRITTEN/)
             assert.equal(existsSync(join(root, "S2", "stolen.txt")), false)
         } finally {
@@ -87,5 +90,31 @@ describe("OS confinement of a story's CLI lane", () => {
         assert.ok("refusal" in plan)
         const optedOut = confinedSpawn("codex", "/bin/sh", [], process.cwd(), { BARO_UNSAFE_NO_SANDBOX: "1" })
         assert.ok(!("refusal" in optedOut))
+    })
+
+    it("gives every story of a repository the same cargo target dir, and other repositories their own", () => {
+        const root = realpathSync(mkdtempSync(join(tmpdir(), "baro-cargo-target-")))
+        try {
+            const commit = (repo: string) => {
+                execFileSync("git", ["init", "-q", "-b", "main", repo])
+                execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "i"], { cwd: repo })
+            }
+            commit(join(root, "repo"))
+            commit(join(root, "other"))
+            for (const story of ["S1", "S2"]) {
+                execFileSync("git", ["worktree", "add", "-q", "-b", story, join(root, "run", story, "repo")], { cwd: join(root, "repo") })
+            }
+            const env = { BARO_PACKAGE_CACHE: join(root, "cache") }
+            const target = (worktree: string) => storyPackageCache(env, worktree).env.CARGO_TARGET_DIR
+            const s1 = target(join(root, "run", "S1", "repo"))
+            assert.ok(s1, "a story gets a cargo target dir")
+            assert.equal(target(join(root, "run", "S2", "repo")), s1, "stories of one repository share it")
+            assert.ok(s1.startsWith(join(root, "cache")), "it lives in the cache the sandboxes may write")
+            assert.ok(existsSync(s1))
+            assert.notEqual(target(join(root, "other")), s1, "another repository keeps its own")
+            assert.equal(storyPackageCache(env).env.CARGO_TARGET_DIR, undefined, "no worktree, no target dir")
+        } finally {
+            rmSync(root, { recursive: true, force: true })
+        }
     })
 })

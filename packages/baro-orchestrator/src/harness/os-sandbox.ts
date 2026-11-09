@@ -81,7 +81,7 @@ export function confinedSpawn(
         }
     }
     const home = homedir()
-    const cache = storyPackageCache(env)
+    const cache = storyPackageCache(env, worktreeRoot)
     const scratch = realpathSync(mkdtempSync(join(tmpdir(), `baro-${lane}-tmp-`)))
     const writable = [
         ...(worktreeRoot === null

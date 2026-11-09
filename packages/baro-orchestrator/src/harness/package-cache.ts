@@ -1,6 +1,8 @@
 import { mkdirSync, readdirSync, realpathSync, type Dirent } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
+import { gitSandboxPaths } from "../execution/shell-containment.js"
+import { repositoryCacheKey } from "../verification/cargo-env.js"
 
 /**
  * Where a sandboxed story's package managers keep their caches. Story
@@ -15,7 +17,10 @@ export interface StoryPackageCache {
     env: Record<string, string>
 }
 
-export function storyPackageCache(env: NodeJS.ProcessEnv = process.env): StoryPackageCache {
+export function storyPackageCache(
+    env: NodeJS.ProcessEnv = process.env,
+    worktreeRoot: string | null = null,
+): StoryPackageCache {
     const configured = env.BARO_PACKAGE_CACHE?.trim()
     const requested = configured ? configured : join(homedir(), ".baro", "cache", "packages")
     mkdirSync(requested, { recursive: true })
@@ -33,8 +38,26 @@ export function storyPackageCache(env: NodeJS.ProcessEnv = process.env): StoryPa
             GOCACHE: at("go-build"),
             GOMODCACHE: at("go-mod"),
             CARGO_HOME: at("cargo"),
+            ...(worktreeRoot === null ? {} : { CARGO_TARGET_DIR: storyCargoTargetDir(root, worktreeRoot) }),
         },
     }
+}
+
+/**
+ * One cargo target dir per repository, shared by every story of every run.
+ * A story worktree is a fresh checkout, so cargo's default target/ inside it
+ * starts empty and each story rebuilt every dependency from scratch (a Rust
+ * workspace spent minutes per story before its first test ran). Cargo keys
+ * artifacts by package source, so stories in different worktrees reuse the
+ * registry dependencies and keep their own workspace crates apart; concurrent
+ * builds take cargo's own build-dir lock. It lives under the package cache,
+ * which the story sandboxes may already write.
+ */
+export function storyCargoTargetDir(cacheRoot: string, worktreeRoot: string): string {
+    const repository = gitSandboxPaths(worktreeRoot).commonWorktreeRoot ?? worktreeRoot
+    const dir = join(cacheRoot, "cargo-target", repositoryCacheKey(repository))
+    mkdirSync(dir, { recursive: true })
+    return dir
 }
 
 const SHARED_DEPENDENCY_DIRS = new Set(["node_modules", ".venv", "vendor"])
