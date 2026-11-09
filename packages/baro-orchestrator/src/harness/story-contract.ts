@@ -8,6 +8,7 @@
 import type { BusMember } from "../runtime/coordination.js"
 
 import type { ClaudeRunSummary } from "./claude/cli-participant.js"
+import type { SessionInheritance, SessionLedger } from "./session-lineage.js"
 import type {
     StoryFailureData,
     StoryResultData,
@@ -67,6 +68,10 @@ export interface StorySpec {
     /** Require a positive process-tree quiescence certificate before a
      * spawned CLI attempt may succeed, retry, or release its worktree. */
     requireProcessQuiescenceCertification?: boolean
+    /** Where this story's resumable session is recorded for later stories. */
+    sessions?: SessionLedger
+    /** Start from another session instead of cold; first attempt only. */
+    inherit?: SessionInheritance
 }
 
 export interface StoryOutcome {

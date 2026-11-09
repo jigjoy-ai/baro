@@ -40,6 +40,7 @@ describe("CollectiveBoard checkpoints", () => {
     it("starts dependents on a running story's checkpoint and integrates them after it", async () => {
         await withBoard(async (env, board) => {
             const s1 = await leaseStory(env, "S1", 1)
+            assert.equal(s1.request.sessionSource, undefined, "a story with no prerequisite starts cold")
 
             requestCheckpoint(env, s1, [])
             assert.match(
@@ -59,6 +60,8 @@ describe("CollectiveBoard checkpoints", () => {
 
             const s2 = await leaseStory(env, "S2", 2)
             assert.deepEqual(s2.request.checkpointBase, [{ storyId: "S1", sha: SHA }])
+            // It forks the session of the story whose checkpoint it starts on.
+            assert.deepEqual(s2.request.sessionSource, { storyId: "S1", mode: "fork" })
             assert.match(s2.request.prompt, /You start on checkpoints/)
             assert.match(s2.request.prompt, /S1 is still running; it published c{12}: parser contract/)
 

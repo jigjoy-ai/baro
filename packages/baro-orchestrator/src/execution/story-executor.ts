@@ -6,6 +6,7 @@
  * `generation` from the request into that terminal result.
  */
 
+import type { SessionInheritance, SessionLedger } from "../harness/session-lineage.js"
 import { BusMember, CoordinationBus } from "../runtime/coordination.js"
 import { GateRuleAnnounced } from "../semantic-events.js"
 import type { SemanticEvent } from "../runtime/mozaik.js"
@@ -78,6 +79,10 @@ export interface StoryExecOpts {
      * joins the bus. Collective policy consumers reject unregistered sources.
      */
     registerTerminalAuthority?: (source: BusMember) => void
+    /** Run-scoped record of resumable sessions (harness/session-lineage.ts). */
+    sessions?: SessionLedger
+    /** Session this story starts from, already resolved for its lane. */
+    inherit?: SessionInheritance
 }
 
 export interface StoryCollaborationAccess {
@@ -269,6 +274,8 @@ export class LocalStoryExecutor implements StoryExecutor {
                               opts.handoffInconclusiveToAcceptanceGate,
                           targetedMessageAuthority:
                               opts.targetedMessageAuthority,
+                          ...(opts.sessions ? { sessions: opts.sessions } : {}),
+                          ...(opts.inherit ? { inherit: opts.inherit } : {}),
                           ...correlation,
                       },
                       {
@@ -311,6 +318,8 @@ export class LocalStoryExecutor implements StoryExecutor {
                       targetedMessageAuthority: opts.targetedMessageAuthority,
                       requireProcessQuiescenceCertification:
                           opts.requireProcessQuiescenceCertification,
+                      ...(opts.sessions ? { sessions: opts.sessions } : {}),
+                      ...(opts.inherit ? { inherit: opts.inherit } : {}),
                       ...correlation,
                   })
 

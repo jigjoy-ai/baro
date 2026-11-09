@@ -9,6 +9,7 @@
  */
 
 import {
+    type ContextItem,
     FunctionCallItem,
     FunctionCallOutputItem,
     ModelContext,
@@ -58,6 +59,7 @@ import {
 } from "../provider-failure.js"
 import { acceptsTargetedMessage } from "../../runtime/targeted-message-authority.js"
 import { correlationOf, type StoryOutcome, type StorySpec } from "../story-contract.js"
+import { inheritancePreamble } from "../session-lineage.js"
 import { pickInferenceModel as pickModel } from "../mozaik/pick-model.js"
 import { invokeTool, runBoundedRound } from "../mozaik/round.js"
 import {
@@ -254,6 +256,8 @@ export class OpenAIStoryAgent extends BusMember {
      * a retry rebuilds context from the spawn prompt, which never carried
      * these. */
     private readonly pendingPeerNotes: string[] = []
+    private stableItems: readonly ContextItem[] | null = null
+    private lastRequestTokens: number | null = null
     private appliedSurfaceGraphVersion = 0
     private appliedSurfaceRevision = 0
 
@@ -630,7 +634,12 @@ export class OpenAIStoryAgent extends BusMember {
 
         // Echo the prompt on the bus so Cartographer renders it the same
         // way as the Claude side's user echoes.
-        const userMessageText = this.spec.prompt
+        // Only the first attempt inherits; a retry starts cold from the spawn prompt.
+        const inherit =
+            attempt === 1 && this.spec.inherit?.items?.length ? this.spec.inherit : undefined
+        const userMessageText = inherit
+            ? `${inheritancePreamble(inherit, this.spec.id, this.spec.cwd)}\n\n${this.spec.prompt}`
+            : this.spec.prompt
         this.envRef?.publish(
             this,
             AgentUserMessage.create({
@@ -639,15 +648,34 @@ export class OpenAIStoryAgent extends BusMember {
             }),
         )
 
-        let context = ModelContext.create()
-            .addContextItem(SystemMessageItem.create(this.storySystemPrompt()))
-            .addContextItem(UserMessageItem.create(userMessageText))
+        // The inherited items keep the parent's exact prefix, so the provider's
+        // prompt cache serves them to the fork.
+        let context = (
+            inherit?.items
+                ? ModelContext.create().addContextItems([...inherit.items])
+                : ModelContext.create().addContextItem(
+                      SystemMessageItem.create(this.storySystemPrompt()),
+                  )
+        ).addContextItem(UserMessageItem.create(userMessageText))
+        this.stableItems = null
+        this.lastRequestTokens = null
+        this.spec.sessions?.track(this.spec.id, () =>
+            this.stableItems
+                ? {
+                      backend: "openai",
+                      items: this.stableItems,
+                      contextTokens: this.lastRequestTokens,
+                      cwd: this.spec.cwd,
+                  }
+                : null,
+        )
 
         this.transition("running", "first turn")
 
         for (let turn = 1; turn <= this.spec.maxTurns; turn++) {
             const turnResult = await this.runOneTurn(context, attempt, turn)
             context = turnResult.context
+            if (turnResult.success) this.stableItems = [...context.getItems()]
 
             // End-of-turn AgentResult is what fires Critic. `usage` is the
             // per-turn round sum, same snake_case shape as Claude's
@@ -912,6 +940,8 @@ export class OpenAIStoryAgent extends BusMember {
                     }),
                 )
             }
+            // Every call here has its output, so a fork taken now is a valid request.
+            this.stableItems = [...context.getItems()]
             const calls: FunctionCallItem[] = []
             const toolsAllowed = !finalizationRequested
             let sawMessage = false
@@ -926,6 +956,7 @@ export class OpenAIStoryAgent extends BusMember {
                     perRoundMs,
                 )
                 usage.add(result.usage)
+                this.lastRequestTokens = result.usage?.inputTokens ?? this.lastRequestTokens
 
                 for (const item of result.items) {
                     if (item.type === "function_call") {

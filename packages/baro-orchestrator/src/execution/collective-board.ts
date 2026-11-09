@@ -124,6 +124,7 @@ import {
     StoryCheckpointWithdrawn,
     type StoryCheckpointRequestedData,
 } from "../semantic-events.js"
+import type { StorySessionSource } from "../harness/session-lineage.js"
 import type { RunSummary } from "./run-summary.js"
 import {
     toRuntimeReplanProposal,
@@ -299,6 +300,8 @@ export class CollectiveBoard extends SerializedObserver {
     >()
     /** Stories started early: prerequisite → the checkpoint sha they started on. */
     private readonly startedOn = new Map<string, Map<string, string>>()
+    /** Agent-added story → the story whose agent proposed it. */
+    private readonly proposedBy = new Map<string, string>()
     /** Accepted early starters waiting for their prerequisites to integrate. */
     private readonly integrationHold = new Map<
         string,
@@ -3226,6 +3229,7 @@ export class CollectiveBoard extends SerializedObserver {
             this.unadmit(story.id)
             return
         }
+        const sessionSource = this.sessionSourceFor(story, checkpointBase, recovery)
         const offerId = this.offers.nextOfferId(story.id)
         const basePrompt = buildStoryOfferPrompt(this.prd, story)
         const recoveryPrompt = recovery
@@ -3277,6 +3281,7 @@ export class CollectiveBoard extends SerializedObserver {
                     : {}),
                 ...(surface ? { surface } : {}),
                 ...(checkpointBase.length > 0 ? { checkpointBase } : {}),
+                ...(sessionSource ? { sessionSource } : {}),
                 ...(recovery ? { recovery } : {}),
                 // A host-suspended or unjudged story re-bases through the
                 // host-owned step rather than starting from a fresh worktree
@@ -3335,6 +3340,29 @@ export class CollectiveBoard extends SerializedObserver {
 
     /** The checkpoints a story starts on, [] when every prerequisite
      * integrated, or null when it cannot start yet. */
+    /**
+     * Whose session the story's agent should start from. A story resumed after
+     * suspending on its prerequisites continues its own; otherwise it forks
+     * the story it builds on: the checkpoint it starts from, the agent that
+     * proposed it, or its only prerequisite. Several unrelated prerequisites
+     * give no single session to inherit, so the story starts cold.
+     */
+    private sessionSourceFor(
+        story: PrdStory,
+        checkpointBase: ReadonlyArray<{ storyId: string }>,
+        recovery: { kind: string } | undefined,
+    ): StorySessionSource | undefined {
+        if (recovery?.kind === "dependency") return { storyId: story.id, mode: "continue" }
+        if (recovery) return undefined
+        const proposer = this.proposedBy.get(story.id)
+        const parent =
+            checkpointBase.find(({ storyId }) => storyId === proposer)?.storyId ??
+            checkpointBase[0]?.storyId ??
+            proposer ??
+            (story.dependsOn.length === 1 ? story.dependsOn[0] : undefined)
+        return parent && parent !== story.id ? { storyId: parent, mode: "fork" } : undefined
+    }
+
     private checkpointBaseFor(
         story: PrdStory,
         recovery: { kind: string } | undefined,
@@ -3861,7 +3889,10 @@ export class CollectiveBoard extends SerializedObserver {
     private emitGraphDecision(event: SemanticEvent<string, unknown>): void {
         this.emit(event)
         if (!RuntimeReplanApplied.is(event)) return
+        const proposer = event.payload.sourceStoryId
+        const proposerIsStory = (this.prd?.userStories ?? []).some((story) => story.id === proposer)
         for (const story of event.payload.mutation.addedStories) {
+            if (proposerIsStory && story.id !== proposer) this.proposedBy.set(story.id, proposer)
             this.emit(
                 GoalStoryInvariantMapped.create({
                     runId: this.opts.runId,

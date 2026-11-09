@@ -49,6 +49,18 @@ import {
 } from "../story-contract.js"
 import { criticInput } from "../../acceptance/critic-input.js"
 import { StreamingTurnLifecycle } from "../../acceptance/turn-review.js"
+import { emit } from "../../tui-protocol.js"
+import { inheritancePreamble, type SessionInheritance } from "../session-lineage.js"
+
+/** A resume that fails does so at once; a later failure is the story's own. */
+const INHERIT_FALLBACK_WINDOW_MS = 60_000
+
+interface ClaudeAttemptResult {
+    success: boolean
+    summary: ClaudeRunSummary | null
+    error: string | null
+    failure?: StoryFailureData
+}
 
 
 /**
@@ -94,6 +106,7 @@ export class StoryAgent extends BusMember {
     /** Rejected capacity frame for the currently executing CLI attempt. */
     private currentProviderCapacitySignal: unknown | undefined
     private stopRequested = false
+    private inheritAbandoned = false
     /** Lifecycle signal also closes the tiny transition→timer lost-wake window. */
     private readonly retryDelayController = new AbortController()
     private suspension: StorySuspension | null = null
@@ -420,14 +433,39 @@ export class StoryAgent extends BusMember {
         })
     }
 
-    private async runOneAttempt(
+    /**
+     * Only the first attempt inherits a session. One that dies before its
+     * first result (the session to resume was gone) is rerun cold at once and
+     * does not use up a retry: inheritance is an optimization, never a way to
+     * fail a story.
+     */
+    private async runOneAttempt(attempt: number): Promise<ClaudeAttemptResult> {
+        const inherit =
+            attempt === 1 && !this.inheritAbandoned ? this.spec.inherit : undefined
+        const startedAt = Date.now()
+        const result = await this.runAttemptProcess(attempt, inherit)
+        if (
+            !inherit ||
+            result.success ||
+            result.summary?.lastResult ||
+            this.stopRequested ||
+            Date.now() - startedAt > INHERIT_FALLBACK_WINDOW_MS
+        ) return result
+        this.inheritAbandoned = true
+        emit({
+            type: "story_log",
+            id: this.spec.id,
+            line:
+                `[session] could not start from ${inherit.fromStoryId}'s session ` +
+                `(${result.error ?? "no result"}); starting cold`,
+        })
+        return this.runAttemptProcess(attempt, undefined)
+    }
+
+    private async runAttemptProcess(
         attempt: number,
-    ): Promise<{
-        success: boolean
-        summary: ClaudeRunSummary | null
-        error: string | null
-        failure?: StoryFailureData
-    }> {
+        inherit: SessionInheritance | undefined,
+    ): Promise<ClaudeAttemptResult> {
         if (!this.envRef) {
             return { success: false, summary: null, error: "no environment" }
         }
@@ -452,6 +490,12 @@ export class StoryAgent extends BusMember {
             model: this.spec.model,
             effort: this.spec.effort,
             claudeBin: this.spec.claudeBin,
+            ...(inherit?.claudeSessionId
+                ? {
+                      resumeSessionId: inherit.claudeSessionId,
+                      forkSession: inherit.mode === "fork",
+                  }
+                : {}),
             targetedMessageAuthority: this.spec.targetedMessageAuthority,
             targetedMessageCorrelation: correlationOf(this.spec),
             ignoreCorrelatedTerminalFeedback:
@@ -467,6 +511,17 @@ export class StoryAgent extends BusMember {
         // publish credentials.
         claude.withoutPublishCredentials()
         this.currentClaude = claude
+        this.spec.sessions?.track(this.spec.id, () => {
+            const sessionId = claude.getSessionId()
+            return sessionId
+                ? {
+                      backend: "claude",
+                      sessionId,
+                      contextTokens: claude.getContextTokens(),
+                      cwd: this.spec.cwd,
+                  }
+                : null
+        })
         this.terminalSourceRegistrar?.(claude)
         claude.join(this.envRef)
         claude.start(this.envRef)
@@ -477,7 +532,11 @@ export class StoryAgent extends BusMember {
         // first would deadlock. Send the prompt up front; stdin stays open
         // and the multi-turn lifecycle closes it.
         try {
-            claude.sendUserMessage(this.spec.prompt)
+            claude.sendUserMessage(
+                inherit?.claudeSessionId
+                    ? `${inheritancePreamble(inherit, this.spec.id, this.spec.cwd)}\n\n${this.spec.prompt}`
+                    : this.spec.prompt,
+            )
         } catch (e) {
             const error = e instanceof Error ? e.message : String(e)
             await this.quiesceCurrentClaude()

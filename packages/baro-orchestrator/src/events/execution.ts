@@ -1,5 +1,6 @@
 /** Story execution lifecycle: runs, levels, spawns, results, discovery, recovery. Wire `type` strings are frozen (see ../semantic-events.ts). */
 
+import type { StorySessionSource } from "../harness/session-lineage.js"
 import { defineSemanticEvent } from "./define.js"
 import type { RunVerificationEvidence, RunVerificationStatus } from "./verification.js"
 
@@ -223,6 +224,8 @@ export interface StorySpawnRequestData {
      * they published: the worktree merges each `sha` onto the run branch,
      * and the story integrates only after every one of them has. */
     checkpointBase?: ReadonlyArray<{ readonly storyId: string; readonly sha: string }>
+    /** Whose session this story's agent starts from (harness/session-lineage.ts). */
+    sessionSource?: StorySessionSource
     /** Present only on a re-offer of a host-suspended or unjudged story: the
      * spawn must go through the host-owned resume step so the recorded
      * creation SHA moves with the re-base instead of staying on a stale one. */
