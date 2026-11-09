@@ -149,6 +149,9 @@ export function inheritancePreamble(
         `there belong to ${inherit.fromStoryId}. Use the same relative paths under your own worktree and never`,
         "write outside it. Your tree holds the run branch plus any checkpoints named below, so it can",
         `differ from what ${inherit.fromStoryId} last saw: check with git before relying on a line number.`,
+        "",
+        `Coordination commands and tokens that appear above are ${inherit.fromStoryId}'s and act in its name. Use only`,
+        "the ones given below.",
     ].join("\n")
 }
 

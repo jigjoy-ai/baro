@@ -76,6 +76,8 @@ describe("which session a story starts from", () => {
         assert.match(fork, /You are now story S2/)
         assert.match(fork, /Your worktree is \/wt\/S2\. S1 worked in \/wt\/S1/)
         assert.match(fork, /never\s+write outside it/)
+        // The parent's lease token is in the inherited context.
+        assert.match(fork, /tokens that appear above are S1's[\s\S]*Use only\s+the ones given below/)
         const resumed = inheritancePreamble({ mode: "continue", fromStoryId: "S2", parentCwd: "/wt/S2" }, "S2", "/wt/S2")
         assert.match(resumed, /You are resuming story S2/)
         assert.match(resumed, /re-based onto the run branch/)
