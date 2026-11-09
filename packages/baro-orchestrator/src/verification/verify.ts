@@ -25,6 +25,7 @@ import { emit, type BaroEvent } from "../tui-protocol.js"
 import { resolvePytestRunner } from "./python-env.js"
 import { cargoEnvFor } from "./cargo-env.js"
 import { changedPathsSince, scopeCommandsToChange } from "./change-scope.js"
+import { pristineLockfiles, restoreLockfiles } from "./lockfile-guard.js"
 import { resolveCommandCwd, RETRY_BACKOFF_MS, spawnRunCwd } from "./command-cwd.js"
 import type { VerifyCwdResolver } from "./command-cwd.js"
 import {
@@ -1526,6 +1527,7 @@ export async function verifyBuild(
     if (stale.length > 0) {
         throwIfAborted(options.signal)
         const install = dependencyRefreshCommand(cwd, stale)
+        const pristine = pristineLockfiles(cwd)
         emitActivity({
             type: "activity",
             id: "_verify",
@@ -1550,6 +1552,15 @@ export async function verifyBuild(
         if (outcome.status === "failed") {
             ran = true
             failures.push({ cmd: install.label, tail: outcome.tail })
+        }
+        const restored = restoreLockfiles(cwd, pristine)
+        if (restored.length > 0) {
+            emitActivity({
+                type: "activity",
+                id: "_verify",
+                kind: "warn",
+                text: `restored ${restored.join(", ")}: the dependency refresh rewrote it, and the change touched no package.json`,
+            })
         }
     }
     for (const c of scoped.run) {

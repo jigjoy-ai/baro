@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process"
 import {
     existsSync,
     lstatSync,
@@ -872,6 +873,44 @@ describe("dependency refresh before the gate", () => {
             assert.equal(r.ok, true)
             assert.ok(existsSync(join(dir, "node_modules", "@t", "core")))
         })
+    })
+
+    it("puts back a committed lockfile the refresh rewrote, unless a manifest changed", async () => {
+        // A committed lockfile lagging package.json was rewritten by the
+        // refresh in a story worktree; every gate then saw a JavaScript change.
+        for (const manifestChanged of [false, true]) {
+            await withTempDir("baro-verify-lock-", async (dir) => {
+                const git = (...args: string[]) =>
+                    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd: dir, encoding: "utf8" })
+                const manifest = { name: "root", private: true, workspaces: ["packages/*"], scripts: { test: "true" } }
+                writeFileSync(join(dir, "package.json"), JSON.stringify(manifest))
+                mkdirSync(join(dir, "packages", "core"), { recursive: true })
+                writeFileSync(join(dir, "packages", "core", "package.json"), JSON.stringify({ name: "@t/core", version: "0.0.0" }))
+                const staleLock = JSON.stringify({ name: "root", lockfileVersion: 3, requires: true, packages: { "": { name: "root" } } })
+                writeFileSync(join(dir, "package-lock.json"), staleLock)
+                git("init", "-q", "-b", "main")
+                git("add", ".")
+                git("commit", "-q", "-m", "base")
+                if (manifestChanged) {
+                    writeFileSync(join(dir, "package.json"), JSON.stringify({ ...manifest, description: "changed" }))
+                }
+                const activity: string[] = []
+                const r = await verifyBuild(dir, {
+                    emitActivity: (event) => {
+                        if (event.type === "activity") activity.push(event.text)
+                    },
+                })
+                assert.equal(r.ok, true, JSON.stringify(r.failures))
+                assert.ok(existsSync(join(dir, "node_modules", "@t", "core")), "the install itself stays")
+                const lock = readFileSync(join(dir, "package-lock.json"), "utf8")
+                if (manifestChanged) {
+                    assert.notEqual(lock, staleLock, "the lock update belongs to the manifest change")
+                } else {
+                    assert.equal(lock, staleLock)
+                    assert.ok(activity.some((line) => /restored package-lock\.json/u.test(line)), activity.join("\n"))
+                }
+            })
+        }
     })
 
     it("stays out of the way when refresh is off", async () => {
