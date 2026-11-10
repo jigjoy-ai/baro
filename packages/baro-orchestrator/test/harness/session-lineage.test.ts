@@ -5,6 +5,7 @@ import { join } from "node:path"
 import { describe, it } from "node:test"
 
 import { StoryAgent } from "../../src/harness/claude/story-agent.js"
+import { AgentResult } from "../../src/semantic-events.js"
 import { mainThreadRequestTokens } from "../../src/harness/claude/cli-participant.js"
 import { OpenAIStoryAgent } from "../../src/harness/openai/story-agent.js"
 import {
@@ -129,7 +130,9 @@ process.stdin.on("data", (chunk) => {
   console.log(JSON.stringify({ type: "system", subtype: "init", session_id: ${JSON.stringify(sessionId)} }))
   console.log(JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "ok" }],
     usage: { input_tokens: 4, cache_read_input_tokens: 30000, cache_creation_input_tokens: 996, output_tokens: 10 } } }))
-  console.log(JSON.stringify({ type: "result", subtype: "success", session_id: ${JSON.stringify(sessionId)}, is_error: false, result: "done" }))
+  // The CLI's cost is a running total; a resumed session starts from its parent's.
+  console.log(JSON.stringify({ type: "result", subtype: "success", session_id: ${JSON.stringify(sessionId)}, is_error: false, result: "done",
+    total_cost_usd: args.includes("--resume") ? 2.3 : 2.0 }))
   setTimeout(() => process.exit(0), 20)
 })
 `,
@@ -147,7 +150,8 @@ describe("a Claude story that inherits a session", () => {
     const run = async (dir: string, id: string, extra: { sessions?: SessionLedger; inherit?: SessionInheritance }) => {
         const cwd = join(dir, id)
         mkdirSync(cwd, { recursive: true })
-        return await new StoryAgent({
+        const env = captureEnv()
+        const outcome = await new StoryAgent({
             id,
             prompt: `task of ${id}`,
             cwd,
@@ -156,7 +160,9 @@ describe("a Claude story that inherits a session", () => {
             timeoutSecs: FIXTURE_TIMEOUT_SECS,
             quietTimeoutMs: 5,
             ...extra,
-        }).run(captureEnv())
+        }).run(env)
+        const costs = env.events.filter(AgentResult.is).map((event) => event.payload.totalCostUsd)
+        return { ...outcome, costs }
     }
 
     it("records its session, and a fork resumes it with --fork-session and is told it is a fork", async () => {
@@ -168,11 +174,16 @@ describe("a Claude story that inherits a session", () => {
             const recorded = sessions.get("S1")
             assert.equal(recorded?.sessionId, "session-of-S1")
             assert.equal(recorded?.contextTokens, 31_000)
+            assert.equal(recorded?.costUsd, 2.0)
             assert.ok(!calls(dir)[0]!.args.includes("--resume"), "the first story starts cold")
 
             const decision = resolveInheritance({ storyId: "S1", mode: "fork" }, "claude", sessions, {})
             assert.ok(decision && "inherit" in decision)
-            assert.equal((await run(dir, "S2", { sessions, inherit: decision.inherit })).success, true)
+            const forked = await run(dir, "S2", { sessions, inherit: decision.inherit })
+            assert.equal(forked.success, true)
+            // The fork's process reports 2.3 in total; 2.0 of that was its parent's.
+            assert.equal(forked.costs.length, 1)
+            assert.ok(Math.abs(forked.costs[0]! - 0.3) < 1e-9, String(forked.costs[0]))
 
             const fork = calls(dir)[1]!
             const resume = fork.args.indexOf("--resume")

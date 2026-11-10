@@ -494,6 +494,9 @@ export class StoryAgent extends BusMember {
                 ? {
                       resumeSessionId: inherit.claudeSessionId,
                       forkSession: inherit.mode === "fork",
+                      ...(inherit.costUsd !== undefined
+                          ? { costBaselineUsd: inherit.costUsd }
+                          : {}),
                   }
                 : {}),
             targetedMessageAuthority: this.spec.targetedMessageAuthority,
@@ -518,6 +521,7 @@ export class StoryAgent extends BusMember {
                       backend: "claude",
                       sessionId,
                       contextTokens: claude.getContextTokens(),
+                      costUsd: claude.getCumulativeCostUsd(),
                       cwd: this.spec.cwd,
                   }
                 : null

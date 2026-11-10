@@ -148,6 +148,31 @@ console.log(JSON.stringify({ type: "result", subtype: "success", session_id: "en
         })
     })
 
+    // A story with four turns reported its first turn's cost four times (a
+    // bench run read as $24 that cost $13), and a fork reported its parent's again.
+    it("reports what each turn added to the session's running cost", async () => {
+        await withTempDir("baro-claude-cost-", async (dir) => {
+            const bin = join(dir, "fake-claude-cost.mjs")
+            const result = (total: number) => ({
+                type: "result", subtype: "success", session_id: "s", is_error: false, result: "ok", total_cost_usd: total,
+            })
+            const events = [{ type: "system", subtype: "init", session_id: "s" }, result(1.5), result(1.75), result(2.5)]
+            writeFileSync(bin, `#!/usr/bin/env node\nfor (const event of ${JSON.stringify(events)}) console.log(JSON.stringify(event));\n`)
+            chmodSync(bin, 0o755)
+            const costsOf = async (options: { costBaselineUsd?: number }) => {
+                const env = captureEnv()
+                const participant = new ClaudeCliParticipant("claude-agent", { cwd: dir, claudeBin: bin, ...options })
+                participant.start(env)
+                await participant.done
+                assert.equal(participant.getCumulativeCostUsd(), 2.5)
+                return env.events.filter(AgentResult.is).map((event) => event.payload.totalCostUsd)
+            }
+            assert.deepEqual(await costsOf({}), [1.5, 0.25, 0.75])
+            // Resumed from a session that had already cost 1.0.
+            assert.deepEqual(await costsOf({ costBaselineUsd: 1.0 }), [0.5, 0.25, 0.75])
+        })
+    })
+
     it("forwards targeted messages to the fake Claude stdin stream", async () => {
         await withTempDir("baro-claude-cli-stdin-", async (dir) => {
             const { bin, stdinPath } = writeFakeClaudeStdinCapture(dir)

@@ -27,6 +27,8 @@ export interface SessionRecord {
     readonly items?: readonly ContextItem[]
     /** Size of the session's last model request; null when never observed. */
     readonly contextTokens: number | null
+    /** Claude lane: the session's running cost total, which a resumed process reports again. */
+    readonly costUsd?: number | null
     readonly cwd: string
 }
 
@@ -36,6 +38,7 @@ export interface SessionInheritance {
     readonly parentCwd: string
     readonly contextTokens: number
     readonly claudeSessionId?: string
+    readonly costUsd?: number
     readonly items?: readonly ContextItem[]
 }
 
@@ -110,6 +113,7 @@ export function resolveInheritance(
             parentCwd: record.cwd,
             contextTokens: record.contextTokens,
             ...(record.sessionId ? { claudeSessionId: record.sessionId } : {}),
+            ...(typeof record.costUsd === "number" ? { costUsd: record.costUsd } : {}),
             ...(record.items ? { items: record.items } : {}),
         },
     }
