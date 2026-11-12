@@ -584,7 +584,11 @@ export class OpenAIStoryAgent extends BusMember {
         }
         // A suspension is a Board decision this story cooperated with, not a
         // failure it should be recovered from; the worktree resumes.
-        if (this.suspension.blocksNewWork) {
+        const blockId = this.suspension.acceptedBlockId
+        const suspension = blockId
+            ? { kind: "dependency" as const, blockId }
+            : undefined
+        if (suspension) {
             lastError = this.suspension.outcomeText
             lastFailure = undefined
             this.transition("aborted", lastError)
@@ -604,6 +608,7 @@ export class OpenAIStoryAgent extends BusMember {
                 durationSecs,
                 error: lastError,
                 ...(lastFailure ? { failure: lastFailure } : {}),
+                ...(suspension ? { suspension } : {}),
                 ...correlationOf(this.spec),
             }),
         )
@@ -616,6 +621,7 @@ export class OpenAIStoryAgent extends BusMember {
             finalSummary: null,
             error: lastError,
             ...(lastFailure ? { failure: lastFailure } : {}),
+            ...(suspension ? { suspension } : {}),
         })
     }
 

@@ -555,6 +555,53 @@ describe("OpenAIStoryAgent", () => {
         })
     })
 
+    it("settles an accepted dependency suspension as a suspension, not a failure", async () => {
+        await withTempDir("openai-story-agent-suspend-", async (dir) => {
+            const env = captureEnv()
+            const agent = new OpenAIStoryAgent(
+                {
+                    id: "S5",
+                    prompt: "document S1-S3 in the README",
+                    cwd: dir,
+                    retries: 1,
+                    retryDelayMs: 0,
+                    quietTimeoutMs: 5,
+                    maxTurns: 1,
+                },
+                {
+                    model: "fake-model",
+                    maxRoundsPerTurn: 2,
+                    perRoundTimeoutSecs: 1,
+                },
+            )
+            let suspended: Promise<unknown> | undefined
+            Object.defineProperty(agent, "runRound", {
+                value: async () => {
+                    suspended = agent.suspend("block-S5")
+                    return { items: [writeCall("call-1", "README.md")], usage: undefined }
+                },
+            })
+
+            const outcome = await agent.run(env)
+            await suspended
+
+            const results = env.events.filter(StoryResult.is)
+            assert.equal(results.length, 1)
+            assert.equal(results[0]!.payload.success, false)
+            assert.deepEqual(results[0]!.payload.suspension, {
+                kind: "dependency",
+                blockId: "block-S5",
+            })
+            assert.equal(results[0]!.payload.failure, undefined)
+            assert.deepEqual(outcome.suspension, {
+                kind: "dependency",
+                blockId: "block-S5",
+            })
+            assert.equal(outcome.attempts, 1, "a suspension does not spend a retry")
+            assert.equal(existsSync(join(dir, "README.md")), false)
+        })
+    })
+
     it("classifies quota errors and skips same-route story retries", async () => {
         await withTempDir("openai-story-agent-capacity-", async (dir) => {
             const cwd = join(dir, "cwd")

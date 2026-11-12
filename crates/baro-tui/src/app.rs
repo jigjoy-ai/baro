@@ -258,6 +258,8 @@ pub struct StoryState {
     pub replan: Option<ReplanMark>,
     /// Routed "backend:model" lane from the `routed` event.
     pub route: Option<String>,
+    /// Stories a suspended story waits on; empty once it runs again.
+    pub waits_on: Vec<String>,
 }
 
 impl StoryState {
@@ -277,6 +279,7 @@ impl StoryState {
             merge: None,
             replan: None,
             route: None,
+            waits_on: Vec::new(),
         }
     }
 }
@@ -1607,6 +1610,7 @@ impl App {
             BaroEvent::StoryStart { id, title } => {
                 if let Some(story) = self.stories.iter_mut().find(|s| s.id == id) {
                     story.status = StoryStatus::Running;
+                    story.waits_on.clear();
                 }
                 let level_owned = self.session_feed.blocks().any(|b| {
                     matches!(b, SessionBlock::Level { story_ids, .. }
@@ -1626,10 +1630,11 @@ impl App {
                 );
             }
 
-            BaroEvent::StorySuspended { id, block_id: _ } => {
+            BaroEvent::StorySuspended { id, waits_on, block_id: _ } => {
                 if let Some(story) = self.stories.iter_mut().find(|s| s.id == id) {
                     story.status = StoryStatus::Pending;
                     story.error = None;
+                    story.waits_on = waits_on;
                 }
                 self.active_stories.remove(&id);
                 let count = self.active_stories.len();
@@ -2344,12 +2349,17 @@ mod tests {
 
         feed(
             &mut app,
-            r#"{"type":"story_suspended","id":"S1","block_id":"block-S1-S0"}"#,
+            r#"{"type":"story_suspended","id":"S1","waits_on":["S0"],"block_id":"block-S1-S0"}"#,
         );
 
         assert_eq!(app.story("S1").status, StoryStatus::Pending);
         assert_eq!(app.story("S1").error, None);
+        assert_eq!(app.story("S1").waits_on, vec!["S0"]);
         assert!(!app.active_stories.contains_key("S1"));
+
+        feed(&mut app, r#"{"type":"story_start","id":"S1","title":"S1"}"#);
+        assert_eq!(app.story("S1").status, StoryStatus::Running);
+        assert!(app.story("S1").waits_on.is_empty());
     }
 
     #[test]

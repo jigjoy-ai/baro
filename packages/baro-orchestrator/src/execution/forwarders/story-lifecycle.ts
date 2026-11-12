@@ -13,6 +13,7 @@ import {
     type StoryResultData,
     StoryRouted,
     StorySpawnRequest,
+    WorkBlockAccepted,
     WorkLeaseGranted,
     WorkLeaseReleased,
 } from "../../semantic-events.js"
@@ -30,7 +31,7 @@ const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "NotebookEdit", "edit_file"])
  * Mirrors story lifecycle transitions as BaroEvents consumed by the Rust TUI.
  *
  * Subscribes to: AgentState, StoryResult, StoryRouted, StoryMerged,
- * StoryMergeFailed, and per-agent function calls.
+ * StoryMergeFailed, WorkBlockAccepted, and per-agent function calls.
  * Emits: story_start, story_suspended, story_complete, story_error,
  * story_retry, routed, story_merged, merge_failed.
  */
@@ -45,6 +46,7 @@ export class StoryLifecycleForwarder extends BusMember {
     // attempt's touches, not files a failed attempt wrote and abandoned.
     private filesByStory = new Map<string, Map<string, "created" | "modified">>()
     private pendingIntegration = new Map<string, StoryResultData>()
+    private waitsOnByBlock = new Map<string, readonly string[]>()
     private readonly leases = new ActiveLeaseRegistry()
     private collectiveAuthorities: Readonly<CollectiveStoryLifecycleAuthorities> | null = null
 
@@ -102,6 +104,14 @@ export class StoryLifecycleForwarder extends BusMember {
                 return
             }
             this.handleAgentState(event.payload)
+            return
+        }
+        if (WorkBlockAccepted.is(event)) {
+            if (!this.acceptsBlockSource(source, event.payload.runId)) return
+            this.waitsOnByBlock.set(
+                blockKey(event.payload.storyId, event.payload.blockId),
+                [...event.payload.requiredStoryIds],
+            )
             return
         }
         if (StorySpawnRequest.is(event)) {
@@ -215,9 +225,13 @@ export class StoryLifecycleForwarder extends BusMember {
             // visible as another story_start rather than remaining "running".
             this.startedStories.delete(item.storyId)
             this.filesByStory.delete(item.storyId)
+            const block = blockKey(item.storyId, item.suspension.blockId)
+            const waitsOn = this.waitsOnByBlock.get(block) ?? []
+            this.waitsOnByBlock.delete(block)
             emit({
                 type: "story_suspended",
                 id: item.storyId,
+                waits_on: [...waitsOn],
                 block_id: item.suspension.blockId,
             })
             return
@@ -273,6 +287,17 @@ export class StoryLifecycleForwarder extends BusMember {
         return (
             authorities !== null &&
             source === authorities.broker &&
+            runId === authorities.runId
+        )
+    }
+
+    private acceptsBlockSource(source: BusMember, runId: string): boolean {
+        if (!this.isCollective()) return true
+        const authorities = this.collectiveAuthorities
+        return (
+            authorities !== null &&
+            authorities.board !== undefined &&
+            source === authorities.board &&
             runId === authorities.runId
         )
     }
@@ -392,6 +417,12 @@ export interface CollectiveStoryLifecycleAuthorities {
     broker: BusMember
     repository: BusMember
     outcomeAuthority: StoryOutcomeAuthority
+    /** Accepts dependency blocks; without it `waits_on` stays empty. */
+    board?: BusMember
+}
+
+function blockKey(storyId: string, blockId: string): string {
+    return `${storyId}\0${blockId}`
 }
 
 function integrationKey(

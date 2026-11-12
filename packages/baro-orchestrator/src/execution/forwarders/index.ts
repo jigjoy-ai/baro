@@ -89,6 +89,7 @@ export function joinBaroEventForwarders(
                 broker: authorities.broker,
                 repository: authorities.repository,
                 outcomeAuthority: authorities.outcomeAuthority,
+                board: authorities.board,
             })
             agentStream.sealCollectiveAuthorities({
                 runId: authorities.runId,
