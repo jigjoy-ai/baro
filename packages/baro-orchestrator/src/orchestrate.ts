@@ -109,6 +109,10 @@ import {
     plannerBusAgentId,
     runPlannerBusSession,
 } from "./planning/adapters/planner-bus-session.js"
+import {
+    cargoTargetCacheRoots,
+    pruneCargoTargetCaches,
+} from "./verification/cargo-target-prune.js"
 import { provesOnlyHygiene } from "./verification/hygiene-command.js"
 import { jvmToolchainGap } from "./verification/jvm-commands.js"
 import { RunVerifier } from "./verification/run-verifier.js"
@@ -822,6 +826,22 @@ export async function orchestrate(
             } catch (error) {
                 log(`could not reclaim leftover run dirs: ${error instanceof Error ? error.message : String(error)}`)
             }
+        }
+    }
+    // After the worktree sweep, so units of the dirs it just removed go too.
+    if (runStartCleanupEnabled()) {
+        try {
+            pruneCargoTargetCaches({
+                roots: cargoTargetCacheRoots(),
+                log: (line) => {
+                    process.stderr.write(`[cargo] ${line}\n`)
+                    if (emitTui) emit({ type: "story_log", id: "_git", line })
+                },
+            })
+        } catch (error) {
+            process.stderr.write(
+                `[cargo] could not prune target caches: ${error instanceof Error ? error.message : String(error)}\n`,
+            )
         }
     }
     if (useGit && worktreesEnabled && goalBranch && !integrateInPlace) {

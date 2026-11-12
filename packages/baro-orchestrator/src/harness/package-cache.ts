@@ -17,12 +17,16 @@ export interface StoryPackageCache {
     env: Record<string, string>
 }
 
+export function packageCacheRoot(env: NodeJS.ProcessEnv = process.env): string {
+    const configured = env.BARO_PACKAGE_CACHE?.trim()
+    return configured ? configured : join(homedir(), ".baro", "cache", "packages")
+}
+
 export function storyPackageCache(
     env: NodeJS.ProcessEnv = process.env,
     worktreeRoot: string | null = null,
 ): StoryPackageCache {
-    const configured = env.BARO_PACKAGE_CACHE?.trim()
-    const requested = configured ? configured : join(homedir(), ".baro", "cache", "packages")
+    const requested = packageCacheRoot(env)
     mkdirSync(requested, { recursive: true })
     const root = realpathSync(requested)
     const at = (name: string) => join(root, name)
