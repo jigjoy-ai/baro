@@ -33,6 +33,11 @@ import {
 import { materializeDependencies } from "./integration/dependency-materializer.js"
 import { IntegrationWorktree } from "./integration/integration-worktree.js"
 import { capRunDiff } from "./integration/run-diff-cap.js"
+import {
+    claimRunDir,
+    reclaimStaleRunDirs,
+    worktreesRoot,
+} from "./integration/stale-run-dirs.js"
 import { WorktreeManager } from "./integration/worktree.js"
 import { installAwakeGapReporter } from "./runtime/awake-clock-log.js"
 import { StoryOutcomeAuthority } from "./runtime/story-outcome-authority.js"
@@ -207,6 +212,12 @@ export async function withCriticEvidenceBarrier<T>(
  * any non-"0" value → enabled; only the literal "0" → disabled. */
 export function continuousGateEnabled(): boolean {
     return envFlag("BARO_CONTINUOUS_GATE")
+}
+
+/** "0" stops a run start from reclaiming other runs' leftovers; the test
+ * suite sets it so it never sweeps the machine's real TMPDIR. */
+export function runStartCleanupEnabled(): boolean {
+    return envFlag("BARO_RUN_START_CLEANUP")
 }
 
 export interface OrchestrateConfig {
@@ -733,6 +744,7 @@ export async function orchestrate(
     let shutdownStoryFactories: StoryFactory[] = []
     let shutdownWorktrees: WorktreeManager | null = null
     let integrationWorktree: IntegrationWorktree | null = null
+    let releaseRunDir: (() => void) | null = null
     let continuousGate: ContinuousGateRunner | null = null
     let commitGate: StoryFactoryOptions["commitGate"]
     let mergeAwareness: MergeAwarenessRunner | null = null
@@ -797,6 +809,21 @@ export async function orchestrate(
     const hostOnGoalBranch =
         hostBranch !== null && normalizeGoalBranchName(hostBranch) === goalBranch
     const integrateInPlace = Boolean(config.continueRun) && hostOnGoalBranch
+    if (useGit && worktreesEnabled) {
+        // Claimed before the sweep so a concurrent run start sees this one alive.
+        releaseRunDir = claimRunDir(join(worktreesRoot(), runId))
+        const log = (line: string): void => {
+            process.stderr.write(`[worktree] ${line}\n`)
+            if (emitTui) emit({ type: "story_log", id: "_git", line })
+        }
+        if (runStartCleanupEnabled()) {
+            try {
+                await reclaimStaleRunDirs({ currentRunId: runId, log })
+            } catch (error) {
+                log(`could not reclaim leftover run dirs: ${error instanceof Error ? error.message : String(error)}`)
+            }
+        }
+    }
     if (useGit && worktreesEnabled && goalBranch && !integrateInPlace) {
         if (hostOnGoalBranch) {
             throw new Error(
@@ -2057,6 +2084,7 @@ export async function orchestrate(
         await integrationWorktree?.remove({
             keepIfRetained: shutdownWorktrees?.hasRetainedWorktrees() ?? false,
         })
+        releaseRunDir?.()
         if (dialogueRuntimeCwd) {
             rmSync(dialogueRuntimeCwd, { recursive: true, force: true })
         }

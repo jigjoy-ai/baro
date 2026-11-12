@@ -115,8 +115,8 @@ class RecoveryMaterialError extends Error {}
 /**
  * Per-story worktree lifecycle for one run (one instance per orchestrate()
  * call); the run id scopes branch + dir names so concurrent runs never
- * collide. Crashed prior runs leave inert worktree dirs / branch refs
- * behind — harmless, since each run uses a fresh id.
+ * collide. Crashed prior runs leave worktree dirs / branch refs behind;
+ * the next run start reclaims the dirs (see stale-run-dirs.ts).
  */
 export class WorktreeManager {
     private readonly paths = new Map<string, string>()
@@ -1749,7 +1749,7 @@ function preservationSubject(storyId: string): string {
     return `baro: preserve failed work for story ${storyId}`
 }
 
-function meaningfulStatusLines(status: string): string[] {
+export function meaningfulStatusLines(status: string): string[] {
     return status
         .split("\n")
         .map((line) => line.trimEnd())

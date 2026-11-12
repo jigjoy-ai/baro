@@ -6,3 +6,8 @@ process.env.BARO_OPENCODE_MAJOR ??= "1"
 // on purpose. Lane tests exercise lane logic; the OS sandbox has its own tests
 // (test/harness/os-sandbox.test.ts), which pass their environment explicitly.
 process.env.BARO_UNSAFE_NO_SANDBOX ??= "1"
+
+// Every orchestrate() run start would otherwise reclaim leftovers of other
+// runs in the machine's real TMPDIR and ~/.baro caches. The tests for that
+// cleanup turn it back on against a scratch TMPDIR/HOME.
+process.env.BARO_RUN_START_CLEANUP ??= "0"
