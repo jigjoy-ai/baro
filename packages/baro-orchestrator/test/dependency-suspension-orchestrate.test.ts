@@ -26,6 +26,10 @@ import {
     worktreeRunRoot,
 } from "./integration/worktree-fixture.js"
 
+// Only catches a true deadlock: a real git-backed run took 47s on a loaded
+// machine, so the old 10s bound failed runs that were merely slow.
+const DEADLOCK_GUARD_MS = 300_000
+
 class NeverQuiescingExecutor implements StoryExecutor {
     readonly started: string[] = []
     aborts = 0
@@ -156,7 +160,7 @@ describe("dependency suspension orchestration", () => {
                         executor,
                         auditLogPath: auditPath,
                     }),
-                    10_000,
+                    DEADLOCK_GUARD_MS,
                     "suspension timeout run deadlocked",
                 )
 
@@ -227,7 +231,7 @@ describe("dependency suspension orchestration", () => {
                         executor,
                         auditLogPath: auditPath,
                     }),
-                    10_000,
+                    DEADLOCK_GUARD_MS,
                     "uncertified terminal run deadlocked",
                 )
 

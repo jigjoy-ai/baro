@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { spawn } from "node:child_process"
-import { mkdtemp, readFile, rm } from "node:fs/promises"
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, it } from "node:test"
@@ -15,7 +15,14 @@ import {
     PROCESS_TREE_CAPABILITIES,
     processTreeObserverStats,
     setProcessTreeOwnershipPublisherForTests,
+    type ProcessTreeObserverStats,
 } from "../../src/harness/process-tree.js"
+import {
+    GENEROUS_WAIT_MS,
+    isPidAlive as isAlive,
+    waitFor,
+    waitForPidExit,
+} from "../wait-for.js"
 
 describe("process-tree discovery", () => {
     it("walks a parent table without including unrelated processes", () => {
@@ -200,6 +207,7 @@ describe("process-tree discovery", () => {
                 ownsProcessGroup: true,
                 terminationGraceMs: 50,
                 pollIntervalMs: 10,
+                quiescenceTimeoutMs: GENEROUS_WAIT_MS,
             })
             child.once("close", () => tree.markRootClosed())
 
@@ -215,6 +223,8 @@ describe("process-tree discovery", () => {
                     groupAbsent: true,
                     trackedAbsent: true,
                 })
+                // Absent from the table can still be an unreaped zombie here.
+                await waitForPidExit(child.pid!)
                 assert.equal(isAlive(child.pid!), false)
             } finally {
                 tree.terminate("SIGKILL")
@@ -310,22 +320,16 @@ describe("process-tree discovery", () => {
             child.once("close", () => tree.markRootClosed())
 
             try {
-                await waitForOutputText(child, "ready", 2_000)
+                await waitForOutputText(child, "ready", GENEROUS_WAIT_MS)
                 const before = processTreeObserverStats()
                 tree.refresh()
-                const requiredCompletions = before.activeScans > 0 ? 2 : 1
-                await waitForCondition(
-                    () =>
-                        processTreeObserverStats().scansCompleted >=
-                        before.scansCompleted + requiredCompletions,
-                    2_000,
-                )
+                await waitFor(observedSince(before))
 
-                const observedTerm = waitForOutputText(child, "term", 1_000)
+                const observedTerm = waitForOutputText(child, "term", GENEROUS_WAIT_MS)
                 tree.terminate("SIGTERM")
                 await observedTerm
                 await tree.done
-                await waitForExit(child.pid!)
+                await waitForPidExit(child.pid!)
 
                 assert.equal(isAlive(child.pid!), false)
             } finally {
@@ -367,11 +371,10 @@ describe("process-tree discovery", () => {
                     for (const tree of trees) tree.refresh()
                 }
 
-                await waitForCondition(
+                await waitFor(
                     () =>
                         processTreeObserverStats().scansCompleted >=
                         before.scansCompleted + 2,
-                    2_000,
                 )
                 const after = processTreeObserverStats()
                 assert.equal(after.maxConcurrentScans, 1)
@@ -425,21 +428,14 @@ describe("process-tree discovery", () => {
                 const before = processTreeObserverStats()
                 tree.refresh()
 
-                // If a scan was already in flight, refresh coalesces exactly
-                // one follow-up. Wait for that post-output observation before
-                // making the shim disappear.
-                const requiredCompletions = before.activeScans > 0 ? 2 : 1
-                await waitForCondition(
-                    () =>
-                        processTreeObserverStats().scansCompleted >=
-                        before.scansCompleted + requiredCompletions,
-                    2_000,
-                )
+                // Wait for a post-output observation before making the shim
+                // disappear.
+                await waitFor(observedSince(before))
                 shim.stdin!.end("exit\n")
 
                 await closed
                 await tree.done
-                await waitForExit(providerPid)
+                await waitForPidExit(providerPid)
                 assert.equal(isAlive(providerPid), false)
             } finally {
                 tree.terminate("SIGKILL")
@@ -487,6 +483,9 @@ describe("process-tree discovery", () => {
             let grandchildPid: number | undefined
             try {
                 grandchildPid = await firstNumericLine(shim)
+                const before = processTreeObserverStats()
+                tree.refresh()
+                await waitFor(observedSince(before))
                 const startedAt = Date.now()
                 tree.terminate("SIGTERM")
                 await tree.done
@@ -495,6 +494,7 @@ describe("process-tree discovery", () => {
                     Date.now() - startedAt >= 75,
                     "TERM-resistant grandchild should require timed SIGKILL",
                 )
+                await waitForPidExit(grandchildPid)
                 assert.equal(isAlive(grandchildPid), false)
                 assert.equal(activeProcessTreeCount(), 0)
             } finally {
@@ -530,9 +530,13 @@ describe("process-tree discovery", () => {
                             resolve(code)
                         })
                     })
+                    const before = processTreeObserverStats()
+                    tree.refresh()
+                    await waitFor(observedSince(before))
+                    shim.stdin!.end("exit\n")
                     assert.equal(await closed, exitCode)
                     await tree.done
-                    await waitForExit(grandchildPid)
+                    await waitForPidExit(grandchildPid)
 
                     assert.equal(isAlive(grandchildPid), false)
                     assert.equal(activeProcessTreeCount(), 0)
@@ -565,11 +569,13 @@ describe("process-tree discovery", () => {
         async () => {
             const dir = await mkdtemp(join(tmpdir(), "baro-detached-tree-"))
             const latePath = join(dir, "late.txt")
+            const goPath = join(dir, "go")
+            // Triggered rather than timed: a fixed delay raced the verdict
+            // under load and wrote before the tree had finished draining.
             const writerProgram = [
                 'const fs = require("node:fs");',
                 'process.on("SIGTERM", () => {});',
-                `setTimeout(() => fs.writeFileSync(${JSON.stringify(latePath)}, "late"), 900);`,
-                "setInterval(() => {}, 1000);",
+                `setInterval(() => { if (fs.existsSync(${JSON.stringify(goPath)})) fs.writeFileSync(${JSON.stringify(latePath)}, "late"); }, 10);`,
             ].join("")
             const shimProgram = [
                 'const { spawn } = require("node:child_process");',
@@ -586,7 +592,7 @@ describe("process-tree discovery", () => {
                 ownsProcessGroup: true,
                 terminationGraceMs: 50,
                 pollIntervalMs: 10,
-                quiescenceTimeoutMs: 500,
+                quiescenceTimeoutMs: GENEROUS_WAIT_MS,
             })
             const closed = new Promise<void>((resolve) => {
                 shim.once("close", () => {
@@ -600,13 +606,7 @@ describe("process-tree discovery", () => {
                 writerPid = await firstNumericLine(shim)
                 const before = processTreeObserverStats()
                 tree.refresh()
-                const requiredCompletions = before.activeScans > 0 ? 2 : 1
-                await waitForCondition(
-                    () =>
-                        processTreeObserverStats().scansCompleted >=
-                        before.scansCompleted + requiredCompletions,
-                    2_000,
-                )
+                await waitFor(observedSince(before))
                 assert.ok(
                     tree.ownershipSnapshots()?.some(
                         (group) => group.processGroupId === writerPid,
@@ -617,13 +617,13 @@ describe("process-tree discovery", () => {
                 shim.stdin!.end("exit\n")
                 await closed
                 assert.equal(await tree.quiescence, true)
-                await waitForExit(writerPid)
+                await waitForPidExit(writerPid)
                 assert.equal(isAlive(writerPid), false)
 
-                // Prove the positive verdict was not merely early: the
-                // escaped child would have written after the old group-only
-                // certificate had already resolved.
-                await new Promise((resolve) => setTimeout(resolve, 950))
+                // Prove the positive verdict was not merely early: an escaped
+                // child still alive after it would write on this trigger.
+                await writeFile(goPath, "go")
+                await new Promise((resolve) => setTimeout(resolve, 200))
                 await assert.rejects(readFile(latePath, "utf8"), /ENOENT/)
             } finally {
                 tree.terminate("SIGKILL")
@@ -704,17 +704,19 @@ describe("process-tree discovery", () => {
             let childPid: number | undefined
 
             try {
-                assert.ok(
-                    generation >= 2,
-                    "both root memberships must be durably registered first",
-                )
+                // The constructor's synchronous `ps -p` can time out under
+                // load; the shared observer then registers within its grace.
+                await waitFor(() => generation >= 2, {
+                    message: "both root memberships to be durably registered first",
+                })
                 const childPidPromise = firstNumericLine(shim)
                 shim.stdin!.end("spawn\n")
                 childPid = await childPidPromise
                 tree.refresh()
 
                 await tree.done
-                await waitForExit(childPid)
+                await waitForPidExit(childPid)
+                await waitForPidExit(shim.pid!)
 
                 assert.ok(failedPublications >= 1)
                 assert.equal(isAlive(shim.pid!), false)
@@ -789,9 +791,8 @@ describe("process-tree discovery", () => {
             try {
                 const before = processTreeObserverStats()
                 stableTree.refresh()
-                await waitForCondition(
+                await waitFor(
                     () => generation >= 1,
-                    2_000,
                 )
 
                 // A neighbour whose root exits before any observation keeps
@@ -821,15 +822,13 @@ describe("process-tree discovery", () => {
                 const generationBefore = generation
                 const scansBefore = processTreeObserverStats().scansCompleted
                 stableTree.refresh()
-                await waitForCondition(
+                await waitFor(
                     () =>
                         processTreeObserverStats().scansCompleted >=
                         scansBefore + 1,
-                    2_000,
                 )
-                await waitForCondition(
+                await waitFor(
                     () => generation > generationBefore,
-                    2_000,
                 )
 
                 assert.equal(isAlive(stable.pid!), true, "registered sibling survives")
@@ -881,7 +880,7 @@ describe("process-tree discovery", () => {
                 descendantPid = await firstNumericLine(shim)
                 tree.terminate("SIGTERM")
                 await tree.done
-                await waitForExit(descendantPid)
+                await waitForPidExit(descendantPid)
                 assert.equal(isAlive(descendantPid), false)
             } finally {
                 tree.terminate("SIGKILL")
@@ -909,11 +908,12 @@ function naturalExitTree(exitCode: number): {
     const shimProgram = [
         'const { spawn } = require("node:child_process");',
         `const child = spawn(process.execPath, ["-e", ${JSON.stringify(grandchildProgram)}], { stdio: ["ignore", "pipe", "ignore"] });`,
-        `child.stdout.once("data", () => { console.log(child.pid); setTimeout(() => process.exit(${exitCode}), 250); });`,
-        "setInterval(() => {}, 1000);",
+        'child.stdout.once("data", () => console.log(child.pid));',
+        // Exit on cue, not after a fixed delay that can beat the observer.
+        `process.stdin.once("data", () => process.exit(${exitCode}));`,
     ].join("")
     const shim = spawn(process.execPath, ["-e", shimProgram], {
-        stdio: ["ignore", "pipe", "ignore"],
+        stdio: ["pipe", "pipe", "ignore"],
     })
     return {
         shim,
@@ -924,12 +924,19 @@ function naturalExitTree(exitCode: number): {
     }
 }
 
+// Only a scan that started after `before` and actually read a table counts:
+// a `ps` that times out under load completes without observing anything.
+function observedSince(before: ProcessTreeObserverStats): () => boolean {
+    return () =>
+        processTreeObserverStats().lastObservedScan > before.scansStarted
+}
+
 function firstNumericLine(child: ReturnType<typeof spawn>): Promise<number> {
     return new Promise((resolve, reject) => {
         let buffer = ""
         const timeout = setTimeout(
             () => reject(new Error("timed out waiting for grandchild pid")),
-            2_000,
+            GENEROUS_WAIT_MS,
         )
         child.once("error", reject)
         child.stdout!.setEncoding("utf8")
@@ -941,35 +948,6 @@ function firstNumericLine(child: ReturnType<typeof spawn>): Promise<number> {
             resolve(Number(line))
         })
     })
-}
-
-function isAlive(pid: number): boolean {
-    try {
-        process.kill(pid, 0)
-        return true
-    } catch (error) {
-        return (error as NodeJS.ErrnoException).code === "EPERM"
-    }
-}
-
-async function waitForExit(pid: number): Promise<void> {
-    const deadline = Date.now() + 2_000
-    while (isAlive(pid) && Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 10))
-    }
-}
-
-async function waitForCondition(
-    condition: () => boolean,
-    timeoutMs: number,
-): Promise<void> {
-    const deadline = Date.now() + timeoutMs
-    while (!condition()) {
-        if (Date.now() >= deadline) {
-            throw new Error("timed out waiting for process-tree condition")
-        }
-        await new Promise((resolve) => setTimeout(resolve, 5))
-    }
 }
 
 function waitForOutputText(

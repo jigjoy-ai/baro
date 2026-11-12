@@ -451,9 +451,15 @@ mod tests {
 
     #[tokio::test]
     async fn stream_events_exposes_selected_stderr_before_child_exit() {
+        // The child stays alive until released, so a slow callback under load
+        // cannot race a fixed child lifetime.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let release = dir.path().join("release");
         let mut cmd = Command::new("sh");
         cmd.arg("-c")
-            .arg("printf 'live-diagnostic\\n' >&2; sleep 1");
+            .arg("printf 'live-diagnostic\\n' >&2; while [ ! -e \"$1\" ]; do sleep 0.01; done")
+            .arg("sh")
+            .arg(&release);
         let observed = Arc::new(AtomicBool::new(false));
         let notify = Arc::new(Notify::new());
         let callback_observed = Arc::clone(&observed);
@@ -474,7 +480,7 @@ mod tests {
             .await
         });
 
-        tokio::time::timeout(std::time::Duration::from_millis(500), notify.notified())
+        tokio::time::timeout(std::time::Duration::from_secs(30), notify.notified())
             .await
             .expect("stderr callback was not invoked while the child was live");
         assert!(observed.load(Ordering::SeqCst));
@@ -482,6 +488,7 @@ mod tests {
             !task.is_finished(),
             "stderr callback arrived only after child completion"
         );
+        std::fs::write(&release, b"").expect("release child");
         task.await
             .expect("supervision task panicked")
             .expect("fixture should exit successfully");
