@@ -356,6 +356,31 @@ setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_0
         })
     })
 
+    it("refreshes stale dependencies without letting baro-ai's postinstall replace the installed baro (#262)", async () => {
+        await withTempDir("baro-verify-refresh-env-", async (dir) => {
+            writeFileSync(
+                join(dir, "package.json"),
+                JSON.stringify({
+                    name: "root",
+                    private: true,
+                    workspaces: ["packages/*"],
+                    scripts: {
+                        postinstall:
+                            "node -e \"require('fs').writeFileSync('seen', String(process.env.BARO_SKIP_POSTINSTALL))\"",
+                        test: "node -e \"process.exit(0)\"",
+                    },
+                }),
+            )
+            mkdirSync(join(dir, "packages", "a"), { recursive: true })
+            writeFileSync(join(dir, "packages", "a", "package.json"), JSON.stringify({ name: "a" }))
+
+            const r = await verifyBuild(dir)
+
+            assert.equal(r.commands[0]?.command, "npm install (dependencies stale: node_modules is missing)")
+            assert.equal(readFileSync(join(dir, "seen"), "utf8"), "1")
+        })
+    })
+
     it("uses a pre-run plan even if an agent later removes the test script", async () => {
         await withTempDir("baro-verify-snapshot-", async (dir) => {
             const pkgPath = join(dir, "package.json")
