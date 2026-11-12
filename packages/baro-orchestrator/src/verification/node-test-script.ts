@@ -47,7 +47,7 @@ function tokenizeScriptValue(value: string): string[] {
 }
 
 interface ParsedNodeTestScript {
-    /** Every non-`--test`, non-glob token, with a hardcoded `--import tsx` pair stripped. */
+    /** Every non-`--test`, non-glob token, with a hardcoded `--import tsx` pair and watch flags stripped. */
     otherFlags: readonly string[]
     globs: readonly string[]
 }
@@ -107,6 +107,13 @@ function parseNodeTestScript(tokens: readonly string[]): ParsedNodeTestScript | 
             i += 1
             continue
         }
+        // Any watch flag, `--watch-path` included, keeps the runner alive
+        // waiting for changes, so a gate carrying one hangs to its timeout.
+        if (flags[i] === "--watch-path") {
+            i += 1
+            continue
+        }
+        if (flags[i]!.startsWith("--watch")) continue
         otherFlags.push(flags[i]!)
     }
     return { otherFlags, globs }

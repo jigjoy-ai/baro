@@ -2340,6 +2340,175 @@ describe("CollectiveBoard", () => {
         })
     })
 
+    it("does not re-verify again after the Critic dies on a re-verified attempt", async () => {
+        await withTempDir("collective-reverify-critic-transport-", async (dir) => {
+            const runId = "run-reverify-critic-transport"
+            const prdPath = join(dir, "prd.json")
+            writeFileSync(prdPath, JSON.stringify(prd(), null, 2) + "\n")
+            const qualityGate = source("quality-gate")
+            const board = new CollectiveBoard({
+                runId,
+                prdPath,
+                cwd: dir,
+                timeoutSecs: 60,
+                expectQualityDecisions: true,
+                expectRecoveryDecisions: true,
+                qualityAuthority: qualityGate,
+                maxOperationalRetriesPerStory: 5,
+            })
+            const env = joinWithCapture(board)
+            env.publish(source("operator"), RunStartRequest.create({ reason: "test" }))
+            env.publish(source("repo"), RunPrepared.create({ runId, baseSha: null }))
+            await provideContext(env, runId, 1)
+            const offer = await waitFor(env.events, WorkOffered.is)
+            env.publish(
+                source("broker"),
+                WorkLeaseGranted.create({
+                    runId,
+                    offerId: offer.payload.offerId,
+                    leaseId: "lease-1",
+                    workerId: "worker",
+                    generation: offer.payload.generation,
+                    request: offer.payload.request,
+                }),
+            )
+            env.publish(source("S1"), transportFail(runId, "S1", "lease-1", offer.payload.generation))
+            const cleanup = await waitFor(env.events, WorkspaceCleanupRequested.is)
+            env.publish(
+                source("repo"),
+                WorkspaceCleanupCompleted.create({
+                    ...cleanup.payload,
+                    preservedBranch: `baro-recovery/${runId}/S1/1`,
+                }),
+            )
+            await provideContext(env, runId, 2)
+            const reverify = (await waitForCount(env.events, WorkOffered.is, 2))[1]!
+            assert.equal(reverify.payload.request.resume?.reverify, true)
+            env.publish(
+                source("broker"),
+                WorkLeaseGranted.create({
+                    runId,
+                    offerId: reverify.payload.offerId,
+                    leaseId: "lease-2",
+                    workerId: "worker",
+                    generation: reverify.payload.generation,
+                    request: reverify.payload.request,
+                }),
+            )
+            env.publish(
+                source("S1"),
+                StoryResult.create({
+                    runId,
+                    storyId: "S1",
+                    leaseId: "lease-2",
+                    generation: reverify.payload.generation,
+                    success: true,
+                    attempts: 0,
+                    durationSecs: 1,
+                    error: null,
+                }),
+            )
+            // What AcceptanceGate settles once its bounded Critic replays all
+            // died on the transport.
+            env.publish(
+                qualityGate,
+                StoryQualityCompleted.create({
+                    runId,
+                    evaluationId: "quality-reverified-1",
+                    storyId: "S1",
+                    leaseId: "lease-2",
+                    generation: reverify.payload.generation,
+                    status: "inconclusive",
+                    targetTurn: 1,
+                    reason: "Critic LLM call failed: fetch failed",
+                }),
+            )
+            const cleanups = await waitForCount(env.events, WorkspaceCleanupRequested.is, 2)
+            assert.equal(cleanups[1]!.payload.preserveForRecovery, true)
+            env.publish(
+                source("repo"),
+                WorkspaceCleanupCompleted.create({
+                    ...cleanups[1]!.payload,
+                    preservedBranch: `baro-recovery/${runId}/S1/2`,
+                }),
+            )
+            for (let i = 0; i < 10; i += 1) await flush()
+
+            assert.equal(env.events.filter(WorkOffered.is).length, 2, "the new branch is not re-verified")
+            assert.equal(env.events.filter(RecoveryStarted.is).length, 1)
+        })
+    })
+
+    it("caps re-verified attempts that keep dying unjudged at the operational retry budget", async () => {
+        await withTempDir("collective-reverify-loop-", async (dir) => {
+            const runId = "run-reverify-loop"
+            const prdPath = join(dir, "prd.json")
+            writeFileSync(prdPath, JSON.stringify(prd(), null, 2) + "\n")
+            const board = new CollectiveBoard({
+                runId,
+                prdPath,
+                cwd: dir,
+                timeoutSecs: 60,
+                expectRecoveryDecisions: true,
+                maxOperationalRetriesPerStory: 2,
+            })
+            const env = joinWithCapture(board)
+            env.publish(source("operator"), RunStartRequest.create({ reason: "test" }))
+            env.publish(source("repo"), RunPrepared.create({ runId, baseSha: null }))
+            await provideContext(env, runId, 1)
+            await waitFor(env.events, WorkOffered.is)
+            // Distinct codes, so only the budget (not repeat detection) can stop it.
+            const codes = ["connection_reset", "request_timeout", "dns_failed", "tls_failed"] as const
+            for (const [index, code] of codes.entries()) {
+                const offers = env.events.filter(WorkOffered.is)
+                if (offers.length <= index) break
+                const offer = offers[index]!
+                if (index > 0) assert.equal(offer.payload.request.resume?.reverify, true)
+                env.publish(
+                    source("broker"),
+                    WorkLeaseGranted.create({
+                        runId,
+                        offerId: offer.payload.offerId,
+                        leaseId: `lease-${index}`,
+                        workerId: "worker",
+                        generation: offer.payload.generation,
+                        request: offer.payload.request,
+                    }),
+                )
+                env.publish(
+                    source("S1"),
+                    StoryResult.create({
+                        runId,
+                        storyId: "S1",
+                        leaseId: `lease-${index}`,
+                        generation: offer.payload.generation,
+                        success: false,
+                        attempts: index === 0 ? 1 : 0,
+                        durationSecs: 1,
+                        error: "transport failed",
+                        failure: { kind: "transport", code },
+                    }),
+                )
+                const cleanup = (await waitForCount(env.events, WorkspaceCleanupRequested.is, index + 1))[index]!
+                env.publish(
+                    source("repo"),
+                    WorkspaceCleanupCompleted.create({
+                        ...cleanup.payload,
+                        preservedBranch: `baro-recovery/${runId}/S1/${index + 1}`,
+                    }),
+                )
+                if (index < 2) {
+                    await provideContext(env, runId, index + 2)
+                    await waitForCount(env.events, WorkOffered.is, index + 2)
+                }
+                for (let i = 0; i < 10; i += 1) await flush()
+            }
+
+            assert.equal(env.events.filter(WorkOffered.is).length, 3, "one attempt plus two retries")
+            assert.equal(env.events.filter(WorkContextRequested.is).length, 3)
+        })
+    })
+
     it("halts without cleanup or recovery when process quiescence is uncertified", async () => {
         await withTempDir("collective-quiescence-uncertified-", async (dir) => {
             const runId = "run-quiescence-uncertified"

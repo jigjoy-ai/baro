@@ -45,6 +45,13 @@ describe("linked repositories", () => {
         assert.ok(!patchesDependency("patches/lodash.debounce@4.0.8.patch", "lodash"))
     })
 
+    it("recognizes a patch-package patch of a copy nested under another package", () => {
+        assert.ok(patchesDependency("patches/a++engine+1.2.0.patch", "engine"))
+        assert.ok(patchesDependency("patches/a++@acme+engine+1.2.0.patch", "@acme/engine"))
+        assert.ok(patchesDependency("patches/@s+a++engine+1.2.0.patch", "engine"))
+        assert.ok(!patchesDependency("patches/a++engine-sys+1.2.0.patch", "engine"))
+    })
+
     it("reports a moved HEAD and in-place dependency patches, and stays quiet otherwise", async () => {
         const schema = { name: "schema", path: "/work/schema", headSha: "2222222bbbbbbb" }
         const reports = await buildLinkedRepositoryReports(

@@ -11,8 +11,9 @@ export interface LinkedRepositoryReport {
 
 /**
  * The install-time patch layouts that edit a dependency from its consumer:
- * pnpm (`@s__n@1.patch`), patch-package (`@s+n+1.patch`), yarn berry
- * (`@s-n-npm-1-hash.patch`) and a direct `node_modules` edit.
+ * pnpm (`@s__n@1.patch`), patch-package (`@s+n+1.patch`, and `a++@s+n+1.patch`
+ * for a copy nested under `a`), yarn berry (`@s-n-npm-1-hash.patch`) and a
+ * direct `node_modules` edit.
  */
 export function patchesDependency(path: string, pkg: string): boolean {
     const normalized = path.replace(/\\/g, "/")
@@ -25,6 +26,7 @@ export function patchesDependency(path: string, pkg: string): boolean {
         file === `${flat("__")}.patch` ||
         file === `${flat("__")}.diff` ||
         file.startsWith(`${flat("+")}+`) ||
+        file.includes(`++${flat("+")}+`) ||
         file.startsWith(`${flat("-")}-npm-`)
     )
 }

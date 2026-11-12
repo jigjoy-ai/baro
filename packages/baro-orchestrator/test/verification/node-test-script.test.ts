@@ -126,11 +126,28 @@ describe("coalesceNodeTestScripts", () => {
             "ExperimentalWarning",
             "--test-coverage-lines",
             "80",
-            "--watch-path",
-            "src",
             "--test",
             "test/*.test.ts",
         ])
+    })
+
+    it("drops every watch flag, which would keep the gate waiting for changes", () => {
+        for (const script of [
+            "node --watch-path src --test test/*.test.ts",
+            "node --watch-path=src --test test/*.test.ts",
+            "node --test --watch-path src test/*.test.ts",
+            "node --test --watch-path=src --watch test/*.test.ts",
+        ]) {
+            const result = coalesceNodeTestScripts(
+                [{ label: "npm run test", tool: "npm", args: ["run", "test"] }],
+                () => ({ scripts: { test: script } }),
+            )
+            assert.deepEqual(
+                result[0]!.args,
+                ["--import", "tsx", "--test", "test/*.test.ts"],
+                script,
+            )
+        }
     })
 
     it("does not import tsx twice for an inline --import=tsx", () => {

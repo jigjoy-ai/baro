@@ -163,6 +163,12 @@ export class ContinuousGateRunner extends BusMember {
         }
     }
 
+    /** Another host gate run, e.g. re-verification, taking its turn in the
+     * same queue; the signal fires when the runner stops. */
+    exclusive<T>(work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+        return this.serialized(() => work(this.controller.signal))
+    }
+
     /** Queue behind whatever gate is already running, whichever story it is for. */
     private async serialized<T>(work: () => Promise<T>): Promise<T> {
         const previous = this.gateInFlight ?? Promise.resolve()

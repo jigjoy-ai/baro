@@ -65,6 +65,7 @@ import type { WorktreeManager } from "../integration/worktree.js"
 import {
     ReverifiedCommitExecutor,
     commitGatePassed,
+    type CommitGate,
     type ReverifiedGateCommand,
 } from "../execution/commit-reverification.js"
 import {
@@ -133,10 +134,7 @@ export interface StoryFactoryOptions {
     worktrees?: WorktreeManager
     /** The story's gate, run on an unjudged attempt's restored commits; null
      * means inconclusive. Absent disables re-verification. */
-    commitGate?(
-        cwd: string,
-        signal: AbortSignal,
-    ): Promise<readonly ReverifiedGateCommand[] | null>
+    commitGate?: CommitGate
     /**
      * Which LLM provider every story uses.
      *   "claude"  — StoryAgent wrapping a `claude` CLI subprocess
@@ -251,6 +249,10 @@ export class StoryFactory extends BusMember {
     private shuttingDown = false
     private readonly sessions = new SessionLedger()
     private readonly reverification = new AbortController()
+    private readonly leaseReverifications = new Map<
+        string,
+        { leaseId: string | undefined; controller: AbortController }
+    >()
     private readonly leases = new Map<string, WorkLeaseGrantedData>()
     /** Retained until run completion so delayed authoritative billing for a
      * released lease cannot be attributed to a newer retry. */
@@ -511,6 +513,10 @@ export class StoryFactory extends BusMember {
                         event.payload.reason,
                     )
                     this.publishLearnedEstimate(learned)
+                }
+                const reverifying = this.leaseReverifications.get(event.payload.storyId)
+                if (reverifying?.leaseId === event.payload.leaseId) {
+                    reverifying.controller.abort()
                 }
                 const exec = this.active.get(event.payload.storyId)
                 if (exec && this.envRef) {
@@ -936,6 +942,9 @@ export class StoryFactory extends BusMember {
         if (worktrees) {
             if (req.resume?.reverify) {
                 reverified = await this.reverifyPreservedCommits(req, worktrees)
+                if (req.leaseId !== undefined && this.leases.get(req.storyId)?.leaseId !== req.leaseId) {
+                    return
+                }
                 createdWorktree =
                     reverified?.path ?? (await worktrees.create(req.storyId))
             } else if (req.resume) {
@@ -1164,6 +1173,8 @@ export class StoryFactory extends BusMember {
         if (!this.opts.commitGate || !preserved) return null
         const log = (line: string) =>
             process.stderr.write(`[story-factory] ${req.storyId} ${line}\n`)
+        const lease = { leaseId: req.leaseId, controller: new AbortController() }
+        this.leaseReverifications.set(req.storyId, lease)
         try {
             const restored = await worktrees.restoreAgentCommits(
                 req.storyId,
@@ -1173,10 +1184,11 @@ export class StoryFactory extends BusMember {
                 log(`has no committed work on ${preserved}; starting a fresh attempt`)
                 return null
             }
-            if (this.shuttingDown) return null
+            if (this.shuttingDown || lease.controller.signal.aborted) return null
             const gate = await this.opts.commitGate(
+                req.storyId,
                 restored.path,
-                this.reverification.signal,
+                AbortSignal.any([this.reverification.signal, lease.controller.signal]),
             )
             if (commitGatePassed(gate)) {
                 log(`gate is green on ${restored.head} from ${preserved}; no agent attempt spent`)
@@ -1191,6 +1203,10 @@ export class StoryFactory extends BusMember {
                 `could not re-verify ${preserved}: ` +
                     `${(error as Error)?.message ?? String(error)}; starting a fresh attempt`,
             )
+        } finally {
+            if (this.leaseReverifications.get(req.storyId) === lease) {
+                this.leaseReverifications.delete(req.storyId)
+            }
         }
         return null
     }

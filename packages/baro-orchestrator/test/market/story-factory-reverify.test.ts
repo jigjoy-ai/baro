@@ -15,12 +15,13 @@ import {
     AgentResult,
     StoryResult,
     WorkLeaseGranted,
+    WorkLeaseReleased,
     type StorySpawnRequestData,
 } from "../../src/semantic-events.js"
 import type { WorktreeManager } from "../../src/integration/worktree.js"
 import { StoryOutcomeAuthority } from "../../src/runtime/story-outcome-authority.js"
 import { joinWithCapture, source, withTempDir } from "../execution/helpers.js"
-import { leasedFactory } from "./lease-fixture.js"
+import { RUN_ID, WORKER_ID, leasedFactory } from "./lease-fixture.js"
 
 const PRESERVED = "baro-recovery/run/S3/1"
 const RESTORED = { path: "/tmp/wt/S3", head: "f93f741" + "0".repeat(33) }
@@ -84,13 +85,13 @@ describe("StoryFactory re-verification of an unjudged attempt", () => {
             const { manager, createCalls, restoreCalls } = worktreeDouble(
                 async () => RESTORED,
             )
-            const gated: string[] = []
+            const gated: Array<[string, string]> = []
             const { env, lease } = leasedFactory({
                 cwd: dir,
                 executor,
                 worktrees: manager,
-                commitGate: async (cwd) => {
-                    gated.push(cwd)
+                commitGate: async (storyId, cwd) => {
+                    gated.push([storyId, cwd])
                     return GREEN
                 },
             })
@@ -99,11 +100,14 @@ describe("StoryFactory re-verification of an unjudged attempt", () => {
             await settle()
 
             assert.deepEqual(restoreCalls, [["S3", PRESERVED]])
-            assert.deepEqual(gated, [RESTORED.path])
+            assert.deepEqual(gated, [["S3", RESTORED.path]], "the gate is the story's")
             assert.deepEqual(createCalls, [])
             assert.equal(executor.calls.length, 0, "no agent attempt was spent")
             const terminal = env.events.find(AgentResult.is)
-            assert.match(terminal?.payload.resultText ?? "", /PASS {2}npm run build/)
+            const told = terminal?.payload.resultText ?? ""
+            assert.doesNotMatch(told, /PASS/, "the Critic is not handed a verdict")
+            assert.match(told, /may have stopped partway/)
+            assert.match(told, /does not show the change is complete/)
             const result = env.events.find(StoryResult.is)
             assert.equal(result?.payload.success, true)
             assert.equal(result?.payload.attempts, 0)
@@ -137,6 +141,48 @@ describe("StoryFactory re-verification of an unjudged attempt", () => {
             })
         })
     }
+
+    it("aborts the gate when its lease is released and starts nothing for it", async () => {
+        await withTempDir("story-factory-reverify-released-", async (dir) => {
+            const executor = new CapturingExecutor()
+            const { manager, createCalls } = worktreeDouble(async () => RESTORED)
+            let gateSignal: AbortSignal | null = null
+            const { factory, broker, env, lease } = leasedFactory({
+                cwd: dir,
+                executor,
+                worktrees: manager,
+                commitGate: (_storyId, _cwd, signal) => {
+                    gateSignal = signal
+                    return new Promise((resolve) =>
+                        signal.addEventListener("abort", () => resolve(null), { once: true }),
+                    )
+                },
+            })
+
+            await lease("S3", spawnRequest())
+            await settle()
+            assert.ok(gateSignal, "the gate is running")
+            assert.equal((gateSignal as AbortSignal).aborted, false)
+
+            await factory.onExternalEvent(
+                broker,
+                WorkLeaseReleased.create({
+                    runId: RUN_ID,
+                    offerId: "offer-S3",
+                    leaseId: "lease-S3",
+                    storyId: "S3",
+                    workerId: WORKER_ID,
+                    reason: "aborted",
+                }),
+            )
+            await settle()
+
+            assert.equal((gateSignal as AbortSignal).aborted, true)
+            assert.deepEqual(createCalls, [])
+            assert.equal(executor.calls.length, 0)
+            assert.equal(env.events.some(StoryResult.is), false)
+        })
+    })
 
     it("binds a re-verified collective result to the exact lease", async () => {
         await withTempDir("story-factory-reverify-collective-", async (dir) => {
