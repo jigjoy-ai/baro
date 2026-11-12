@@ -95,6 +95,12 @@ export function createRuntimeReplanTool(graphVersion: number): Tool {
                                 items: { type: "string" },
                             },
                             model: { type: "string" },
+                            writes: {
+                                type: "array",
+                                items: { type: "string" },
+                                description:
+                                    "Repository-relative files this story owns; stories running in parallel must not share any.",
+                            },
                             goalInvariantIds: {
                                 type: "array",
                                 items: { type: "string" },
@@ -308,6 +314,10 @@ function parseAddedStories(
                 error: `addedStories[${index}].model must be a string`,
             }
         }
+        const writes = story.writes === undefined
+            ? undefined
+            : stringArray(story.writes, `addedStories[${index}].writes`)
+        if (writes && !writes.ok) return writes
         stories.push({
             id: story.id,
             priority: story.priority as number,
@@ -323,6 +333,9 @@ function parseAddedStories(
             ...(goalInvariantIds?.ok
                 ? { goalInvariantIds: goalInvariantIds.value }
                 : {}),
+            // Dropped here, the story has no surface and the merge gate
+            // refuses it every file its proposer still declares.
+            ...(writes?.ok ? { writes: writes.value } : {}),
         })
     }
     return { ok: true, value: stories }

@@ -73,6 +73,16 @@ describe("CollectiveBoard dependency suspension", () => {
             assert.equal(accepted.payload.storyId, "S1")
             assert.deepEqual(accepted.payload.requiredStoryIds, ["S1-RATIFY"])
             assert.equal(fixture.env.events.some(WorkBlockRejected.is), false)
+
+            // The part its agent added starts as a fork of that agent's session.
+            await answerNewContexts(fixture.env, fixture.context, fixture.runId)
+            const added = await waitFor(
+                fixture.env.events,
+                (event): event is ReturnType<typeof WorkOffered.create> =>
+                    WorkOffered.is(event) && event.payload.request.storyId === "S1-RATIFY",
+            )
+            assert.deepEqual(added.payload.request.sessionSource, { storyId: "S1", mode: "fork" })
+            assert.equal(added.payload.request.mayDelegate, undefined)
         })
     })
 
@@ -229,6 +239,8 @@ describe("CollectiveBoard dependency suspension", () => {
                 await waitForCount(env.events, WorkOffered.is, 3)
             )[2]!
             assert.equal(resumedOffer.payload.request.storyId, "S1")
+            // It picks its own session back up rather than starting cold.
+            assert.deepEqual(resumedOffer.payload.request.sessionSource, { storyId: "S1", mode: "continue" })
             assert.match(
                 resumedOffer.payload.request.prompt,
                 /Resumed after dependency integration/,
@@ -495,6 +507,7 @@ async function startRunningBoard(
         env,
         bridge,
         broker,
+        context,
         s1Offer,
     }
 }

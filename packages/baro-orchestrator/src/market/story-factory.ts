@@ -9,6 +9,13 @@ import {
 } from "../runtime/mozaik.js"
 
 import { SPAWN_GATES, announceGates } from "../execution/gate-registry.js"
+import {
+    SessionLedger,
+    delegationEnabled,
+    delegationInstructions,
+    resolveInheritance,
+} from "../harness/session-lineage.js"
+import { emit } from "../tui-protocol.js"
 import { CoordinationBus, BusMember } from "../runtime/coordination.js"
 import type { GatewayBillingCoordinator } from "../telemetry/billing/index.js"
 import {
@@ -242,6 +249,7 @@ export class StoryFactory extends BusMember {
     private readonly uncertifiedWorktreeIds = new Set<string>()
     /** One-way stop boundary set before repository cleanup. */
     private shuttingDown = false
+    private readonly sessions = new SessionLedger()
     private readonly reverification = new AbortController()
     private readonly leases = new Map<string, WorkLeaseGrantedData>()
     /** Retained until run completion so delayed authoritative billing for a
@@ -1022,6 +1030,15 @@ export class StoryFactory extends BusMember {
                                     `--endpoint ${JSON.stringify(collaboration.endpoint)} ` +
                                         `--token ${JSON.stringify(collaboration.token)}`,
                                 ),
+                                // Needs both halves: a way to add stories and a way to wait for them.
+                                req.mayDelegate &&
+                                req.graphVersion !== undefined &&
+                                this.opts.worktrees !== undefined &&
+                                this.supportsCooperativeSuspend(route) &&
+                                (route.backend === "claude" || route.backend === "openai") &&
+                                delegationEnabled()
+                                    ? delegationInstructions(req.storyId, 3)
+                                    : "",
                             ]
                           : []),
                   ].filter(Boolean).join("\n\n"),
@@ -1036,7 +1053,23 @@ export class StoryFactory extends BusMember {
         const executor = reverified
             ? new ReverifiedCommitExecutor(reverified.head, reverified.gate)
             : this.executor
+        const inheritance = reverified
+            ? null
+            : resolveInheritance(req.sessionSource, route.backend, this.sessions)
+        if (inheritance && req.sessionSource) {
+            emit({
+                type: "story_log",
+                id: req.storyId,
+                line: "inherit" in inheritance
+                    ? req.sessionSource.mode === "continue"
+                        ? `[session] continues its own session (${inheritance.inherit.contextTokens} tokens of context)`
+                        : `[session] forked from ${req.sessionSource.storyId} (${inheritance.inherit.contextTokens} tokens of context inherited)`
+                    : `[session] starts cold: ${inheritance.skipped}`,
+            })
+        }
         const exec = executor.start(executionRequest, route, storyCwd, this.envRef, {
+            sessions: this.sessions,
+            ...(inheritance && "inherit" in inheritance ? { inherit: inheritance.inherit } : {}),
             openaiModel: this.opts.openaiModel,
             effort: this.opts.effort,
             requireProcessQuiescenceCertification: true,

@@ -3,11 +3,17 @@
 //! A confident sequential goal runs the same way, as one story: its steps ran
 //! one at a time anyway, and splitting the chain paid a handoff, a Critic loop
 //! and a merge per step (a three-step refactor took 40 minutes against 15 for
-//! one agent). Critic and Surgeon still run; only the design pass is skipped.
+//! one agent). A confident parallel goal of a few parts goes the same way:
+//! planning it into stories took two to four times as long as one agent doing
+//! all of it (three small modules: 358-675 s planned, 165 s by one agent), and
+//! that agent may hand parts to forks of its own session when they are large.
+//! Critic and Surgeon still run; only the design pass is skipped.
 
 const MIN_CONFIDENCE: f64 = 0.85;
 /// Longer chains keep the Architect: one agent's context should hold the whole goal.
 const MAX_SEQUENTIAL_STEPS: u64 = 6;
+/// The lead plus the stories it may add (`maxDynamicStories` in the orchestrator).
+const MAX_LEAD_PARTS: u64 = 4;
 const DISABLE_ENV: &str = "BARO_ARCHITECT_FAST_PATH";
 
 #[derive(Debug, Clone, PartialEq)]
@@ -66,6 +72,20 @@ pub(crate) fn decide(contract_json: &str) -> Option<FastPath> {
                 ),
             })
         }
+        "parallel" if max_stories.is_some_and(|max| max <= MAX_LEAD_PARTS) => {
+            let mut focused = contract.clone();
+            focused["mode"] = serde_json::json!("focused");
+            focused["maxStories"] = serde_json::json!(1);
+            focused["reason"] = serde_json::json!(format!(
+                "A few independent parts, held by one agent that may hand them to parallel stories: {why}"
+            ));
+            Some(FastPath {
+                contract_json: focused.to_string(),
+                reason: format!(
+                    "Intake sized this goal as a few parallel parts (confidence {confidence:.2}): {why} One agent starts at once and may hand parts to forks of its session, without an Architect pass; set {DISABLE_ENV}=0 to always run it."
+                ),
+            })
+        }
         _ => None,
     }
 }
@@ -108,7 +128,6 @@ mod tests {
         assert_eq!(decide(&contract("focused", "user", 1.0, Some(1))), None);
         assert_eq!(decide(&contract("focused", "llm", 0.95, Some(2))), None);
         assert_eq!(decide(&contract("focused", "llm", 0.95, None)), None);
-        assert_eq!(decide(&contract("parallel", "llm", 0.95, None)), None);
         assert_eq!(decide("not json"), None);
     }
 
@@ -130,6 +149,24 @@ mod tests {
         assert_eq!(decide(&contract("sequential", "llm", 0.95, Some(7))), None);
         assert_eq!(decide(&contract("sequential", "llm", 0.8, Some(3))), None);
         assert_eq!(decide(&contract("sequential", "heuristic", 1.0, Some(3))), None);
+    }
+
+    #[test]
+    fn a_confident_parallel_goal_of_a_few_parts_starts_with_one_lead() {
+        let fast = decide(&contract("parallel", "llm", 0.9, Some(4))).expect("fast path");
+        let lead: serde_json::Value = serde_json::from_str(&fast.contract_json).unwrap();
+        assert_eq!(lead["mode"], "focused");
+        assert_eq!(lead["maxStories"], 1);
+        assert!(lead["reason"].as_str().unwrap().contains("may hand them to parallel stories"));
+        assert!(fast.reason.contains("a few parallel parts"));
+    }
+
+    #[test]
+    fn a_large_unsized_or_unsure_parallel_goal_is_planned() {
+        assert_eq!(decide(&contract("parallel", "llm", 0.95, Some(5))), None);
+        assert_eq!(decide(&contract("parallel", "llm", 0.95, None)), None);
+        assert_eq!(decide(&contract("parallel", "llm", 0.8, Some(3))), None);
+        assert_eq!(decide(&contract("parallel", "heuristic", 1.0, Some(3))), None);
     }
 
     #[test]

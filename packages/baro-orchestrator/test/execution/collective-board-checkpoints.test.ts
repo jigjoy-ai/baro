@@ -40,6 +40,8 @@ describe("CollectiveBoard checkpoints", () => {
     it("starts dependents on a running story's checkpoint and integrates them after it", async () => {
         await withBoard(async (env, board) => {
             const s1 = await leaseStory(env, "S1", 1)
+            assert.equal(s1.request.sessionSource, undefined, "a story with no prerequisite starts cold")
+            assert.equal(s1.request.mayDelegate, undefined, "a planned story does not re-plan the goal")
 
             requestCheckpoint(env, s1, [])
             assert.match(
@@ -59,6 +61,8 @@ describe("CollectiveBoard checkpoints", () => {
 
             const s2 = await leaseStory(env, "S2", 2)
             assert.deepEqual(s2.request.checkpointBase, [{ storyId: "S1", sha: SHA }])
+            // It forks the session of the story whose checkpoint it starts on.
+            assert.deepEqual(s2.request.sessionSource, { storyId: "S1", mode: "fork" })
             assert.match(s2.request.prompt, /You start on checkpoints/)
             assert.match(s2.request.prompt, /S1 is still running; it published c{12}: parser contract/)
 
@@ -78,6 +82,26 @@ describe("CollectiveBoard checkpoints", () => {
                 StoryIntegrationRequested.is(e) && e.payload.storyId === "S2")
             await board.idle()
         })
+    })
+
+    it("lets the run's only story hand parts to stories it adds", async () => {
+        await withBoard(async (env, board) => {
+            const lead = await leaseStory(env, "S1", 1)
+            assert.equal(lead.request.mayDelegate, true)
+            assert.equal(lead.request.sessionSource, undefined)
+            await board.idle()
+        }, {
+            ...checkpointPrd(),
+            executionMode: { mode: "focused", source: "user", reason: "quick" },
+            userStories: [story("S1", [], ["src/a.ts"])],
+        } as PrdFile)
+    })
+
+    it("does not offer that to the first story of a plan that is not focused", async () => {
+        await withBoard(async (env, board) => {
+            assert.equal((await leaseStory(env, "S1", 1)).request.mayDelegate, undefined)
+            await board.idle()
+        }, { ...checkpointPrd(), userStories: [story("S1", [], ["src/a.ts"])] })
     })
 
     it("withdraws the checkpoint when its story fails, and retries finished early starters", async () => {
@@ -160,10 +184,11 @@ type Lease = {
 
 async function withBoard(
     run: (env: CapturedEnvironment, board: CollectiveBoard) => Promise<void>,
+    prd: PrdFile = checkpointPrd(),
 ): Promise<void> {
     await withTempDir("board-checkpoints-", async (dir) => {
         const prdPath = join(dir, "prd.json")
-        writeFileSync(prdPath, JSON.stringify(checkpointPrd(), null, 2) + "\n")
+        writeFileSync(prdPath, JSON.stringify(prd, null, 2) + "\n")
         const board = new CollectiveBoard({
             runId: RUN,
             prdPath,

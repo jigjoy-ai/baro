@@ -42,6 +42,10 @@ export interface ClaudeCliParticipantOptions {
     effort?: string
     /** `--resume <sessionId>` — needed by agents that span multiple infer() calls. */
     resumeSessionId?: string
+    /** With `resumeSessionId`: `--fork-session`, a new session that leaves the resumed one untouched. */
+    forkSession?: boolean
+    /** With `resumeSessionId`: what the resumed session had already cost; the CLI's total includes it. */
+    costBaselineUsd?: number
     /** Compatibility targeted messages from this exact participant are
      * ignored because the owning StoryAgent consumes correlated Critique
      * events directly. */
@@ -80,6 +84,8 @@ export class ClaudeCliParticipant extends CliParticipant<ClaudeRunSummary> {
     }
     private sessionId: string | null = null
     private lastResult: AgentResultData | null = null
+    private contextTokens: number | null = null
+    private cumulativeCostUsd: number | null = null
 
     constructor(agentId: string, opts: ClaudeCliParticipantOptions) {
         super(agentId, {
@@ -107,6 +113,16 @@ export class ClaudeCliParticipant extends CliParticipant<ClaudeRunSummary> {
 
     getSessionId(): string | null {
         return this.sessionId
+    }
+
+    /** The CLI's running total for this session, a resumed session's earlier cost included. */
+    getCumulativeCostUsd(): number | null {
+        return this.cumulativeCostUsd
+    }
+
+    /** Input size of the main thread's last model request: what a fork of this session inherits. */
+    getContextTokens(): number | null {
+        return this.contextTokens
     }
 
     sendUserMessage(text: string): void {
@@ -155,11 +171,24 @@ export class ClaudeCliParticipant extends CliParticipant<ClaudeRunSummary> {
         }
         if (this.options.resumeSessionId) {
             args.push("--resume", this.options.resumeSessionId)
+            if (this.options.forkSession) args.push("--fork-session")
         }
         if (this.options.extraArgs && this.options.extraArgs.length > 0) {
             args.push(...this.options.extraArgs)
         }
         return args
+    }
+
+    /**
+     * `total_cost_usd` is a running total for the whole session, so a story
+     * with four turns reported its first turn four times, and a fork reported
+     * its parent's cost again. Each result carries only what it added.
+     */
+    private withTurnCost(event: Record<string, unknown>): Record<string, unknown> {
+        if (event.type !== "result" || typeof event.total_cost_usd !== "number") return event
+        const before = this.cumulativeCostUsd ?? this.options.costBaselineUsd ?? 0
+        this.cumulativeCostUsd = event.total_cost_usd
+        return { ...event, total_cost_usd: Math.max(0, event.total_cost_usd - before) }
     }
 
     protected override summarize(): ClaudeRunSummary {
@@ -173,10 +202,11 @@ export class ClaudeCliParticipant extends CliParticipant<ClaudeRunSummary> {
     }
 
     protected override consumeLine(parsed: Record<string, unknown>): void {
-        const { items, sessionId } = mapClaudeEvent(this.agentId, parsed)
+        const { items, sessionId } = mapClaudeEvent(this.agentId, this.withTurnCost(parsed))
         if (sessionId && !this.sessionId) {
             this.sessionId = sessionId
         }
+        this.contextTokens = mainThreadRequestTokens(parsed) ?? this.contextTokens
 
         for (const item of items) {
             if (item instanceof SemanticEvent) {
@@ -223,4 +253,15 @@ export class ClaudeCliParticipant extends CliParticipant<ClaudeRunSummary> {
             this.sendUserMessage(event.payload.text)
         }
     }
+}
+
+/** Subagent turns (`parent_tool_use_id` set) run in their own context and are not counted. */
+export function mainThreadRequestTokens(event: Record<string, unknown>): number | null {
+    if (event.type !== "assistant" || event.parent_tool_use_id) return null
+    const usage = (event.message as { usage?: Record<string, unknown> } | undefined)?.usage
+    if (!usage) return null
+    const total = ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"]
+        .map((key) => (typeof usage[key] === "number" ? (usage[key] as number) : 0))
+        .reduce((sum, value) => sum + value, 0)
+    return total > 0 ? total : null
 }

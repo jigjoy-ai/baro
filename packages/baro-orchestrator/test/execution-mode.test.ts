@@ -575,9 +575,12 @@ describe("resolveEffectiveParallel", () => {
         assert.equal(resolveEffectiveParallel(mode({ mode: "sequential", source: "user" }), 10), 1)
     })
 
-    it("focused always serializes, regardless of source", () => {
-        assert.equal(resolveEffectiveParallel(mode({ mode: "focused", source: "user" }), 10), 1)
-        assert.equal(resolveEffectiveParallel(mode({ mode: "focused", source: "llm" }), 10), 1)
+    it("focused serializes only when its story may not hand out parts", () => {
+        assert.equal(resolveEffectiveParallel(mode({ mode: "focused", source: "user" }), 10, false), 1)
+        assert.equal(resolveEffectiveParallel(mode({ mode: "focused", source: "llm" }), 10, false), 1)
+        // A real run added three parts and ran them one after another.
+        assert.equal(resolveEffectiveParallel(mode({ mode: "focused", source: "user" }), 10, true), 10)
+        assert.equal(resolveEffectiveParallel(mode({ mode: "focused", source: "llm" }), 0, true), 0)
     })
 
     it("parallel and no-mode follow the operator cap (0 = unlimited)", () => {

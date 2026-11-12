@@ -33,6 +33,13 @@ export function isShellTool(name: string): boolean {
     return SHELL_TOOLS.has(normalizeToolName(name))
 }
 
+const READ_ONLY_TOOLS = new Set(["read", "readfile", "readfiles", "listfiles", "filetree", "grep", "glob"])
+
+/** Safe to run alongside other calls of the same round: it changes nothing. */
+export function isReadOnlyTool(name: string): boolean {
+    return READ_ONLY_TOOLS.has(normalizeToolName(name))
+}
+
 export function isFileMutationTool(name: string): boolean {
     return FILE_MUTATION_TOOLS.has(normalizeToolName(name))
 }
