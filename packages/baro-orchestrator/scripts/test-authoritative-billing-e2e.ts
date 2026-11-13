@@ -229,7 +229,7 @@ async function main(): Promise<void> {
         model.setTools([])
 
         const round = await runInferenceRound(
-            ModelContext.create("provider-free-billing-e2e").addContextItem(
+            ModelContext.create().addContextItem(
                 SystemMessageItem.create("Reply with ok."),
             ),
             model,
@@ -286,8 +286,9 @@ async function main(): Promise<void> {
         )?.record
         assert.ok(finalRecord, "Cloud finalized before Gateway returned the model response")
         assert.equal(finalRecord.requestHash, reservation.requestHash)
-        assert.equal(typeof finalRecord.canonicalJson, "string")
-        const publicReceipt = JSON.parse(finalRecord.canonicalJson) as Record<
+        const canonicalJson = finalRecord.canonicalJson
+        assert.ok(typeof canonicalJson === "string")
+        const publicReceipt = JSON.parse(canonicalJson) as Record<
             string,
             unknown
         >
