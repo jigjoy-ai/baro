@@ -15,6 +15,7 @@ import { homedir } from "node:os"
 import { join, relative, resolve } from "node:path"
 
 import {
+    dependencyInstallEnv,
     pnpmWorkspacePatterns,
     workspacePackageDirs,
     workspacePatterns,
@@ -142,6 +143,7 @@ async function npmCi(workspaceDir: string, signal: AbortSignal | undefined): Pro
     await runRepositoryCommand("npm", ["ci", "--prefer-offline"], {
         cwd: workspaceDir,
         signal,
+        env: { ...process.env, ...dependencyInstallEnv() },
     })
 }
 

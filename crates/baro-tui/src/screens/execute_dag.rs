@@ -148,6 +148,19 @@ pub fn render_dag_full(f: &mut Frame, app: &App, area: Rect) {
 
                     lines.push(Line::from(spans));
 
+                    if !story.waits_on.is_empty() {
+                        lines.push(Line::from(vec![
+                            Span::styled(
+                                "  \u{2502}        ",
+                                Style::default().fg(theme::BORDER),
+                            ),
+                            Span::styled(
+                                format!("\u{23f8} waiting on {}", story.waits_on.join(", ")),
+                                Style::default().fg(theme::WARNING),
+                            ),
+                        ]));
+                    }
+
                     if let Some(ref err) = story.error {
                         lines.push(Line::from(vec![
                             Span::styled(

@@ -12,6 +12,7 @@ import { createRequire } from "module"
 import * as https from "https"
 import * as os from "os"
 import { execFileSync } from "child_process"
+import { semverLt } from "../bin/self-update.mjs"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const require = createRequire(import.meta.url)
@@ -112,10 +113,55 @@ async function downloadWithRetry(url, dest) {
     }
 }
 
+// The bundle stamp can disagree with the binary (the #262 breakage left a
+// 0.130 binary beside 0.132 bundles); the binary is what is being replaced.
+function installedBinaryVersion(binaryPath) {
+    if (!fs.existsSync(binaryPath)) return null
+    try {
+        const out = execFileSync(binaryPath, ["--version"], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] })
+        return out.match(/\d+\.\d+\.\d+/)?.[0] ?? null
+    } catch {
+        return null
+    }
+}
+
+/** Why this install must leave ~/.baro/bin alone, or null to install.
+ *  `installedVersion` is a thunk so a skipped install never runs the binary. */
+function skipInstallReason({ packageRoot, version, installedVersion, env, baroHome }) {
+    if (env.BARO_SKIP_POSTINSTALL === "1") {
+        return `baro: BARO_SKIP_POSTINSTALL=1, left ${baroHome} untouched`
+    }
+    // A checkout's version is whatever commit is checked out, and it has no
+    // built bundles: installing from it downgrades or half-replaces the user's baro.
+    // BARO_INSTALL_FROM_CHECKOUT=1 is for a machine built to stage one (CI smoke).
+    if (
+        !packageRoot.split(/[\\/]/).includes("node_modules") &&
+        env.BARO_INSTALL_FROM_CHECKOUT !== "1"
+    ) {
+        return `baro: source checkout, left ${baroHome} untouched; build the binary with \`cargo build --release -p baro-tui\`, or set BARO_INSTALL_FROM_CHECKOUT=1 to stage this checkout`
+    }
+    const installed = installedVersion()
+    if (installed && semverLt(version, installed) && env.BARO_ALLOW_DOWNGRADE !== "1") {
+        return `baro: kept the installed baro ${installed}, newer than baro-ai ${version}; set BARO_ALLOW_DOWNGRADE=1 to install ${version} anyway`
+    }
+    return null
+}
+
 async function main() {
     const binaryPath = path.join(BARO_HOME, BINARY_NAME)
-    const platformKey = getPlatformKey()
     const version = getVersion()
+    const skip = skipInstallReason({
+        packageRoot: PACKAGE_ROOT,
+        version,
+        installedVersion: () => installedBinaryVersion(binaryPath),
+        env: process.env,
+        baroHome: BARO_HOME,
+    })
+    if (skip) {
+        console.log(skip)
+        return
+    }
+    const platformKey = getPlatformKey()
 
     const artifactName = process.platform === "win32"
         ? `baro-${platformKey}.exe`

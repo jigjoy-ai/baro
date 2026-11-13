@@ -33,6 +33,11 @@ import {
 import { materializeDependencies } from "./integration/dependency-materializer.js"
 import { IntegrationWorktree } from "./integration/integration-worktree.js"
 import { capRunDiff } from "./integration/run-diff-cap.js"
+import {
+    claimRunDir,
+    reclaimStaleRunDirs,
+    worktreesRoot,
+} from "./integration/stale-run-dirs.js"
 import { WorktreeManager } from "./integration/worktree.js"
 import { installAwakeGapReporter } from "./runtime/awake-clock-log.js"
 import { StoryOutcomeAuthority } from "./runtime/story-outcome-authority.js"
@@ -104,12 +109,16 @@ import {
     plannerBusAgentId,
     runPlannerBusSession,
 } from "./planning/adapters/planner-bus-session.js"
+import {
+    cargoTargetCacheRoots,
+    pruneCargoTargetCaches,
+} from "./verification/cargo-target-prune.js"
 import { provesOnlyHygiene } from "./verification/hygiene-command.js"
 import { jvmToolchainGap } from "./verification/jvm-commands.js"
 import { RunVerifier } from "./verification/run-verifier.js"
 import { Sentry } from "./execution/sentry.js"
 import { StoryFactory, type StoryFactoryOptions } from "./market/story-factory.js"
-import { runCommitGate } from "./execution/commit-reverification.js"
+import { storyCommitGate } from "./execution/commit-reverification.js"
 import { WorkContextProvider } from "./market/work-context-provider.js"
 import { reportGoalPreconditions } from "./goal/goal-precondition-report.js"
 import {
@@ -207,6 +216,12 @@ export async function withCriticEvidenceBarrier<T>(
  * any non-"0" value → enabled; only the literal "0" → disabled. */
 export function continuousGateEnabled(): boolean {
     return envFlag("BARO_CONTINUOUS_GATE")
+}
+
+/** "0" stops a run start from reclaiming other runs' leftovers; the test
+ * suite sets it so it never sweeps the machine's real TMPDIR. */
+export function runStartCleanupEnabled(): boolean {
+    return envFlag("BARO_RUN_START_CLEANUP")
 }
 
 export interface OrchestrateConfig {
@@ -733,6 +748,7 @@ export async function orchestrate(
     let shutdownStoryFactories: StoryFactory[] = []
     let shutdownWorktrees: WorktreeManager | null = null
     let integrationWorktree: IntegrationWorktree | null = null
+    let releaseRunDir: (() => void) | null = null
     let continuousGate: ContinuousGateRunner | null = null
     let commitGate: StoryFactoryOptions["commitGate"]
     let mergeAwareness: MergeAwarenessRunner | null = null
@@ -797,6 +813,37 @@ export async function orchestrate(
     const hostOnGoalBranch =
         hostBranch !== null && normalizeGoalBranchName(hostBranch) === goalBranch
     const integrateInPlace = Boolean(config.continueRun) && hostOnGoalBranch
+    if (useGit && worktreesEnabled) {
+        // Claimed before the sweep so a concurrent run start sees this one alive.
+        releaseRunDir = claimRunDir(join(worktreesRoot(), runId))
+        const log = (line: string): void => {
+            process.stderr.write(`[worktree] ${line}\n`)
+            if (emitTui) emit({ type: "story_log", id: "_git", line })
+        }
+        if (runStartCleanupEnabled()) {
+            try {
+                await reclaimStaleRunDirs({ currentRunId: runId, log })
+            } catch (error) {
+                log(`could not reclaim leftover run dirs: ${error instanceof Error ? error.message : String(error)}`)
+            }
+        }
+    }
+    // After the worktree sweep, so units of the dirs it just removed go too.
+    if (runStartCleanupEnabled()) {
+        try {
+            pruneCargoTargetCaches({
+                roots: cargoTargetCacheRoots(),
+                log: (line) => {
+                    process.stderr.write(`[cargo] ${line}\n`)
+                    if (emitTui) emit({ type: "story_log", id: "_git", line })
+                },
+            })
+        } catch (error) {
+            process.stderr.write(
+                `[cargo] could not prune target caches: ${error instanceof Error ? error.message : String(error)}\n`,
+            )
+        }
+    }
     if (useGit && worktreesEnabled && goalBranch && !integrateInPlace) {
         if (hostOnGoalBranch) {
             throw new Error(
@@ -1336,8 +1383,14 @@ export async function orchestrate(
         })
         continuousGate.join(env)
     }
-    commitGate = (cwd, signal) =>
-        runCommitGate(cwd, { plan: verifyPlan, hostRepoRoot: repoRoot, signal })
+    const gateQueue = continuousGate
+    commitGate = storyCommitGate({
+        basePlan: verifyPlan,
+        planRoot: integrationRoot,
+        prdPath: config.prdPath,
+        hostRepoRoot: repoRoot,
+        ...(gateQueue ? { exclusive: (work) => gateQueue.exclusive(work) } : {}),
+    })
     // Tell still-working agents what a sibling landed. A story once wrote
     // two files, then died at integration against stories that had merged
     // while it worked — the bus carried every one of those merges and no
@@ -2051,6 +2104,7 @@ export async function orchestrate(
         await integrationWorktree?.remove({
             keepIfRetained: shutdownWorktrees?.hasRetainedWorktrees() ?? false,
         })
+        releaseRunDir?.()
         if (dialogueRuntimeCwd) {
             rmSync(dialogueRuntimeCwd, { recursive: true, force: true })
         }

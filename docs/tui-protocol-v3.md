@@ -57,7 +57,7 @@ test, not a schema change:
 |---|---|
 | `init` | the run's identity, mode, and story graph |
 | `story_start` | a story took its lease |
-| `story_suspended` | a story yielded to a prerequisite (cooperative) |
+| `story_suspended` | a story yielded to a prerequisite (cooperative): `{id, waits_on, block_id}`; see §6 |
 | `critique` | the Critic's verdict — certification, not activity |
 | `turn_review` | the Critic's verdict on one story turn, rejections included: `{id, turn, status, verdict, reasoning, violated, stale_commands?, contract_conflicts?}`; `critique` stays the final outcome. A `contract_conflicts` entry `{criterion, kind, reason}` with kind `outside_write_surface` moves to an `XFER-` story after the story merges; kind `contradiction` is recorded, not moved |
 | `story_merged` / `merge_failed` | the merge gate's outcome |
@@ -74,3 +74,23 @@ Everything else (`activity`, `story_log`, `token_usage`, `model_usage`,
 `routed`, `dag`, …) is the live feed: valuable to watch, wrong to archive as
 a linear record — interleaving concurrent stories into one sequence
 manufactures an ordering the execution never had.
+
+## 6. A suspension is not a failure
+
+A story that finds it needs other stories first asks the Board for a
+dependency block; once accepted (the runtime replan adds the edges) the story
+stops, and it starts again after those stories integrate. The stream reports
+that pause as its own event:
+
+```json
+{"type":"story_suspended","id":"S5","waits_on":["S1","S2","S3"],"block_id":"block-…"}
+```
+
+- `waits_on` lists the stories the accepted block made it depend on. It is
+  `[]` when the block's acceptance was not seen; v3 consumers older than this
+  field ignore it.
+- The story returns to pending; the next `story_start` for the same `id` is
+  its resumed execution.
+- `story_error` is only ever a real failure. Consumers key on the type: a
+  board that files `story_error` under *Failed* needs no text matching to
+  keep a suspended story out of it.

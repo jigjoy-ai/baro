@@ -11,7 +11,9 @@
  * DELETING THIS: when a Mozaik release both requests usage and assembles
  * chunks, `streamChatRound` has one caller (`inferChatRound`) and its output
  * is the same `{ items, usage }` the non-streamed path produces. Replace the
- * call, delete this file and its test. Nothing else knows it exists.
+ * call, delete this file and its test. Nothing else knows it exists. The
+ * replacement must still refuse a round with no finish reason or a
+ * `content_filter` one, or callers settle on it and run its tool calls.
  *
  * Why it is worth holding at all: a non-streamed completion sends nothing —
  * not even a header — until the whole answer exists, so a three-minute
@@ -122,7 +124,7 @@ export async function streamChatRound(
 
     let content = ""
     let usage: TokenUsage | undefined
-    let truncated = false
+    let finishReason: string | undefined
     // Keyed by the provider's index: a single call's name and arguments arrive
     // across many chunks, and arguments arrive as fragments of one JSON string.
     const calls = new Map<number, { id: string; name: string; args: string }>()
@@ -130,7 +132,7 @@ export async function streamChatRound(
     for await (const chunk of stream) {
         options.onActivity?.()
         if (chunk.usage) usage = tokenUsageOf(chunk.usage)
-        if (chunk.choices?.[0]?.finish_reason === "length") truncated = true
+        finishReason = chunk.choices?.[0]?.finish_reason ?? finishReason
         const delta = chunk.choices?.[0]?.delta
         if (!delta) continue
         if (typeof delta.content === "string") content += delta.content
@@ -142,6 +144,13 @@ export async function streamChatRound(
             if (part.function?.arguments) call.args += part.function.arguments
             calls.set(key, call)
         }
+    }
+    // Returned items would be settled on or executed by every caller, so a
+    // round that never finished fails the call instead. The SDK ends
+    // iteration quietly when the body ends without `[DONE]`.
+    if (finishReason === undefined) throw new IncompleteChatRoundError("eof")
+    if (finishReason === "content_filter") {
+        throw new IncompleteChatRoundError("content_filter")
     }
 
     // Reasoning deltas are read and dropped on purpose. Mozaik's non-streamed
@@ -164,7 +173,19 @@ export async function streamChatRound(
             }),
         )
     }
-    return { items, usage, truncated }
+    return { items, usage, truncated: finishReason === "length" }
+}
+
+/** A round the provider never finished; `length` stays a returned `truncated`. */
+export class IncompleteChatRoundError extends Error {
+    constructor(readonly reason: "content_filter" | "eof") {
+        super(
+            reason === "eof"
+                ? "chat completions stream ended with no finish_reason; the partial round was discarded"
+                : "provider stopped the round with finish_reason content_filter; the partial round was discarded",
+        )
+        this.name = "IncompleteChatRoundError"
+    }
 }
 
 function tokenUsageOf(

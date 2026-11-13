@@ -81,6 +81,27 @@ pub fn resolve(primary: &Path, raw: &[String]) -> Result<Vec<LinkedRepository>, 
     Ok(repos)
 }
 
+/// The linked repositories a resumed run reports on: `--repo` when given,
+/// else the plan's, re-read so "HEAD moved during the run" compares against
+/// this session's start rather than an earlier session's plan time.
+pub fn for_resume(current: &[LinkedRepository], recorded: &[LinkedRepository]) -> Vec<LinkedRepository> {
+    if !current.is_empty() {
+        return current.to_vec();
+    }
+    recorded
+        .iter()
+        .map(|repo| {
+            let path = Path::new(&repo.path);
+            LinkedRepository {
+                branch: git_output(path, &["rev-parse", "--abbrev-ref", "HEAD"])
+                    .or_else(|| repo.branch.clone()),
+                head_sha: git_output(path, &["rev-parse", "HEAD"]).or_else(|| repo.head_sha.clone()),
+                ..repo.clone()
+            }
+        })
+        .collect()
+}
+
 /// Planning context for Architect, intake and Planner. Story agents are
 /// sandboxed to the primary worktree, so the plan must not route work into a
 /// linked repository nor quietly patch its installed copy.
@@ -178,12 +199,30 @@ fn cargo_package_name(manifest: &str) -> Option<String> {
         }
         if let Some((key, value)) = line.split_once('=') {
             if key.trim() == "name" {
-                let name = value.trim().trim_matches('"');
-                return (!name.is_empty()).then(|| name.to_string());
+                return toml_string(value).filter(|name| !name.is_empty()).map(str::to_string);
             }
         }
     }
     None
+}
+
+/// The leading basic or literal TOML string of a value, ignoring what follows
+/// it (a trailing `# comment`).
+fn toml_string(value: &str) -> Option<&str> {
+    let value = value.trim_start();
+    let quote = value.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+    let rest = &value[1..];
+    rest.find(quote).map(|end| &rest[..end])
+}
+
+/// `package = "..."` inside an inline table, i.e. the crate a renamed
+/// dependency key really names.
+fn inline_package(value: &str) -> Option<&str> {
+    let table = value.trim_start().strip_prefix('{')?;
+    table.split(',').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        (key.trim() == "package").then(|| toml_string(value)).flatten()
+    })
 }
 
 /// The primary root's manifests plus one level of the conventional monorepo
@@ -245,16 +284,21 @@ fn cargo_dependency(manifest: &str, package: &str) -> Option<String> {
             }
             continue;
         }
+        // `[dependencies.eng]` with `package = "engine"` renames the crate.
+        if section.contains("dependencies.") {
+            if let Some((key, value)) = line.split_once('=') {
+                if key.trim() == "package" && toml_string(value) == Some(package) {
+                    return Some(format!("[{section}] {line}"));
+                }
+            }
+            continue;
+        }
         if !section.ends_with("dependencies") {
             continue;
         }
-        let key = line
-            .split(['=', '.'])
-            .next()
-            .unwrap_or("")
-            .trim()
-            .trim_matches('"');
-        if key == package {
+        let (key, value) = line.split_once('=').unwrap_or((line, ""));
+        let key = key.split('.').next().unwrap_or("").trim().trim_matches('"');
+        if key == package || inline_package(value) == Some(package) {
             return Some(format!("[{section}] {line}"));
         }
     }
@@ -368,6 +412,56 @@ version = "2"
         );
         assert_eq!(cargo_dependency(manifest, "missing"), None);
         assert_eq!(cargo_package_name("[workspace]\nname = \"x\"\n"), None);
+    }
+
+    #[test]
+    fn cargo_package_name_ignores_a_trailing_comment() {
+        assert_eq!(
+            cargo_package_name("[package]\nname = \"app\" # the binary\n").as_deref(),
+            Some("app")
+        );
+        assert_eq!(cargo_package_name("[package]\nname = 'app' # c\n").as_deref(), Some("app"));
+    }
+
+    #[test]
+    fn cargo_dependency_finds_a_renamed_crate() {
+        let inline = "[dependencies]\neng = { package = \"engine\", path = \"../engine\" }\n";
+        assert_eq!(
+            cargo_dependency(inline, "engine").as_deref(),
+            Some(r#"[dependencies] eng = { package = "engine", path = "../engine" }"#)
+        );
+        let table = "[dev-dependencies.eng]\npath = \"../engine\"\npackage = \"engine\"\n";
+        assert_eq!(
+            cargo_dependency(table, "engine").as_deref(),
+            Some(r#"[dev-dependencies.eng] package = "engine""#)
+        );
+        assert_eq!(cargo_dependency(inline, "eng-sys"), None);
+    }
+
+    #[test]
+    fn resume_compares_against_the_linked_heads_of_this_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = dir.path().join("engine");
+        git_repo(&engine);
+        let recorded = LinkedRepository {
+            name: "engine".to_string(),
+            path: engine.display().to_string(),
+            package: Some("@acme/engine".to_string()),
+            dependency: None,
+            branch: Some("main".to_string()),
+            head_sha: Some("1111111111111111111111111111111111111111".to_string()),
+        };
+        let now = git_output(&engine, &["rev-parse", "HEAD"]);
+
+        let resumed = for_resume(&[], std::slice::from_ref(&recorded));
+
+        assert_eq!(resumed.len(), 1);
+        assert_eq!(resumed[0].head_sha, now);
+        assert_eq!(resumed[0].package, recorded.package);
+
+        let gone = LinkedRepository { path: dir.path().join("gone").display().to_string(), ..recorded.clone() };
+        assert_eq!(for_resume(&[], std::slice::from_ref(&gone)), vec![gone.clone()]);
+        assert_eq!(for_resume(std::slice::from_ref(&recorded), &[gone]), vec![recorded]);
     }
 
     #[test]

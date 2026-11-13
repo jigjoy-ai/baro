@@ -145,6 +145,14 @@ export interface VerifyCommandSpec {
     /** Absent means "detected", i.e. run-level. Story-declared tests already
      *  get a retry from their own perimeter loop and must not get a second. */
     readonly origin?: "detected" | "declared"
+    /** Set on top of process.env for this command only. */
+    readonly env?: Readonly<Record<string, string>>
+}
+
+/** baro-ai's postinstall writes ~/.baro/bin, outside the worktree: a run's own
+ *  install must not replace the baro that is running it (#262). */
+export function dependencyInstallEnv(): Record<string, string> {
+    return { BARO_SKIP_POSTINSTALL: "1" }
 }
 
 /** The only provenance predicate; nothing may re-derive this from a label. */
@@ -658,6 +666,7 @@ function dependencyRefreshCommand(cwd: string, reasons: readonly string[]): Veri
     return {
         label: `${pm} install (dependencies stale: ${reasons.join("; ")})`,
         ...command,
+        env: dependencyInstallEnv(),
     }
 }
 
@@ -1361,7 +1370,11 @@ async function runCmd(
     try {
         const result = await execFileCli(tool, args, {
             cwd: commandCwd,
-            ...(c.tool === "cargo" ? { env: cargoEnvFor(hostRepoRoot) } : {}),
+            ...(c.tool === "cargo"
+                ? { env: cargoEnvFor(hostRepoRoot) }
+                : c.env
+                  ? { env: { ...process.env, ...c.env } }
+                  : {}),
             // execFileCli's awake-clock window is the only one that sees
             // stderr chunks and the CPU probe, so the shared N is set there.
             idleTimeoutMs: activityIdleTimeoutMs(),

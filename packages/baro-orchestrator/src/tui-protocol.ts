@@ -96,7 +96,8 @@ export type BaroEvent =
     | { type: "decision_document"; document: string }
     | { type: "dag"; levels: DagNodeInfo[][] }
     | { type: "story_start"; id: string; title: string }
-    | { type: "story_suspended"; id: string; block_id: string }
+    // A pause, not a failure: the story restarts once `waits_on` integrate.
+    | { type: "story_suspended"; id: string; waits_on: string[]; block_id: string }
     | { type: "story_log"; id: string; line: string }
     | {
           type: "story_complete"

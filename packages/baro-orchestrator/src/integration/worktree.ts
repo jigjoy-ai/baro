@@ -115,8 +115,8 @@ class RecoveryMaterialError extends Error {}
 /**
  * Per-story worktree lifecycle for one run (one instance per orchestrate()
  * call); the run id scopes branch + dir names so concurrent runs never
- * collide. Crashed prior runs leave inert worktree dirs / branch refs
- * behind — harmless, since each run uses a fresh id.
+ * collide. Crashed prior runs leave worktree dirs / branch refs behind;
+ * the next run start reclaims the dirs (see stale-run-dirs.ts).
  */
 export class WorktreeManager {
     private readonly paths = new Map<string, string>()
@@ -472,7 +472,7 @@ export class WorktreeManager {
      */
     async resumeFromSuspension(
         storyId: string,
-        opts: { restoreFrom?: string } = {},
+        opts: { restoreFrom?: string; agentCommitsOnly?: boolean } = {},
     ): Promise<ResumeBaseUpdate> {
         const path = this.pathOf(storyId)
         const release = await this.gate.acquire()
@@ -522,7 +522,13 @@ export class WorktreeManager {
             await this.ensureWorktreeExcludes()
             if (this.linkDepDirs) this.symlinkDepDirs(path)
             if (restoreSha) {
-                await this.replayPreservedWork(storyId, path, baseSha, restoreSha)
+                await this.replayPreservedWork(
+                    storyId,
+                    path,
+                    baseSha,
+                    restoreSha,
+                    opts.agentCommitsOnly === true,
+                )
             }
 
             this.paths.set(storyId, path)
@@ -573,25 +579,18 @@ export class WorktreeManager {
 
     /**
      * Resume the story at the run branch with only the commits its agent made
-     * on a preserved attempt; the host's preservation commit of leftover
-     * files is not the agent's answer and is left out. Null when the agent
+     * on a preserved attempt; the host's preservation commits of leftover
+     * files are not the agent's answer and are left out, including one an
+     * earlier resume replayed mid-branch. Null when the agent
      * committed nothing the run branch lacks.
      */
     async restoreAgentCommits(
         storyId: string,
         preservedRef: string,
     ): Promise<{ path: string; head: string } | null> {
-        const tip = await this.resolveRestorePoint(storyId, preservedRef)
-        const { stdout: subject } = await exec(
-            "git",
-            ["log", "-1", "--format=%s", tip],
-            { cwd: this.repoRoot },
-        )
-        const agentTip = subject.trim() === preservationSubject(storyId)
-            ? await this.resolveRestorePoint(storyId, `${tip}^`)
-            : tip
         const { baseSha } = await this.resumeFromSuspension(storyId, {
-            restoreFrom: agentTip,
+            restoreFrom: preservedRef,
+            agentCommitsOnly: true,
         })
         const path = this.paths.get(storyId)
         if (!path) return null
@@ -634,6 +633,7 @@ export class WorktreeManager {
         worktreePath: string,
         baseSha: string,
         restoreSha: string,
+        agentCommitsOnly = false,
     ): Promise<void> {
         const { stdout: forkPoint } = await exec(
             "git",
@@ -646,12 +646,16 @@ export class WorktreeManager {
                 `preserved work for story ${storyId} shares no history with the run branch`,
             )
         }
+        const segments = agentCommitsOnly
+            ? await this.agentCommitSegments(storyId, worktreePath, mergeBase, restoreSha)
+            : [{ from: mergeBase, to: restoreSha }]
         try {
-            await exec(
-                "git",
-                ["rebase", "--onto", baseSha, mergeBase, restoreSha],
-                { cwd: worktreePath },
-            )
+            let onto = baseSha
+            for (const { from, to } of segments) {
+                await exec("git", ["rebase", "--onto", onto, from, to], { cwd: worktreePath })
+                const { stdout } = await exec("git", ["rev-parse", "HEAD"], { cwd: worktreePath })
+                onto = stdout.trim()
+            }
         } catch (error) {
             // Leave no rebase in progress behind: the caller's rollback needs a
             // removable worktree, and the preserved ref must stay untouched.
@@ -667,6 +671,37 @@ export class WorktreeManager {
         await exec("git", ["checkout", "-B", this.branchOf(storyId)], {
             cwd: worktreePath,
         })
+    }
+
+    /** The runs of commits between this story's preservation commits, as
+     * `from..to` ranges, so each can be replayed without them. */
+    private async agentCommitSegments(
+        storyId: string,
+        worktreePath: string,
+        mergeBase: string,
+        restoreSha: string,
+    ): Promise<Array<{ from: string; to: string }>> {
+        const { stdout } = await exec(
+            "git",
+            ["log", "--reverse", "--format=%H %s", `${mergeBase}..${restoreSha}`],
+            { cwd: worktreePath },
+        )
+        const segments: Array<{ from: string; to: string }> = []
+        let from = mergeBase
+        let to: string | null = null
+        for (const line of stdout.split("\n").filter(Boolean)) {
+            const space = line.indexOf(" ")
+            const sha = space < 0 ? line : line.slice(0, space)
+            if (space >= 0 && line.slice(space + 1) === preservationSubject(storyId)) {
+                if (to) segments.push({ from, to })
+                from = sha
+                to = null
+            } else {
+                to = sha
+            }
+        }
+        if (to) segments.push({ from, to })
+        return segments
     }
 
     /**
@@ -1714,7 +1749,7 @@ function preservationSubject(storyId: string): string {
     return `baro: preserve failed work for story ${storyId}`
 }
 
-function meaningfulStatusLines(status: string): string[] {
+export function meaningfulStatusLines(status: string): string[] {
     return status
         .split("\n")
         .map((line) => line.trimEnd())

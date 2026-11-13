@@ -49,6 +49,11 @@ let ownershipPublishPending = false
 let ownershipPublisherForTests:
     | ((groups: readonly ProviderOwnershipGroup[]) => ProviderOwnershipPublishResult)
     | null = null
+let defaultTimingsForTests: {
+    terminationGraceMs: number
+    quiescenceTimeoutMs: number
+} | null = null
+let observationLastObservedScan = 0
 
 export type ProcessQuiescenceAssurance = "cooperative-observed" | "none"
 
@@ -139,6 +144,9 @@ export interface ProcessTreeObserverStats {
     scansCompleted: number
     activeScans: number
     maxConcurrentScans: number
+    /** `scansStarted` ordinal of the latest scan that read a table; a timed
+     * out `ps` still counts as completed but observed nothing. */
+    lastObservedScan: number
 }
 
 /** @internal Deterministic ownership-publication failure seam. The active-tree
@@ -158,6 +166,14 @@ export function setProcessTreeOwnershipPublisherForTests(
     ownershipPublisherForTests = publisher
 }
 
+/** @internal Default timings for trees built inside participants, so tests
+ * can outlast slow `ps` scans on a loaded machine. Explicit options win. */
+export function setProcessTreeDefaultTimingsForTests(
+    timings: { terminationGraceMs: number; quiescenceTimeoutMs: number } | null,
+): void {
+    defaultTimingsForTests = timings
+}
+
 /** Read-only diagnostics used to verify that discovery never overlaps. */
 export function processTreeObserverStats(): ProcessTreeObserverStats {
     return {
@@ -165,6 +181,7 @@ export function processTreeObserverStats(): ProcessTreeObserverStats {
         scansCompleted: observationScansCompleted,
         activeScans: observationActiveScans,
         maxConcurrentScans: observationMaxConcurrentScans,
+        lastObservedScan: observationLastObservedScan,
     }
 }
 
@@ -234,10 +251,15 @@ export class ManagedProcessTree {
         private readonly child: ChildProcess,
         options: ManagedProcessTreeOptions = {},
     ) {
-        this.terminationGraceMs = options.terminationGraceMs ?? 5_000
+        this.terminationGraceMs =
+            options.terminationGraceMs ??
+            defaultTimingsForTests?.terminationGraceMs ??
+            5_000
         this.pollIntervalMs = options.pollIntervalMs ?? 100
         this.quiescenceTimeoutMs =
-            options.quiescenceTimeoutMs ?? DEFAULT_QUIESCENCE_TIMEOUT_MS
+            options.quiescenceTimeoutMs ??
+            defaultTimingsForTests?.quiescenceTimeoutMs ??
+            DEFAULT_QUIESCENCE_TIMEOUT_MS
         this.naturalExitDrainGraceMs =
             options.naturalExitDrainGraceMs ??
             DEFAULT_NATURAL_EXIT_DRAIN_GRACE_MS
@@ -1160,6 +1182,7 @@ async function runSharedObservation(): Promise<void> {
     const observedTrees = [...activeProcessTrees]
     observationInFlight = true
     observationScansStarted += 1
+    const scan = observationScansStarted
     observationActiveScans += 1
     observationMaxConcurrentScans = Math.max(
         observationMaxConcurrentScans,
@@ -1177,6 +1200,7 @@ async function runSharedObservation(): Promise<void> {
         observationActiveScans -= 1
         observationInFlight = false
     }
+    if (table !== null) observationLastObservedScan = scan
 
     deferOwnershipPublish = true
     try {

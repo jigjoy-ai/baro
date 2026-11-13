@@ -12,7 +12,11 @@ import { BusMember, CoordinationBus } from "../runtime/coordination.js"
 import { AgentResult, AgentState, StoryResult } from "../semantic-events.js"
 import type { StorySpawnRequestData } from "../semantic-events.js"
 import { gateCommandWasKilled } from "../verification/continuous-gate-runner.js"
+import { readAuthoritativeVerifyPlanOptions } from "../verification/prd-declared-tests.js"
 import {
+    createVerifyPlan,
+    isRunLevelCommand,
+    mergeVerifyPlans,
     verifyBuild,
     type VerifyCommandResult,
     type VerifyPlan,
@@ -26,14 +30,67 @@ export interface ReverifiedGateCommand {
     readonly output: string
 }
 
+export type CommitGate = (
+    storyId: string,
+    cwd: string,
+    signal: AbortSignal,
+) => Promise<readonly ReverifiedGateCommand[] | null>
+
+export interface StoryCommitGateOptions {
+    /** Snapshotted before any agent ran, so a story cannot delete a gate. */
+    readonly basePlan: VerifyPlan
+    /** Where basePlan was built; the story plan must share its command identities. */
+    readonly planRoot: string
+    readonly prdPath: string
+    readonly hostRepoRoot?: string
+    /** The continuous gate's queue, so this is never a concurrent full test run. */
+    readonly exclusive?: <T>(work: (signal: AbortSignal) => Promise<T>) => Promise<T>
+}
+
+/**
+ * The project's gate plus the story's own declared tests. A story that
+ * declares none gets no verdict: a green existing suite says nothing about
+ * whether an attempt that died partway finished the story.
+ */
+export function storyCommitGate(opts: StoryCommitGateOptions): CommitGate {
+    return async (storyId, cwd, signal) => {
+        const plan = storyGatePlan(opts, storyId)
+        if (!plan) return null
+        const run = (queueSignal?: AbortSignal) =>
+            runCommitGate(cwd, {
+                plan,
+                ...(opts.hostRepoRoot ? { hostRepoRoot: opts.hostRepoRoot } : {}),
+                signal: queueSignal ? AbortSignal.any([signal, queueSignal]) : signal,
+            })
+        if (!opts.exclusive) return run()
+        return opts.exclusive((queueSignal) =>
+            signal.aborted ? Promise.resolve(null) : run(queueSignal),
+        )
+    }
+}
+
+function storyGatePlan(opts: StoryCommitGateOptions, storyId: string): VerifyPlan | null {
+    const { declaredTests, testBudgets } = readAuthoritativeVerifyPlanOptions(opts.prdPath)
+    const own = declaredTests.filter((test) => test.storyId === storyId)
+    if (own.length === 0) return null
+    return mergeVerifyPlans(
+        opts.basePlan,
+        createVerifyPlan(opts.planRoot, {
+            declaredTests: own,
+            testBudgets: testBudgets.filter((budget) => budget.storyId === storyId),
+        }),
+    )
+}
+
 export interface CommitGateOptions {
     readonly plan?: VerifyPlan
     readonly hostRepoRoot?: string
     readonly signal?: AbortSignal
 }
 
-/** Null when nothing ran or a command was cut short: neither says anything
- * about the commit, so neither may stand in for an agent attempt. */
+/** Null when nothing ran, a command was cut short or a story test could not
+ * run: none says anything about the commit, so none may stand in for an
+ * agent attempt. */
 export async function runCommitGate(
     cwd: string,
     opts: CommitGateOptions = {},
@@ -44,6 +101,14 @@ export async function runCommitGate(
         ...(opts.hostRepoRoot ? { hostRepoRoot: opts.hostRepoRoot } : {}),
     })
     if (result.commands.some(gateCommandWasKilled)) return null
+    const declared = new Set(
+        (opts.plan?.commands ?? [])
+            .filter((command) => !isRunLevelCommand(command))
+            .map(({ label }) => label),
+    )
+    if (result.commands.some(({ command, status }) => status === "skipped" && declared.has(command))) {
+        return null
+    }
     const commands = result.commands
         .filter((command) => command.status !== "skipped")
         .map((command) => ({
@@ -133,11 +198,12 @@ export class ReverifiedCommit extends BusMember {
                 subtype: "success",
                 sessionId: null,
                 isError: false,
+                // No PASS lines: the command evidence already carries the
+                // output, and a verdict-shaped summary invites a rubber stamp.
                 resultText: [
-                    `The previous attempt ended before it could report, after committing ${short}.`,
-                    "No agent ran in this attempt: the host restored that commit onto the latest run branch and re-ran the story's gate on it.",
-                    ...gate.map(({ command }) => `  PASS  ${command}`),
-                    "Judge the committed change against the story's acceptance criteria.",
+                    `The previous attempt ended before it could report, after committing ${short}; it may have stopped partway.`,
+                    "No agent ran in this attempt and nobody claims the story is done: the host restored that commit onto the latest run branch and re-ran the story's gate on it.",
+                    "A green gate does not show the change is complete. Judge the committed change against every acceptance criterion.",
                 ].join("\n"),
                 usage: null,
                 totalCostUsd: null,

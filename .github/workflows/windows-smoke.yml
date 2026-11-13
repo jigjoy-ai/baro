@@ -35,6 +35,9 @@ jobs:
           Pop-Location
       - name: Stage like an install
         shell: pwsh
+        env:
+          # postinstall refuses a source checkout unless asked (#262).
+          BARO_INSTALL_FROM_CHECKOUT: 1
         run: |
           # postinstall stages the bundles and their dependency link; the
           # binary it may download is replaced with the one just built.

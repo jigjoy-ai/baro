@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { describe, it } from "node:test"
+import { after, before, describe, it } from "node:test"
 
 import { ClaudeCliParticipant } from "../../src/harness/claude/cli-participant.js"
 import { CodexCliParticipant } from "../../src/harness/codex/cli-participant.js"
@@ -10,12 +10,25 @@ import { PiCliParticipant } from "../../src/harness/pi/cli-participant.js"
 import {
     activeProcessTreeCount,
     processTreeObserverStats,
+    setProcessTreeDefaultTimingsForTests,
     signalAllProcessTrees,
+    type ProcessTreeObserverStats,
 } from "../../src/harness/process-tree.js"
 import { killedWorkerFailure } from "../../src/harness/cli-story-failure.js"
 import { captureEnv, withTempDir } from "../execution/helpers.js"
+import { GENEROUS_WAIT_MS, waitFor, withDeadline } from "../wait-for.js"
 
 describe("CLI participant process-tree lifecycle", () => {
+    // Under load a `ps` scan can outlast the 5s TERM grace and the 2.25s
+    // post-KILL bound; a positive certificate still needs an observed absence.
+    before(() =>
+        setProcessTreeDefaultTimingsForTests({
+            terminationGraceMs: GENEROUS_WAIT_MS,
+            quiescenceTimeoutMs: GENEROUS_WAIT_MS,
+        }),
+    )
+    after(() => setProcessTreeDefaultTimingsForTests(null))
+
     it(
         "keeps all four harness trees registered after their shims close",
         { skip: process.platform === "win32" },
@@ -61,14 +74,20 @@ describe("CLI participant process-tree lifecycle", () => {
                         Number(readFileSync(fixtures[name].pidPath, "utf8")),
                     )
                     assert.equal(activeProcessTreeCount(), 4)
+                    // Once the shims close, only captured identities can be
+                    // signalled; make sure a table read has captured them.
+                    await waitForObserverIdleAfterScan(
+                        processTreeObserverStats(),
+                        GENEROUS_WAIT_MS,
+                    )
 
                     signalAllProcessTrees("SIGTERM")
-                    await waitUntil(
+                    await waitFor(
                         () =>
                             participants.every(
                                 (participant) => participant.getPhase() === "done",
                             ),
-                        1_000,
+                        { message: "every shim to exit on SIGTERM" },
                     )
                     assert.equal(activeProcessTreeCount(), 4)
                     assert.ok(
@@ -82,7 +101,7 @@ describe("CLI participant process-tree lifecycle", () => {
                     )
 
                     assert.equal(activeProcessTreeCount(), 0)
-                    assert.ok(descendantPids.every((pid) => !isAlive(pid)))
+                    await waitForReaped(descendantPids)
                 } finally {
                     signalAllProcessTrees("SIGKILL")
                     for (const pid of descendantPids) {
@@ -108,27 +127,34 @@ describe("CLI participant process-tree lifecycle", () => {
                         name,
                         writeInheritedStdioShim(dir, name),
                     ]),
-                ) as Record<(typeof harnesses)[number], TreeShim>
+                ) as Record<(typeof harnesses)[number], TriggeredTreeShim>
+                // The tree, not the close-drain watchdog, must end these; a
+                // long watchdog keeps a slow drain from being mistaken for it.
+                const closeDrainTimeoutMs = GENEROUS_WAIT_MS
                 const participants = [
                     new ClaudeCliParticipant("claude-inherited", {
                         cwd: dir,
                         claudeBin: fixtures.claude.bin,
+                        closeDrainTimeoutMs,
                     }),
                     new CodexCliParticipant("codex-inherited", {
                         cwd: dir,
                         prompt: "test",
                         codexBin: fixtures.codex.bin,
                         skipGitRepoCheck: true,
+                        closeDrainTimeoutMs,
                     }),
                     new OpenCodeCliParticipant("opencode-inherited", {
                         cwd: dir,
                         prompt: "test",
                         opencodeBin: fixtures.opencode.bin,
+                        closeDrainTimeoutMs,
                     }),
                     new PiCliParticipant("pi-inherited", {
                         cwd: dir,
                         prompt: "test",
                         piBin: fixtures.pi.bin,
+                        closeDrainTimeoutMs,
                     }),
                 ] as const
 
@@ -144,12 +170,21 @@ describe("CLI participant process-tree lifecycle", () => {
                     descendantPids = harnesses.map((name) =>
                         Number(readFileSync(fixtures[name].pidPath, "utf8")),
                     )
+                    // Exit on cue once the providers are observed: a shim that
+                    // left first under load took the group's identities with it.
+                    await waitForObserverIdleAfterScan(
+                        processTreeObserverStats(),
+                        GENEROUS_WAIT_MS,
+                    )
+                    for (const name of harnesses) {
+                        writeFileSync(fixtures[name].triggerPath, "exit")
+                    }
 
-                    await withDeadline(
+                    const summaries = await withDeadline(
                         Promise.all(
                             participants.map((participant) => participant.done),
                         ),
-                        3_000,
+                        GENEROUS_WAIT_MS * 2,
                         () =>
                             "natural root exit left inherited stdio open " +
                             JSON.stringify({
@@ -161,8 +196,13 @@ describe("CLI participant process-tree lifecycle", () => {
                             }),
                     )
 
+                    assert.deepEqual(
+                        summaries.map((summary) => summary.error?.message ?? null),
+                        [null, null, null, null],
+                        "the tree drained the inherited stdio; the watchdog did not fire",
+                    )
                     assert.equal(activeProcessTreeCount(), 0)
-                    assert.ok(descendantPids.every((pid) => !isAlive(pid)))
+                    await waitForReaped(descendantPids)
                 } finally {
                     signalAllProcessTrees("SIGKILL")
                     for (const pid of descendantPids) {
@@ -183,7 +223,6 @@ describe("CLI participant process-tree lifecycle", () => {
         async () => {
             await withTempDir("baro-cli-close-watchdog-", async (dir) => {
                 const harnesses = ["claude", "codex", "opencode", "pi"] as const
-                const observerBefore = processTreeObserverStats()
                 const fixtures = Object.fromEntries(
                     harnesses.map((name) => [
                         name,
@@ -227,17 +266,17 @@ describe("CLI participant process-tree lifecycle", () => {
                         participants.map((participant) => participant.ready),
                     )
                     await waitForObserverIdleAfterScan(
-                        observerBefore.scansCompleted,
-                        2_000,
+                        processTreeObserverStats(),
+                        GENEROUS_WAIT_MS,
                     )
                     for (const name of harnesses) {
                         writeFileSync(fixtures[name].triggerPath, "spawn")
                     }
-                    await waitUntil(
+                    await waitFor(
                         () => harnesses.every((name) =>
-                            existsSync(fixtures[name].pidPath),
+                            pidFileWritten(fixtures[name].pidPath),
                         ),
-                        1_000,
+                        { message: "every unobserved child pid file" },
                     )
                     descendantPids = harnesses.map((name) =>
                         Number(readFileSync(fixtures[name].pidPath, "utf8")),
@@ -247,7 +286,7 @@ describe("CLI participant process-tree lifecycle", () => {
                         Promise.all(
                             participants.map((participant) => participant.done),
                         ),
-                        2_000,
+                        GENEROUS_WAIT_MS,
                         () =>
                             "owned process groups did not contain every unobserved child",
                     )
@@ -261,8 +300,8 @@ describe("CLI participant process-tree lifecycle", () => {
                         certifications.every(Boolean),
                         "every owned group must have an affirmative certificate",
                     )
-                    assert.ok(
-                        descendantPids.every((pid) => !isAlive(pid)),
+                    await waitForReaped(
+                        descendantPids,
                         "group containment must kill children which escaped PID discovery",
                     )
                     assert.equal(activeProcessTreeCount(), 0)
@@ -286,7 +325,6 @@ describe("CLI participant process-tree lifecycle", () => {
         async () => {
             await withTempDir("baro-cli-background-tree-", async (dir) => {
                 const harnesses = ["claude", "codex", "opencode", "pi"] as const
-                const observerBefore = processTreeObserverStats()
                 const fixtures = Object.fromEntries(
                     harnesses.map((name) => [
                         name,
@@ -332,19 +370,24 @@ describe("CLI participant process-tree lifecycle", () => {
                     descendantPids = harnesses.map((name) =>
                         Number(readFileSync(fixtures[name].pidPath, "utf8")),
                     )
+                    // The grandchildren exist before `ready`, so any table read
+                    // after it captures them.
                     await waitForObserverIdleAfterScan(
-                        observerBefore.scansCompleted,
-                        2_000,
+                        processTreeObserverStats(),
+                        GENEROUS_WAIT_MS,
                     )
                     for (const name of harnesses) {
                         writeFileSync(fixtures[name].triggerPath, "exit")
                     }
 
+                    // Not bounding this below the 5s escalation: a summary that
+                    // waited for the tree is caught by the liveness and
+                    // tree-count assertions that follow.
                     const summaries = await withDeadline(
                         Promise.all(
                             participants.map((participant) => participant.done),
                         ),
-                        2_000,
+                        GENEROUS_WAIT_MS,
                         () => "tracked process trees blocked watchdog summaries",
                     )
 
@@ -375,7 +418,7 @@ describe("CLI participant process-tree lifecycle", () => {
 
                     const certifications = await withDeadline(
                         quiescence,
-                        2_000,
+                        GENEROUS_WAIT_MS * 2,
                         () =>
                             "abortAndWait did not confirm watchdog tree quiescence " +
                             JSON.stringify({
@@ -385,7 +428,7 @@ describe("CLI participant process-tree lifecycle", () => {
                     )
                     assert.ok(certifications.every(Boolean))
                     assert.equal(activeProcessTreeCount(), 0)
-                    assert.ok(descendantPids.every((pid) => !isAlive(pid)))
+                    await waitForReaped(descendantPids)
                     await new Promise((resolve) => setTimeout(resolve, 50))
                     assert.ok(
                         participants.every(
@@ -447,14 +490,15 @@ setInterval(() => {}, 1000);
     return { bin, pidPath }
 }
 
-function writeInheritedStdioShim(dir: string, name: string): TreeShim {
+function writeInheritedStdioShim(dir: string, name: string): TriggeredTreeShim {
     const bin = join(dir, `${name}-inherited-stdio.mjs`)
     const pidPath = join(dir, `${name}-inherited-grandchild.pid`)
+    const triggerPath = join(dir, `${name}-inherited-exit.trigger`)
     writeFileSync(
         bin,
         `#!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
   stdio: ["ignore", "inherit", "inherit"],
 });
@@ -464,11 +508,15 @@ console.log(JSON.stringify({ type: "system", subtype: "init", session_id: "inher
 console.log(JSON.stringify({ type: "step_start", sessionID: "inherited-session", part: { type: "step-start" } }));
 console.log(JSON.stringify({ type: "session", id: "inherited-session" }));
 console.log(JSON.stringify({ type: "agent_start" }));
-setTimeout(() => process.exit(0), 250);
+const trigger = setInterval(() => {
+  if (!existsSync(${JSON.stringify(triggerPath)})) return;
+  clearInterval(trigger);
+  process.exit(0);
+}, 1);
 `,
     )
     chmodSync(bin, 0o755)
-    return { bin, pidPath }
+    return { bin, pidPath, triggerPath }
 }
 
 function writeUnobservedInheritedStdioShim(
@@ -543,7 +591,7 @@ child.once("message", () => {
 }
 
 async function waitForObserverIdleAfterScan(
-    scansCompletedBefore: number,
+    before: ProcessTreeObserverStats,
     waitMs: number,
 ): Promise<void> {
     const deadline = Date.now() + waitMs
@@ -551,8 +599,9 @@ async function waitForObserverIdleAfterScan(
     let idleCompleted = -1
     while (Date.now() < deadline) {
         const stats = processTreeObserverStats()
+        // A scan whose `ps` timed out under load completes but saw nothing.
         const idle =
-            stats.scansCompleted > scansCompletedBefore &&
+            stats.lastObservedScan > before.scansStarted &&
             stats.activeScans === 0 &&
             stats.scansStarted === stats.scansCompleted
         if (!idle) {
@@ -569,13 +618,19 @@ async function waitForObserverIdleAfterScan(
     throw new Error(`process-tree observer did not become idle within ${waitMs}ms`)
 }
 
-async function waitUntil(predicate: () => boolean, waitMs: number): Promise<void> {
-    const deadline = Date.now() + waitMs
-    while (Date.now() < deadline) {
-        if (predicate()) return
-        await new Promise((resolve) => setTimeout(resolve, 10))
-    }
-    throw new Error(`condition not reached within ${waitMs}ms`)
+// A killed, reparented descendant answers `kill(pid, 0)` until init reaps it,
+// which lags under load even after the tree saw it gone.
+async function waitForReaped(
+    pids: readonly number[],
+    message = "every descendant to be reaped",
+): Promise<void> {
+    await waitFor(() => pids.every((pid) => !isAlive(pid)), { message })
+}
+
+// `existsSync` alone can observe the file between create and write; a pid of
+// 0 would then make `process.kill` target this test's own process group.
+function pidFileWritten(path: string): boolean {
+    return existsSync(path) && /^\d+$/.test(readFileSync(path, "utf8"))
 }
 
 function isAlive(pid: number): boolean {
@@ -599,27 +654,6 @@ function isAlive(pid: number): boolean {
         return true
     } catch (error) {
         return (error as NodeJS.ErrnoException).code === "EPERM"
-    }
-}
-
-async function withDeadline<T>(
-    promise: Promise<T>,
-    timeoutMs: number,
-    timeoutMessage: () => string,
-): Promise<T> {
-    let timer: ReturnType<typeof setTimeout> | undefined
-    try {
-        return await Promise.race([
-            promise,
-            new Promise<never>((_resolve, reject) => {
-                timer = setTimeout(
-                    () => reject(new Error(timeoutMessage())),
-                    timeoutMs,
-                )
-            }),
-        ])
-    } finally {
-        if (timer !== undefined) clearTimeout(timer)
     }
 }
 

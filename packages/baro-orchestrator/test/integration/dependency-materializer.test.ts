@@ -3,6 +3,7 @@ import {
     lstatSync,
     mkdirSync,
     readdirSync,
+    readFileSync,
     realpathSync,
     writeFileSync,
 } from "node:fs"
@@ -16,7 +17,8 @@ import {
 } from "../../src/integration/dependency-materializer.js"
 import { withTempDir } from "../execution/helpers.js"
 
-// Every case injects runInstall, so npm is never spawned.
+// Every case but the #262 one injects runInstall; that one runs a
+// dependency-free `npm ci`.
 
 function writeWorkspace(
     dir: string,
@@ -248,6 +250,35 @@ describe("materializeDependencies", () => {
                 result.workspaces.map(({ action, reason }) => ({ action, reason })),
                 [{ action: "skipped", reason: "no package.json" }],
             )
+        })
+    })
+
+    it("tells baro-ai's postinstall to leave the installed baro alone (#262)", async () => {
+        await withTempDir("baro-dep-mat-", async (root) => {
+            const host = join(root, "host")
+            const run = join(root, "run")
+            mkdirSync(host, { recursive: true })
+            const manifest = {
+                name: "app",
+                version: "1.0.0",
+                private: true,
+                scripts: {
+                    postinstall:
+                        "node -e \"require('fs').writeFileSync('seen', String(process.env.BARO_SKIP_POSTINSTALL))\"",
+                },
+            }
+            const lockfile = JSON.stringify({
+                name: "app",
+                version: "1.0.0",
+                lockfileVersion: 3,
+                requires: true,
+                packages: { "": { name: "app", version: "1.0.0" } },
+            })
+            writeWorkspace(run, manifest, lockfile)
+
+            await materializeDependencies({ hostRoot: host, integrationRoot: run })
+
+            assert.equal(readFileSync(join(run, "seen"), "utf8"), "1")
         })
     })
 

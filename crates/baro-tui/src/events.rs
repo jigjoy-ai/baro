@@ -97,7 +97,13 @@ pub enum BaroEvent {
     /// A worker quiesced because an accepted dependency block made its
     /// current lease temporarily unrunnable. This is not a failure.
     #[serde(rename = "story_suspended")]
-    StorySuspended { id: String, block_id: String },
+    StorySuspended {
+        id: String,
+        /// Absent from orchestrators that predate the field.
+        #[serde(default)]
+        waits_on: Vec<String>,
+        block_id: String,
+    },
 
     #[serde(rename = "story_log")]
     StoryLog { id: String, line: String },
@@ -467,9 +473,24 @@ mod tests {
 
     #[test]
     fn parses_dependency_suspension_as_its_own_event() {
+        match parse(
+            r#"{"type":"story_suspended","id":"S5","waits_on":["S1","S2","S3"],"block_id":"block-S5"}"#,
+        ) {
+            BaroEvent::StorySuspended { id, waits_on, block_id } => {
+                assert_eq!(id, "S5");
+                assert_eq!(waits_on, vec!["S1", "S2", "S3"]);
+                assert_eq!(block_id, "block-S5");
+            }
+            other => panic!("wrong variant: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_a_suspension_without_waits_on_from_an_older_orchestrator() {
         match parse(r#"{"type":"story_suspended","id":"S2","block_id":"block-S2-S1"}"#) {
-            BaroEvent::StorySuspended { id, block_id } => {
+            BaroEvent::StorySuspended { id, waits_on, block_id } => {
                 assert_eq!(id, "S2");
+                assert!(waits_on.is_empty());
                 assert_eq!(block_id, "block-S2-S1");
             }
             other => panic!("wrong variant: {:?}", other),

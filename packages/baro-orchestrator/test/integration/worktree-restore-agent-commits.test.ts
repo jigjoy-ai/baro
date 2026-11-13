@@ -99,6 +99,33 @@ describe("WorktreeManager.restoreAgentCommits", () => {
         assert.equal(git(restored.path, "rev-list", "--count", `${mgr.creationSha("S3")}..HEAD`), "2")
     })
 
+    it("leaves out a host leftover commit an earlier dependency resume replayed mid-branch", async () => {
+        const path = (await mgr.create("S3"))!
+        commitIn(path, "fix.txt", "first part\n")
+        writeFileSync(join(path, "half-written.txt"), "leftover at suspension\n")
+        const suspended = (await mgr.cleanupFailed("S3", true))!
+        await mgr.resumeFromSuspension("S3", { restoreFrom: suspended })
+        const resumed = mgr.activePath("S3")!
+        commitIn(resumed, "fix2.txt", "second part\n")
+        const preserved = (await mgr.cleanupFailed("S3", true))!
+        assert.match(
+            git(repo, "log", "--format=%s", preserved),
+            /edit fix2\.txt\nbaro: preserve failed work for story S3\nedit fix\.txt/,
+            "fixture: the leftover commit sits between the agent's commits",
+        )
+
+        const restored = await mgr.restoreAgentCommits("S3", preserved)
+
+        assert.ok(restored)
+        assert.equal(readFileSync(join(restored.path, "fix.txt"), "utf8"), "first part\n")
+        assert.equal(readFileSync(join(restored.path, "fix2.txt"), "utf8"), "second part\n")
+        assert.equal(existsSync(join(restored.path, "half-written.txt")), false)
+        assert.equal(
+            git(restored.path, "log", "--format=%s", `${mgr.creationSha("S3")}..HEAD`),
+            "edit fix2.txt\nedit fix.txt",
+        )
+    })
+
     it("returns null when the agent committed nothing of its own", async () => {
         const path = (await mgr.create("S3"))!
         writeFileSync(join(path, "draft.txt"), "never committed\n")

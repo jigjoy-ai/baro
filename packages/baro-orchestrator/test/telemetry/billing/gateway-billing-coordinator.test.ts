@@ -371,7 +371,7 @@ describe("GatewayBillingCoordinator", () => {
                     correlation.session_id,
                     correlation.invocation_id,
                 )
-                return json(response, 200, chatCompletion())
+                return replyChatCompletion(response, requestBody)
             }
             if (request.method === "GET" && request.url?.startsWith("/v1/billing/receipts")) {
                 return json(
@@ -439,7 +439,7 @@ describe("GatewayBillingCoordinator", () => {
         let requestBody: Record<string, unknown> | null = null
         const baseUrl = await listen(async (request, response) => {
             requestBody = JSON.parse(await readBody(request)) as Record<string, unknown>
-            json(response, 200, chatCompletion())
+            replyChatCompletion(response, requestBody)
         })
         const gateway = new GatewayBillingCoordinator({
             runId: "run-untrusted",
@@ -974,6 +974,34 @@ function jsonResponse(
         status: 200,
         headers: { "content-type": "application/json", ...headers },
     })
+}
+
+/**
+ * Answers the way a compatible endpoint does: a streamed request gets SSE
+ * chunks ending in a `finish_reason`, which is what marks the round complete.
+ */
+function replyChatCompletion(
+    response: import("node:http").ServerResponse,
+    requestBody: Record<string, unknown>,
+): void {
+    const completion = chatCompletion()
+    if (requestBody.stream !== true) return json(response, 200, completion)
+    const chunk = (choices: unknown[], usage?: unknown): string =>
+        `data: ${JSON.stringify({
+            id: completion.id,
+            object: "chat.completion.chunk",
+            created: completion.created,
+            model: completion.model,
+            choices,
+            ...(usage === undefined ? {} : { usage }),
+        })}\n\n`
+    response.writeHead(200, { "content-type": "text/event-stream" })
+    response.end(
+        chunk([{ index: 0, delta: { role: "assistant", content: "ok" }, finish_reason: null }]) +
+            chunk([{ index: 0, delta: {}, finish_reason: "stop" }]) +
+            chunk([], completion.usage) +
+            "data: [DONE]\n\n",
+    )
 }
 
 function chatCompletion() {
