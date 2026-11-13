@@ -482,6 +482,9 @@ export async function runOpenCodeOneShot(
                 return
             }
             proc.stdin.on("error", (error) => {
+                // A CLI that exits without reading its input closes the pipe; its
+                // exit code and output are the outcome, and `close` reports them.
+                if ((error as NodeJS.ErrnoException).code === "EPIPE") return
                 if (aborted || timedOut) return
                 if (timer !== null) {
                     clearTimeout(timer)
