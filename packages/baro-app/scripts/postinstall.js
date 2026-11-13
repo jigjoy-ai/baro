@@ -133,8 +133,12 @@ function skipInstallReason({ packageRoot, version, installedVersion, env, baroHo
     }
     // A checkout's version is whatever commit is checked out, and it has no
     // built bundles: installing from it downgrades or half-replaces the user's baro.
-    if (!packageRoot.split(/[\\/]/).includes("node_modules")) {
-        return `baro: source checkout, left ${baroHome} untouched; build the binary with \`cargo build --release -p baro-tui\``
+    // BARO_INSTALL_FROM_CHECKOUT=1 is for a machine built to stage one (CI smoke).
+    if (
+        !packageRoot.split(/[\\/]/).includes("node_modules") &&
+        env.BARO_INSTALL_FROM_CHECKOUT !== "1"
+    ) {
+        return `baro: source checkout, left ${baroHome} untouched; build the binary with \`cargo build --release -p baro-tui\`, or set BARO_INSTALL_FROM_CHECKOUT=1 to stage this checkout`
     }
     const installed = installedVersion()
     if (installed && semverLt(version, installed) && env.BARO_ALLOW_DOWNGRADE !== "1") {
