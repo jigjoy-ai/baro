@@ -40,7 +40,7 @@ import {
 import type { CliHostFunctionBridge } from "../../harness/claude/lane-adapter.js"
 import type { OpenAIConnection } from "../../harness/openai/runtime.js"
 import { IdleWatchdog, llmIdleTimeoutMs } from "../../harness/liveness.js"
-import type { PlanningFeed } from "../../execution/planning-feed.js"
+import type { PlanningFeedContract } from "../application/planning-feed-contract.js"
 import type { GoalEnvelope } from "../../conversation/session/conversation-contract.js"
 import {
     PLANNER_SYSTEM_PROMPT,
@@ -74,7 +74,7 @@ export interface PlannerBusSessionOptions {
     runId: string
     cwd: string
     env: CoordinationBus
-    feed: PlanningFeed
+    feed: PlanningFeedContract
     goalEnvelope: GoalEnvelope
     /** Host-owned final-PRD metadata: the coordinator compares SEVEN fields
      * against the bootstrap contract (progressiveMetadataMatches), and the
