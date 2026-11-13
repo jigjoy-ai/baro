@@ -1,6 +1,6 @@
 import {
-    type ModelMessageItem,
-    type SemanticEvent, toWire } from "../runtime/mozaik.js"
+    ModelMessageItem,
+    type SemanticEvent } from "../runtime/mozaik.js"
 import { BusMember } from "../runtime/coordination.js"
 
 import {
@@ -146,10 +146,9 @@ export class AgentTurnProjector extends BusMember {
         // A new assistant message is positive evidence that a new turn/attempt
         // started after any previously projected terminal event.
         this.completed.delete(agentId)
-        const json = toWire(item) as { content?: Array<{ text?: string }> }
-        const parts = (json.content ?? [])
-            .map((part) => part.text ?? "")
-            .filter((part) => part.length > 0)
+        const parts = item instanceof ModelMessageItem
+            ? [item.content.text ?? ""].filter((part) => part.length > 0)
+            : []
         if (parts.length === 0) return
         const existing = this.text.get(agentId) ?? []
         existing.push(...parts)

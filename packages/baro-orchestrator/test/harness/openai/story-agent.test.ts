@@ -8,6 +8,7 @@ import { describe, it } from "@rstest/core"
 
 import {
     FunctionCallItem,
+    FunctionCallOutputItem,
     ModelMessageItem,
     type ModelContext,
     type Tool, toWire } from "../../../src/runtime/mozaik.js"
@@ -1825,12 +1826,8 @@ function stubInferenceRounds(
 
 function functionOutput(context: ModelContext, callId: string): string {
     for (const item of context.getItems()) {
-        const json = toWire(item) as {
-            type?: string
-            call_id?: string
-            output?: Array<{ text?: string }>
-        }
-        if (json.type === "function_call_output" && json.call_id === callId) {
+        if (item instanceof FunctionCallOutputItem && item.callId === callId) {
+            const json = toWire(item)
             assert.equal(typeof json.output?.[0]?.text, "string")
             return json.output![0]!.text!
         }
@@ -1841,13 +1838,9 @@ function functionOutput(context: ModelContext, callId: string): string {
 function functionOutputCallIds(context: ModelContext): string[] {
     return context
         .getItems()
-        .map((item) => toWire(item) as { type?: string; call_id?: string })
-        .filter(
-            (item): item is { type: "function_call_output"; call_id: string } =>
-                item.type === "function_call_output" &&
-                typeof item.call_id === "string",
+        .flatMap((item) =>
+            item instanceof FunctionCallOutputItem && typeof item.callId === "string" ? [item.callId] : [],
         )
-        .map((item) => item.call_id)
 }
 
 async function waitFor<T extends SemanticEvent<string, unknown>>(

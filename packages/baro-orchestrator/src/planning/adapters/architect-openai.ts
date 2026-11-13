@@ -9,9 +9,10 @@
 import {
     FunctionCallOutputItem,
     ModelContext,
+    ModelMessageItem,
     SystemMessageItem,
     UserMessageItem,
-    type Tool, toWire } from "../../runtime/mozaik.js"
+    type Tool } from "../../runtime/mozaik.js"
 import type { InferenceModel } from "../../harness/openai/runtime.js"
 
 import {
@@ -400,8 +401,7 @@ async function runArchitectOpenAIWithinBudget(
                 })
                 context = context.addContextItem(item)
             } else if (item.type === "message") {
-                const json = toWire(item) as { content: Array<{ text: string }> }
-                const text = json.content?.[0]?.text ?? ""
+                const text = item instanceof ModelMessageItem ? item.content.text ?? "" : ""
                 newItems.push({ type: "message", text })
                 context = context.addContextItem(item)
             } else if (item.type === "reasoning") {

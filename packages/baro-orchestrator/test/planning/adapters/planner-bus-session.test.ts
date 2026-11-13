@@ -8,7 +8,7 @@ import {
     type SemanticEvent,
 } from "../../../src/runtime/mozaik.js"
 import { BusMember, CoordinationBus } from "../../../src/runtime/coordination.js"
-import { PlanningFeed } from "../../../src/execution/planning-feed.js"
+import type { PlanningFeedContract } from "../../../src/planning/application/planning-feed-contract.js"
 import {
     ModelInvocationMeasured,
     PlanFragmentAdmitted,
@@ -86,7 +86,7 @@ const ENVELOPE: GoalEnvelope = {
 
 /** Simulates the Board: every proposed fragment is admitted at graph v7
  *  with one pruned edge, so the receipt the model sees is the host's. */
-class StubFeed extends PlanningFeed {
+class StubFeed extends BusMember implements PlanningFeedContract {
     readonly opened: PlanningOpenCommand[] = []
     readonly fragments: PlanFragmentCommand[] = []
     readonly completions: PlanCompleteCommand[] = []

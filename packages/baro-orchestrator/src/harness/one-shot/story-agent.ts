@@ -21,6 +21,7 @@ import {
     materializePublishGuardBin,
 } from "../../execution/publish-guard.js"
 import { PROCESS_TREE_CAPABILITIES } from "../process-tree.js"
+import type { TerminalTurnSource } from "../terminal-source.js"
 import { raceWithStoryActivity, wallBoundMs } from "../activity-monitor.js"
 import {
     AgentState,
@@ -139,7 +140,7 @@ export abstract class OneShotStoryAgent<
     private envRef: CoordinationBus | null = null
     /** Optional explicit bus identity for the terminal outcome. */
     private resultAuthority: BusMember | null = null
-    private terminalSourceRegistrar: ((source: BusMember) => void) | null = null
+    private terminalSourceRegistrar: ((source: TerminalTurnSource) => void) | null = null
     private currentRunner: OneShotStoryRunner<TSummary> | null = null
     private currentPhase: AgentPhase = "idle"
     private startedAt: number | null = null
@@ -214,7 +215,7 @@ export abstract class OneShotStoryAgent<
     }
 
     setTerminalSourceRegistrar(
-        register: (source: BusMember) => void,
+        register: (source: TerminalTurnSource) => void,
     ): void {
         if (this.terminalSourceRegistrar && this.terminalSourceRegistrar !== register) {
             throw new Error(`terminal source registrar already set for ${this.spec.id}`)

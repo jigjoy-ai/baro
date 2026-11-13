@@ -8,9 +8,10 @@
 import {
     FunctionCallOutputItem,
     ModelContext,
+    ModelMessageItem,
     SystemMessageItem,
     UserMessageItem,
-    type Tool, toWire } from "../../runtime/mozaik.js"
+    type Tool } from "../../runtime/mozaik.js"
 import { pickInferenceModel as pickModel } from "../../harness/mozaik/pick-model.js"
 import type { InferenceModel } from "../../harness/openai/runtime.js"
 
@@ -204,8 +205,7 @@ export async function runPlannerOpenAI(
                 })
                 context = context.addContextItem(item)
             } else if (item.type === "message") {
-                const json = toWire(item) as { content: Array<{ text: string }> }
-                const text = json.content?.[0]?.text ?? ""
+                const text = item instanceof ModelMessageItem ? item.content.text ?? "" : ""
                 newItems.push({ type: "message", text })
                 context = context.addContextItem(item)
             } else if (item.type === "reasoning") {
@@ -409,7 +409,7 @@ export async function decideExecutionMode(
     }
     const raw = result.items
         .filter((i) => i.type === "message")
-        .map((i) => ((toWire(i) as { content?: Array<{ text?: string }> }).content?.[0]?.text ?? ""))
+        .map((i) => (i instanceof ModelMessageItem ? i.content.text ?? "" : ""))
         .join("\n")
         .trim()
     return parseModeContract(raw)

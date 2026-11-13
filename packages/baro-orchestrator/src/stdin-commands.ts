@@ -6,6 +6,7 @@
 
 import type { Operator } from "./execution/operator.js"
 import { emit, type BaroCommand, type BaroEvent } from "./tui-protocol.js"
+import type { PlanningFeedContract } from "./planning/application/planning-feed-contract.js"
 
 let generatedConversationSequence = 0
 
@@ -14,23 +15,14 @@ export type PlanFragmentCommand = Extract<BaroCommand, { type: "plan_fragment" }
 export type PlanCompleteCommand = Extract<BaroCommand, { type: "plan_complete" }>
 export type PlanFailedCommand = Extract<BaroCommand, { type: "plan_failed" }>
 
-/**
- * Private progressive-planning ingress. The feed owns correlation, payload
- * validation, and lifecycle policy; stdin dispatch only preserves the wire
- * command and must never make the run depend on this optional lane.
- */
-export interface PlanningFeed {
-    open: (command: PlanningOpenCommand) => void
-    fragment: (command: PlanFragmentCommand) => void
-    complete: (command: PlanCompleteCommand) => void
-    failed: (command: PlanFailedCommand) => void
-}
+// Kept so existing importers of the old name compile unchanged.
+export type { PlanningFeedContract as PlanningFeed } from "./planning/application/planning-feed-contract.js"
 
 export interface StdinCommandContext {
     /** Null until orchestrate() has joined the Operator to the bus. */
     getOperator: () => Operator | null
     /** Optional and late-bound while the progressive collective is starting. */
-    getPlanningFeed?: () => PlanningFeed | null
+    getPlanningFeed?: () => PlanningFeedContract | null
     /** BaroEvent sink; defaults to the stdout protocol stream. */
     emitEvent?: (ev: BaroEvent) => void
 }

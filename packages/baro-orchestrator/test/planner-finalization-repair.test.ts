@@ -8,7 +8,7 @@ import {
     PlanFragmentAdmitted,
     PlanFragmentRejected,
 } from "../src/semantic-events.js"
-import { PlanningFeed } from "../src/execution/planning-feed.js"
+import type { PlanningFeedContract } from "../src/planning/application/planning-feed-contract.js"
 import { registerLane } from "../src/harness/lane-registry.js"
 import type {
     HostFunction,
@@ -151,9 +151,7 @@ function storyId(story: unknown): string {
     return story.id
 }
 
-// The session's `feed` is typed as the concrete class, so the stub subclasses
-// it and replaces every method the session calls.
-class StubFeed extends PlanningFeed {
+class StubFeed extends BusMember implements PlanningFeedContract {
     readonly opened: PlanningOpenCommand[] = []
     readonly fragments: PlanFragmentCommand[] = []
     readonly completions: PlanCompleteCommand[] = []

@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, it } from "@rstest/core"
 
-import type { BusMember } from "../../../src/runtime/coordination.js"
+import type { TerminalTurnSource } from "../../../src/harness/terminal-source.js"
 
 import { PiStoryAgent } from "../../../src/harness/pi/story-agent.js"
 import { PROCESS_TREE_CAPABILITIES } from "../../../src/harness/process-tree.js"
@@ -56,7 +56,7 @@ process.exit(0)
                 retries: 0,
                 timeoutSecs: FIXTURE_TIMEOUT_SECS,
             })
-            const terminalSources: Array<BusMember & { agentId?: string }> = []
+            const terminalSources: Array<TerminalTurnSource> = []
             agent.setTerminalSourceRegistrar((source) => terminalSources.push(source))
 
             const outcome = await agent.run(env)
@@ -122,9 +122,7 @@ process.exit(0)
                 const env = captureEnv()
                 const projector = source("projector")
                 const critic = source("critic")
-                const terminalSources: Array<
-                    BusMember & { getPhase?(): string }
-                > = []
+                const terminalSources: Array<TerminalTurnSource> = []
                 const originalPrompt =
                     "Implement request cancellation and its race test."
                 const agent = new PiStoryAgent({
@@ -142,9 +140,7 @@ process.exit(0)
                     handoffInconclusiveToAcceptanceGate: true,
                 })
                 agent.setTerminalSourceRegistrar((participant) => {
-                    terminalSources.push(
-                        participant as BusMember & { getPhase?(): string },
-                    )
+                    terminalSources.push(participant)
                 })
                 agent.join(env)
 

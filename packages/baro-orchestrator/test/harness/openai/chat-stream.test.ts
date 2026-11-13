@@ -13,7 +13,7 @@ import {
     type ChatStreamClient,
 } from "../../../src/harness/openai/chat-stream.js"
 import { OpenAIStoryAgent } from "../../../src/harness/openai/story-agent.js"
-import { FunctionCallItem, ModelMessageItem, toWire } from "../../../src/runtime/mozaik.js"
+import { FunctionCallItem, ModelMessageItem } from "../../../src/runtime/mozaik.js"
 import { captureEnv, withTempDir } from "../../execution/helpers.js"
 
 /** A provider that streams exactly these chunks, recording what it was sent. */
@@ -44,8 +44,7 @@ const text = (content: string): ChatCompletionChunk => ({
     choices: [{ delta: { content } }],
 })
 
-const wireText = (item: ModelMessageItem): string =>
-    (toWire(item) as { content: { text: string }[] }).content[0].text
+const wireText = (item: ModelMessageItem): string => item.content.text
 
 const ended = (reason: string): ChatCompletionChunk => ({
     choices: [{ finish_reason: reason, delta: {} }],

@@ -13,7 +13,6 @@ import {
     FunctionCallItem,
     FunctionCallOutputItem,
     SemanticEvent,
-    toWire,
 } from "../runtime/mozaik.js"
 import { BusMember } from "../runtime/coordination.js"
 
@@ -260,8 +259,7 @@ export class Supervisor extends BusMember {
         const st = this.stories.get(id)
         if (!st) return
         const callId =
-            (item as unknown as { callId?: string }).callId ??
-            (toWire(item) as { call_id?: string }).call_id
+            "callId" in item && typeof item.callId === "string" ? item.callId : undefined
         if (callId && st.pendingShell.delete(callId)) {
             // The command's whole runtime was work. Move the clock to its
             // completion, or the story's first call after a long suite reads

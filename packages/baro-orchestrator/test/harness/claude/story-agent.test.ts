@@ -13,6 +13,7 @@ import {
     type SemanticEvent,
 } from "../../../src/runtime/mozaik.js"
 import { BusMember } from "../../../src/runtime/coordination.js"
+import type { TerminalTurnSource } from "../../../src/harness/terminal-source.js"
 
 import {
     AgentResult,
@@ -73,7 +74,7 @@ process.stdin.resume()
                 timeoutSecs: FIXTURE_TIMEOUT_SECS,
                 quietTimeoutMs: 5,
             })
-            const terminalSources: Array<BusMember & { agentId?: string }> = []
+            const terminalSources: Array<TerminalTurnSource> = []
             agent.setTerminalSourceRegistrar((source) => terminalSources.push(source))
 
             const outcome = await agent.run(env)

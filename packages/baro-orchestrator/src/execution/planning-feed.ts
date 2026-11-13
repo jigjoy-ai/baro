@@ -20,9 +20,9 @@ import type {
     PlanCompleteCommand,
     PlanFailedCommand,
     PlanFragmentCommand,
-    PlanningFeed as PlanningFeedContract,
     PlanningOpenCommand,
 } from "../stdin-commands.js"
+import type { PlanningFeedContract } from "../planning/application/planning-feed-contract.js"
 
 export class PlanningFeed
     extends BusMember

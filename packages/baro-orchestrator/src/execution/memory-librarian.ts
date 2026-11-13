@@ -9,7 +9,6 @@ import {
     FunctionCallItem,
     FunctionCallOutputItem,
     SemanticEvent,
-    toWire,
 } from "../runtime/mozaik.js"
 import { BusMember } from "../runtime/coordination.js"
 
@@ -309,12 +308,9 @@ export class MemoryLibrarian extends BusMember {
         let outputTexts: string[]
 
         try {
-            const json = toWire(item) as Record<string, unknown>
-            callId = json.call_id as string
-            const output = json.output as Array<{ text?: string }> | undefined
-            outputTexts = (output ?? [])
-                .filter((b): b is { text: string } => typeof b?.text === "string")
-                .map(b => b.text)
+            if (!(item instanceof FunctionCallOutputItem)) return
+            callId = item.callId
+            outputTexts = typeof item.output.text === "string" ? [item.output.text] : []
         } catch {
             return // malformed output — skip silently
         }

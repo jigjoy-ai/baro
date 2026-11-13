@@ -17,7 +17,7 @@ import {
     SemanticEvent,
     SystemMessageItem,
     UserMessageItem,
-    type Tool, toWire } from "../../runtime/mozaik.js"
+    type Tool } from "../../runtime/mozaik.js"
 import type { InferenceModel } from "./runtime.js"
 
 import { CoordinationBus, BusMember } from "../../runtime/coordination.js"
@@ -978,10 +978,7 @@ export class OpenAIStoryAgent extends BusMember {
                     } else if (item.type === "message") {
                         await this.envRef?.publishModelMessage(this, item as ModelMessageItem)
                         context = context.addContextItem(item)
-                        const json = toWire((item as ModelMessageItem)) as {
-                            content: Array<{ text: string }>
-                        }
-                        const text = json.content?.[0]?.text ?? ""
+                        const text = item instanceof ModelMessageItem ? item.content.text ?? "" : ""
                         lastMessageText = text
                         sawMessage = true
                     } else if (item.type === "reasoning") {
