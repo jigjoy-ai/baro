@@ -12,7 +12,7 @@ import { runCodexOneShot } from "./one-shot.js"
 import {
     VERDICT_SYSTEM_PROMPT,
     extractVerdictJson,
-    parseContractConflicts,
+    parsedConflictFields,
 } from "../../acceptance/critic-verdict.js"
 import {
     OneShotCritic,
@@ -75,13 +75,12 @@ export class CriticCodex extends OneShotCritic {
         if (!isCodexVerdict(parsed)) {
             throw new Error("Codex critic returned an invalid verdict object")
         }
-        const conflicts = parseContractConflicts(parsed.contract_conflicts)
         return {
             status: "evaluated",
             verdict: parsed.verdict,
             reasoning: parsed.reasoning,
             violatedCriteria: [...parsed.violated_criteria],
-            ...(conflicts.length > 0 ? { contractConflicts: conflicts } : {}),
+            ...parsedConflictFields(parsed.contract_conflicts),
         }
     }
 }

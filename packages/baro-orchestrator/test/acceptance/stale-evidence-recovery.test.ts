@@ -109,6 +109,7 @@ describe("stale command evidence is repaired, not fatal", () => {
                 terminal: true,
                 freshness: "stale" as const,
                 sandboxBlocked: false,
+                toolUnavailable: false,
             }
             const commandEvidence = () => ({
                 text: "### Command 1\ncommand: npm test -- src/audit\n",
@@ -177,6 +178,7 @@ describe("stale command evidence is repaired, not fatal", () => {
                                 terminal: true,
                                 freshness: "fresh" as const,
                                 sandboxBlocked: true,
+                                toolUnavailable: false,
                             },
                             staleCommand,
                         ],

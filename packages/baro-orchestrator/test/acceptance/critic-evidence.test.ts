@@ -38,6 +38,7 @@ import {
     AgentResult,
     AgentState,
     CollaborationNote,
+    Critique,
 } from "../../src/semantic-events.js"
 import {
     altitudeActivityText,
@@ -191,6 +192,67 @@ describe("Critic repository evidence", () => {
                 false,
                 "Critic git evidence must disable repository-configured fsmonitor helpers",
             )
+        })
+    })
+
+    // #285: a finished story was failed and dropped because `tsc` was not
+    // installed in its worktree. The work was not judged, so it must not be.
+    it("is inconclusive on every backend when the only gap is a check that could not start", async () => {
+        await withTempDir("baro-critic-unavailable-", async (repo) => {
+            const baseSha = initializeRepository(repo)
+            const commands = new CriticCommandEvidenceCollector({
+                resolveRepositoryTarget: () => ({ cwd: repo, baseSha }),
+            })
+            const run = (callId: string, command: string, output: string): void => {
+                commands.onExternalFunctionCall(
+                    source("agent-a"),
+                    FunctionCallItem.rehydrate({ callId, name: "Bash", args: JSON.stringify({ command }) }),
+                )
+                commands.onExternalFunctionCallOutput(
+                    source("agent-a"),
+                    FunctionCallOutputItem.create(callId, output),
+                )
+            }
+            run("typecheck", "npm run typecheck", "sh: tsc: command not found\nExit code 127")
+            run("status", "git status --short", " M src/a.ts")
+            const evidence: CriticEvidenceSource = {
+                resolveRepositoryTarget: () => ({ cwd: repo, baseSha }),
+                commandEvidence: (agentId) => commands.snapshotForEvaluation(agentId),
+            }
+            const factories: Array<[string, () => TestCritic]> = [
+                ["claude", () => new Critic({ targets: targets(), evidence })],
+                ["openai", () => new CriticOpenAI({ targets: targets(), model: "evidence-test-model", evidence })],
+                ["opencode", () => new CriticOpenCode({ targets: targets(), evidence })],
+                ["pi", () => new CriticPi({ targets: targets(), evidence })],
+            ]
+
+            for (const [backend, factory] of factories) {
+                const critic = factory()
+                let prompt = ""
+                Object.defineProperty(critic, "evaluate", {
+                    value: async (text: string) => {
+                        prompt = text
+                        return {
+                            status: "evaluated",
+                            verdict: "pass",
+                            reasoning: "the diff implements it",
+                            violatedCriteria: [],
+                            unavailableChecks: [
+                                { criterion: "all tests pass", reason: "npm run typecheck could not start" },
+                            ],
+                        }
+                    },
+                })
+                const env = joinWithCapture(critic)
+                await critic.onExternalEvent(source("runner"), resultEvent())
+                await critic.idle()
+
+                assert.match(prompt, /runtime status: could not start; the command's tool is not available/, backend)
+                const critiques = env.events.filter(Critique.is)
+                assert.equal(critiques.length, 1, backend)
+                assert.equal(critiques[0]!.payload.status, "inconclusive", backend)
+                assert.match(critiques[0]!.payload.reasoning, /could not start in this worktree \(npm run typecheck\)/, backend)
+            }
         })
     })
 
@@ -518,6 +580,7 @@ describe("Critic repository evidence", () => {
                                     terminal: true,
                                     freshness: "fresh",
                                     sandboxBlocked: false,
+                                    toolUnavailable: false,
                                 },
                             ],
                         }
@@ -781,6 +844,103 @@ describe("Critic repository evidence", () => {
                     "verification command was blocked by the sandbox",
                 ),
             )
+        })
+    })
+
+    // #285: `tsc` was not installed in the worktree; every typecheck exited 127.
+    it("marks a verification that could not start inconclusive, whatever shell said so", async () => {
+        const couldNotStart = [
+            "sh: tsc: command not found",
+            "zsh: command not found: tsc",
+            "sh: 1: tsc: not found",
+            "npm error code 127\nnpm error command failed\nexited with code 127",
+            "Exit code 127",
+            "'tsc' is not recognized as an internal or external command,",
+            "Error: spawn cargo ENOENT",
+        ]
+        for (const output of couldNotStart) {
+            await withTempDir("baro-critic-tool-readiness-", async (repo) => {
+                const baseSha = initializeRepository(repo)
+                const preparation = await prepareCriticEvaluation(
+                    ["typecheck passes"],
+                    "typecheck passes",
+                    "agent-a",
+                    staticEvidence(repo, baseSha, [
+                        "### Command 1",
+                        "command: npm run typecheck",
+                        "runtime status: completed; output indicates failure",
+                        "freshness: fresh: changed-content fingerprint",
+                        "captured output:",
+                        output,
+                    ].join("\n")),
+                )
+
+                assert.equal(preparation.status, "inconclusive", output)
+                assert.ok(
+                    preparation.issues.includes(
+                        "a verification command could not start: its tool is not available in the worktree",
+                    ),
+                    output,
+                )
+                assert.deepEqual(preparation.unavailableCommands, ["npm run typecheck"], output)
+            })
+        }
+    })
+
+    it("does not call a command that ran and failed unavailable", async () => {
+        const ranAndFailed = [
+            "src/a.ts(3,1): error TS2322: Type 'string' is not assignable to type 'number'.\nexited with code 2",
+            "Error: ENOENT: no such file or directory, open 'fixtures/missing.json'\nexit code 1",
+            "FAIL test/a.test.ts > finds the file\nAssertionError: file not found",
+        ]
+        for (const output of ranAndFailed) {
+            await withTempDir("baro-critic-tool-readiness-", async (repo) => {
+                const baseSha = initializeRepository(repo)
+                const preparation = await prepareCriticEvaluation(
+                    ["tests pass"],
+                    "tests pass",
+                    "agent-a",
+                    staticEvidence(repo, baseSha, [
+                        "### Command 1",
+                        "command: npm test",
+                        "runtime status: completed; output indicates failure",
+                        "freshness: fresh: changed-content fingerprint",
+                        "captured output:",
+                        output,
+                    ].join("\n")),
+                )
+
+                assert.equal(preparation.status, "ready", output)
+                assert.deepEqual(preparation.unavailableCommands, [], output)
+            })
+        }
+    })
+
+    it("stays ready when another command ran, and names the one that could not start", async () => {
+        await withTempDir("baro-critic-tool-readiness-", async (repo) => {
+            const baseSha = initializeRepository(repo)
+            const preparation = await prepareCriticEvaluation(
+                ["typecheck passes", "no new casts"],
+                "done",
+                "agent-a",
+                staticEvidence(repo, baseSha, [
+                    "### Command 1",
+                    "command: npm run typecheck",
+                    "runtime status: completed; output indicates failure",
+                    "freshness: fresh: changed-content fingerprint",
+                    "captured output:",
+                    "sh: tsc: command not found",
+                    "### Command 2",
+                    "command: git diff --stat",
+                    "runtime status: completed; consult captured output for the result",
+                    "freshness: fresh: changed-content fingerprint",
+                    "captured output:",
+                    " 1 file changed",
+                ].join("\n")),
+            )
+
+            assert.equal(preparation.status, "ready")
+            assert.deepEqual(preparation.unavailableCommands, ["npm run typecheck"])
         })
     })
 

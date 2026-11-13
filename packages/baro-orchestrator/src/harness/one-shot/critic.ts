@@ -21,11 +21,13 @@ import {
     applyContractConflicts,
     buildCorrectiveMessage,
     extractVerdictJson,
-    parseContractConflicts,
+    parsedConflictFields,
     type ContractConflict,
+    type UnavailableCheck,
 } from "../../acceptance/critic-verdict.js"
 import {
     inconclusiveEvidenceVerdict,
+    applyUnavailableChecks,
     mergeSegmentVerdicts,
     prepareCriticEvaluation,
     type CriticEvidenceSource,
@@ -45,6 +47,7 @@ export interface OneShotCriticEvaluation {
     reasoning: string
     violatedCriteria: string[]
     contractConflicts?: ContractConflict[]
+    unavailableChecks?: UnavailableCheck[]
 }
 
 export interface OneShotCriticCoreOptions extends TerminalTurnAuthorityOptions {
@@ -119,7 +122,6 @@ export abstract class OneShotCritic extends BusMember {
             violated_criteria: string[]
             contract_conflicts?: unknown
         }
-        const conflicts = parseContractConflicts(parsed.contract_conflicts)
         return {
             status: "evaluated",
             verdict: parsed.verdict === "pass" ? "pass" : "fail",
@@ -127,7 +129,7 @@ export abstract class OneShotCritic extends BusMember {
             violatedCriteria: Array.isArray(parsed.violated_criteria)
                 ? parsed.violated_criteria
                 : [],
-            ...(conflicts.length > 0 ? { contractConflicts: conflicts } : {}),
+            ...parsedConflictFields(parsed.contract_conflicts),
         }
     }
 
@@ -188,15 +190,19 @@ export abstract class OneShotCritic extends BusMember {
                 preparationReady = preparation.status === "ready"
                 evaluation = preparationReady
                     ? honorEstablished(
-                          applyContractConflicts(
-                              mergeSegmentVerdicts(
-                                  await Promise.all(
-                                      preparation.prompts.map((prompt) =>
-                                          this.evaluate(prompt, agentId, turn),
+                          applyUnavailableChecks(
+                              applyContractConflicts(
+                                  mergeSegmentVerdicts(
+                                      await Promise.all(
+                                          preparation.prompts.map((prompt) =>
+                                              this.evaluate(prompt, agentId, turn),
+                                          ),
                                       ),
                                   ),
+                                  criteria,
                               ),
                               criteria,
+                              preparation.unavailableCommands,
                           ),
                           preparation.established,
                       )

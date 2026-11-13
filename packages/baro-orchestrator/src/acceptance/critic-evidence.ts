@@ -22,7 +22,7 @@ import type { StoryOutcomeAuthority } from "../runtime/story-outcome-authority.j
 import { emit } from "../tui-protocol.js"
 import { collectAltitudeFindings } from "./altitude-probe.js"
 import { contentPreservingCommand } from "./content-preserving-command.js"
-import type { ContractConflict } from "./critic-verdict.js"
+import type { ContractConflict, UnavailableCheck } from "./critic-verdict.js"
 import { PRE_EXISTING_FAILURE_RULE, TEST_WEAKENING_RULE } from "./critic-verdict.js"
 import {
     altitudeActivityText,
@@ -133,6 +133,8 @@ export interface CriticCommandEvidenceEntry {
     freshness: CriticCommandFreshness
     /** The terminal output shows that the sandbox prevented execution. */
     sandboxBlocked: boolean
+    /** The terminal output shows the command could not start: its tool is missing. */
+    toolUnavailable: boolean
 }
 
 /**
@@ -144,6 +146,11 @@ export interface CriticCommandEvidenceSnapshot {
     text: string
     commands: readonly CriticCommandEvidenceEntry[]
 }
+
+const COULD_NOT_START_STATUS =
+    "could not start; the command's tool is not available in this worktree"
+const TOOL_UNAVAILABLE_ISSUE =
+    "a verification command could not start: its tool is not available in the worktree"
 
 export interface CriticEvaluationPreparation {
     /** One prompt per contract segment; every segment is judged completely
@@ -159,6 +166,8 @@ export interface CriticEvaluationPreparation {
     repositoryFingerprint: string | null
     /** Criteria an earlier review found satisfied for this same fingerprint (criterion-ledger.ts). */
     established: readonly string[]
+    /** Fresh commands that could not start; only these let a verdict report a check as unavailable. */
+    unavailableCommands: readonly string[]
 }
 
 export interface InconclusiveCriticVerdict {
@@ -360,11 +369,14 @@ export class CriticCommandEvidenceCollector extends BusMember {
                 entry.fingerprint,
                 currentFingerprint,
             )
+            const toolUnavailable = output !== null && outputLooksToolUnavailable(output)
             const status = output === null
                 ? "pending/no output observed"
-                : commandOutputLooksFailed(output)
-                  ? "completed; output indicates failure"
-                  : "completed; consult captured output for the result"
+                : toolUnavailable
+                  ? COULD_NOT_START_STATUS
+                  : commandOutputLooksFailed(output)
+                    ? "completed; output indicates failure"
+                    : "completed; consult captured output for the result"
             return {
                 chronologicalIndex: index,
                 command: entry.command,
@@ -374,6 +386,7 @@ export class CriticCommandEvidenceCollector extends BusMember {
                     freshness: freshness.state,
                     sandboxBlocked:
                         output !== null && outputLooksSandboxBlocked(output),
+                    toolUnavailable,
                 } satisfies CriticCommandEvidenceEntry,
                 rendered: [
                     `### Command ${index + 1}`,
@@ -1029,6 +1042,9 @@ export async function prepareCriticEvaluation(
         repositoryFingerprint:
             issues.length === 0 ? afterFingerprint.value : null,
         established,
+        unavailableCommands: (commandEvidence.commands ?? [])
+            .filter((command) => command.toolUnavailable && command.freshness === "fresh")
+            .map((command) => command.command),
     }
 }
 
@@ -1038,6 +1054,7 @@ export interface SegmentVerdict {
     reasoning: string
     violatedCriteria: string[]
     contractConflicts?: ContractConflict[]
+    unavailableChecks?: UnavailableCheck[]
 }
 
 /**
@@ -1070,6 +1087,13 @@ export function mergeSegmentVerdicts<T extends SegmentVerdict>(
                 .map((conflict) => [conflict.criterion, conflict] as const),
         ).values(),
     ]
+    const unavailable = [
+        ...new Map(
+            verdicts
+                .flatMap((verdict) => verdict.unavailableChecks ?? [])
+                .map((check) => [check.criterion, check] as const),
+        ).values(),
+    ]
     const reasoning = decisive.length > 0
         ? decisive
               .map(({ verdict, pass }) => `[pass ${pass}] ${verdict.reasoning}`)
@@ -1082,6 +1106,48 @@ export function mergeSegmentVerdicts<T extends SegmentVerdict>(
         reasoning,
         violatedCriteria: violated,
         ...(conflicts.length > 0 ? { contractConflicts: conflicts } : {}),
+        ...(unavailable.length > 0 ? { unavailableChecks: unavailable } : {}),
+    }
+}
+
+const EVIDENCE_UNAVAILABLE_MARKER = "[acceptance evidence unavailable]"
+
+/**
+ * Settle the criteria a verdict reported as unverifiable because their command
+ * could not start. They are honoured only when Baro itself marked a fresh
+ * command that way; then they never count as violations, and a verdict with
+ * nothing else against it is inconclusive: the work was not judged, so it is
+ * neither passed nor charged with a failure.
+ */
+export function applyUnavailableChecks<T extends SegmentVerdict>(
+    evaluation: T,
+    criteria: readonly string[],
+    unavailableCommands: readonly string[],
+): T {
+    const { unavailableChecks, ...rest } = evaluation
+    const settled = rest as T
+    const claims = (unavailableChecks ?? []).filter(({ criterion }) => criteria.includes(criterion))
+    if (claims.length === 0 || (settled.status ?? "evaluated") !== "evaluated") return settled
+    const claimed = new Set(claims.map(({ criterion }) => criterion))
+    if (unavailableCommands.length === 0) {
+        return {
+            ...settled,
+            verdict: "fail",
+            violatedCriteria: [...new Set([...settled.violatedCriteria, ...claimed])],
+        }
+    }
+    const violated = settled.violatedCriteria.filter((criterion) => !claimed.has(criterion))
+    if (violated.length > 0) return { ...settled, verdict: "fail", violatedCriteria: violated }
+    return {
+        ...settled,
+        status: "inconclusive",
+        verdict: "fail",
+        reasoning:
+            `Critic could not evaluate the candidate: ${claims.length} ` +
+            `${claims.length === 1 ? "criterion needs" : "criteria need"} a command that could not start ` +
+            `in this worktree (${unavailableCommands.map((command) => boundText(command, 120)).join("; ")}). ` +
+            settled.reasoning,
+        violatedCriteria: [EVIDENCE_UNAVAILABLE_MARKER],
     }
 }
 
@@ -1095,7 +1161,7 @@ export function inconclusiveEvidenceVerdict(
         status: "inconclusive",
         verdict: "fail",
         reasoning: `Critic could not evaluate the candidate: ${detail}`,
-        violatedCriteria: ["[acceptance evidence unavailable]"],
+        violatedCriteria: [EVIDENCE_UNAVAILABLE_MARKER],
     }
 }
 
@@ -1404,7 +1470,8 @@ function evidenceReadinessIssues(
             (command) =>
                 command.freshness === "fresh" &&
                 command.terminal &&
-                !command.sandboxBlocked,
+                !command.sandboxBlocked &&
+                !command.toolUnavailable,
         )
         if (!hasUsableFreshTerminalCommand) {
             if (
@@ -1425,10 +1492,18 @@ function evidenceReadinessIssues(
                 issues.push("verification command was blocked by the sandbox")
             }
             if (
+                commandEvidence.commands.some(
+                    (command) => command.toolUnavailable,
+                )
+            ) {
+                issues.push(TOOL_UNAVAILABLE_ISSUE)
+            }
+            if (
                 !issues.some((issue) =>
                     issue === STALE_COMMAND_EVIDENCE ||
                     issue === "a verification command has no terminal output" ||
-                    issue === "verification command was blocked by the sandbox"
+                    issue === "verification command was blocked by the sandbox" ||
+                    issue === TOOL_UNAVAILABLE_ISSUE
                 )
             ) {
                 issues.push("command evidence has no usable fresh terminal command")
@@ -1486,11 +1561,14 @@ function parseRenderedCommandEvidence(
                 : freshnessText?.startsWith("STALE/UNVERIFIABLE") === true
                   ? "unverifiable"
                   : "stale"
+        const toolUnavailable =
+            runtime === COULD_NOT_START_STATUS || outputLooksToolUnavailable(output)
         return {
             command,
-            terminal: runtime?.startsWith("completed;") === true,
+            terminal: runtime?.startsWith("completed;") === true || toolUnavailable,
             freshness,
             sandboxBlocked: outputLooksSandboxBlocked(output),
+            toolUnavailable,
         }
     })
 }
@@ -2143,6 +2221,17 @@ function shellCommandSegments(command: string): string[] {
                 .replace(/^\(+\s*/u, "")
                 .replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+\s+)+/u, ""),
         )
+}
+
+/**
+ * The shell's own words for "this command never ran": exit 127 and the
+ * not-found lines of sh, bash, zsh, dash, cmd and Node's spawn. A missing
+ * file the command itself reports is not one of them.
+ */
+function outputLooksToolUnavailable(output: string): boolean {
+    return /\b(?:exit(?:ed)?(?: with)? (?:code|status)|status=)\s*127\b|(?:^|\n)\s*(?:(?:ba|z|da)?sh|npm error|npx)(?::\s*(?:line\s*)?\d+)?:\s.*(?:command not found|: not found)\b|\bcommand not found: \S+|\bis not recognized as an internal or external command\b|\bspawn \S+ ENOENT\b/i.test(
+        output,
+    )
 }
 
 function outputLooksSandboxBlocked(output: string): boolean {

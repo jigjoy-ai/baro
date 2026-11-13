@@ -42,7 +42,7 @@ import {
 import {
     VERDICT_SYSTEM_PROMPT,
     extractVerdictJson,
-    parseContractConflicts,
+    parsedConflictFields,
 } from "../../acceptance/critic-verdict.js"
 
 export { buildEvalPrompt } from "../../acceptance/critic-evidence.js"
@@ -198,8 +198,6 @@ export class Critic extends OneShotCritic {
                 violated_criteria: string[]
                 contract_conflicts?: unknown
             }
-            const conflicts = parseContractConflicts(parsed.contract_conflicts)
-
             return {
                 status: "evaluated",
                 verdict: parsed.verdict === "pass" ? "pass" : "fail",
@@ -207,7 +205,7 @@ export class Critic extends OneShotCritic {
                 violatedCriteria: Array.isArray(parsed.violated_criteria)
                     ? parsed.violated_criteria
                     : [],
-                ...(conflicts.length > 0 ? { contractConflicts: conflicts } : {}),
+                ...parsedConflictFields(parsed.contract_conflicts),
                 telemetry,
             }
         } catch (err) {

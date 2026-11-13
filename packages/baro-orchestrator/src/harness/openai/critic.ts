@@ -58,11 +58,12 @@ import {
 } from "../claude/critic.js"
 import {
     applyContractConflicts,
-    parseContractConflicts,
+    parsedConflictFields,
     type ContractConflict,
 } from "../../acceptance/critic-verdict.js"
 import {
     inconclusiveEvidenceVerdict,
+    applyUnavailableChecks,
     mergeSegmentVerdicts,
     prepareCriticEvaluation,
     type CriticEvidenceSource,
@@ -208,15 +209,19 @@ export class CriticOpenAI extends BusMember {
             )
             const evaluation = preparation.status === "ready"
                 ? honorEstablished(
-                      applyContractConflicts(
-                          mergeSegmentVerdicts(
-                              await Promise.all(
-                                  preparation.prompts.map((prompt) =>
-                                      this.evaluate(prompt, agentId, turn, correlation),
+                      applyUnavailableChecks(
+                          applyContractConflicts(
+                              mergeSegmentVerdicts(
+                                  await Promise.all(
+                                      preparation.prompts.map((prompt) =>
+                                          this.evaluate(prompt, agentId, turn, correlation),
+                                      ),
                                   ),
                               ),
+                              criteria,
                           ),
                           criteria,
+                          preparation.unavailableCommands,
                       ),
                       preparation.established,
                   )
@@ -423,7 +428,6 @@ export class CriticOpenAI extends BusMember {
                 violated_criteria: string[]
                 contract_conflicts?: unknown
             }
-            const conflicts = parseContractConflicts(parsed.contract_conflicts)
             return {
                 status: "evaluated",
                 verdict: parsed.verdict === "pass" ? "pass" : "fail",
@@ -431,7 +435,7 @@ export class CriticOpenAI extends BusMember {
                 violatedCriteria: Array.isArray(parsed.violated_criteria)
                     ? parsed.violated_criteria
                     : [],
-                ...(conflicts.length > 0 ? { contractConflicts: conflicts } : {}),
+                ...parsedConflictFields(parsed.contract_conflicts),
                 telemetry,
             }
         } catch (err) {
