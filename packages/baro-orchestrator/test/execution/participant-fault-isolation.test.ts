@@ -3,7 +3,7 @@
 // exactly that on a Coordination event that carried no payload, 88 seconds
 // into a live replay. Every participant we add has to survive malformed input.
 import assert from "node:assert/strict"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 import { CoordinationBus, BusMember } from "../../src/runtime/coordination.js"
 import { Coordination } from "../../src/events/collaboration.js"
 import { StoryMerged } from "../../src/events/integration.js"

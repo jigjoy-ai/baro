@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { existsSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import { Sentry } from "../../src/execution/sentry.js"
 import {

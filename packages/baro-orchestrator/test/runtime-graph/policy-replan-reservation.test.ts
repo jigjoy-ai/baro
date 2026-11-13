@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import { reservePolicyReplanBatchIds } from "../../src/runtime-graph/policy-replan-reservation.js"
 import { buildCriticTargets } from "../../src/acceptance/critic-target-registry.js"

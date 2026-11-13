@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import { createFakeAwakeClock } from "../../src/runtime/awake-clock.js"
 import type { SemanticEvent } from "../../src/runtime/mozaik.js"

@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, beforeEach, describe, it } from "node:test"
+import { afterEach, beforeEach, describe, it } from "@rstest/core"
 
 import { resolvePytestRunner } from "../../src/verification/python-env.js"
 
@@ -13,7 +13,7 @@ function script(path: string, body: string): void {
     chmodSync(path, 0o755)
 }
 
-describe("resolvePytestRunner", { skip: !posix }, () => {
+describe.skipIf(!posix)("resolvePytestRunner", () => {
     let dir: string
     let bin: string
     let savedPath: string | undefined
@@ -75,6 +75,8 @@ describe("resolvePytestRunner", { skip: !posix }, () => {
     it("reports a missing environment instead of pretending the tests ran", async () => {
         const repo = join(dir, "repo")
         mkdirSync(repo)
+        // On Linux /bin is /usr/bin and holds the host's python3.
+        process.env.PATH = bin
 
         const runner = await resolvePytestRunner(repo)
 

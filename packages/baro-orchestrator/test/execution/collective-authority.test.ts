@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import type { PrdFile } from "../../src/prd.js"
 import { AcceptanceGate } from "../../src/acceptance/acceptance-gate.js"

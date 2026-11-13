@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { after, before, describe, it } from "node:test"
+import { afterAll, beforeAll, describe, it } from "@rstest/core"
 
 import { ClaudeCliParticipant } from "../../src/harness/claude/cli-participant.js"
 import { CodexCliParticipant } from "../../src/harness/codex/cli-participant.js"
@@ -21,17 +21,15 @@ import { GENEROUS_WAIT_MS, waitFor, withDeadline } from "../wait-for.js"
 describe("CLI participant process-tree lifecycle", () => {
     // Under load a `ps` scan can outlast the 5s TERM grace and the 2.25s
     // post-KILL bound; a positive certificate still needs an observed absence.
-    before(() =>
+    beforeAll(() =>
         setProcessTreeDefaultTimingsForTests({
             terminationGraceMs: GENEROUS_WAIT_MS,
             quiescenceTimeoutMs: GENEROUS_WAIT_MS,
         }),
     )
-    after(() => setProcessTreeDefaultTimingsForTests(null))
+    afterAll(() => setProcessTreeDefaultTimingsForTests(null))
 
-    it(
-        "keeps all four harness trees registered after their shims close",
-        { skip: process.platform === "win32" },
+    it.skipIf(process.platform === "win32")("keeps all four harness trees registered after their shims close",
         async () => {
             await withTempDir("baro-cli-tree-matrix-", async (dir) => {
                 const harnesses = ["claude", "codex", "opencode", "pi"] as const
@@ -116,9 +114,7 @@ describe("CLI participant process-tree lifecycle", () => {
         },
     )
 
-    it(
-        "finishes all four harnesses when a natural root exit leaves inherited stdio open",
-        { skip: process.platform === "win32" },
+    it.skipIf(process.platform === "win32")("finishes all four harnesses when a natural root exit leaves inherited stdio open",
         async () => {
             await withTempDir("baro-cli-inherited-stdio-", async (dir) => {
                 const harnesses = ["claude", "codex", "opencode", "pi"] as const
@@ -217,9 +213,7 @@ describe("CLI participant process-tree lifecycle", () => {
         },
     )
 
-    it(
-        "contains all four unobserved children which inherit provider stdio",
-        { skip: process.platform === "win32" },
+    it.skipIf(process.platform === "win32")("contains all four unobserved children which inherit provider stdio",
         async () => {
             await withTempDir("baro-cli-close-watchdog-", async (dir) => {
                 const harnesses = ["claude", "codex", "opencode", "pi"] as const
@@ -319,9 +313,7 @@ describe("CLI participant process-tree lifecycle", () => {
         },
     )
 
-    it(
-        "bounds all four summaries while tracked trees clean up in background",
-        { skip: process.platform === "win32" },
+    it.skipIf(process.platform === "win32")("bounds all four summaries while tracked trees clean up in background",
         async () => {
             await withTempDir("baro-cli-background-tree-", async (dir) => {
                 const harnesses = ["claude", "codex", "opencode", "pi"] as const
@@ -664,9 +656,7 @@ describe("a worker the OS ended", () => {
     // exit null`, and finally read by the Guardian as proof the story was too
     // broad for one session — which it proposed to split. The DAG was being
     // rewritten around a signal.
-    it(
-        "is recorded as failed and names the signal",
-        { skip: process.platform === "win32" },
+    it.skipIf(process.platform === "win32")("is recorded as failed and names the signal",
         async () => {
             await withTempDir("baro-killed-worker-", async (dir) => {
                 const bin = join(dir, "self-killing-claude.mjs")

@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { after, describe, it } from "node:test"
+import { afterAll, describe, it } from "@rstest/core"
 
 import {
     RESUME_WITHOUT_STATUS_WARNING,
@@ -117,7 +117,7 @@ describe("what a resumed run still has to do", () => {
 
 const temporaryRoots: string[] = []
 
-after(() => {
+afterAll(() => {
     for (const root of temporaryRoots) rmSync(root, { recursive: true, force: true })
 })
 

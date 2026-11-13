@@ -3,7 +3,7 @@ import { execFile } from "node:child_process"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 import { promisify } from "node:util"
 
 const exec = promisify(execFile)

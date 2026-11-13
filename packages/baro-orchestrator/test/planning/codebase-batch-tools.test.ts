@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import { createCodebaseTools } from "../../src/planning/adapters/codebase-tools.js"
 import { withTempDir } from "../execution/helpers.js"

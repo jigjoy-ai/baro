@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 // @ts-expect-error — plain JS install script, deliberately dependency-free
 import { shouldClaimLink } from "../../../baro-app/scripts/postinstall.js"

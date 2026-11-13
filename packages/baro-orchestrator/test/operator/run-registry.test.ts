@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { after, before, describe, it } from "node:test"
+import { afterAll, beforeAll, describe, it } from "@rstest/core"
 
 import { RunRegistry, type RunRecord } from "../../src/operator/run-registry.js"
 
@@ -13,7 +13,7 @@ import { RunRegistry, type RunRecord } from "../../src/operator/run-registry.js"
 let dir: string
 let fakeBaro: string
 
-before(() => {
+beforeAll(() => {
     dir = mkdtempSync(join(tmpdir(), "baro-operator-registry-"))
     fakeBaro = join(dir, "fake-baro.js")
     writeFileSync(
@@ -39,7 +39,7 @@ setTimeout(() => {
     chmodSync(fakeBaro, 0o755)
 })
 
-after(() => {
+afterAll(() => {
     rmSync(dir, { recursive: true, force: true })
 })
 

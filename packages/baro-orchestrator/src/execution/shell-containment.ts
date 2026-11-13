@@ -1089,19 +1089,26 @@ export function shellContainmentHookSource(): string {
 
 /**
  * The serialized functions name this module's imports the way the running
- * code spells them, and a bundler renames them (`fs` became `fs4`). A hook
- * that did not bind those spellings threw on every command and, failing open,
- * contained nothing. Each probe reads the spelling back from the running code.
+ * code spells them, and a bundler renames them (`fs` became `fs4`) or reaches
+ * a named import as a member of the module namespace (`cp_0.execFileSync`). A
+ * hook that did not bind those spellings threw on every command and, failing
+ * open, contained nothing. Each probe reads the spelling back from the running
+ * code.
  */
 function importAliases(): string[] {
-    const spelled = (probe: () => unknown): string | undefined =>
-        /=>\s*([\w$]+)/u.exec(probe.toString())?.[1]
-    const imports: Array<[string | undefined, string]> = [
+    const spelled = (probe: () => unknown): [root: string, member?: string] | undefined => {
+        const match = /=>\s*([\w$]+)(?:\.([\w$]+))?/u.exec(probe.toString())
+        return match?.[1] === undefined ? undefined : [match[1], match[2]]
+    }
+    const imports: Array<[ReturnType<typeof spelled>, string]> = [
         [spelled(() => fs), "fs"],
         [spelled(() => path), "path"],
         [spelled(() => execFileSync), "execFileSync"],
     ]
-    return imports
-        .filter(([alias, name]) => alias !== undefined && alias !== name)
-        .map(([alias, name]) => `const ${alias} = ${name}`)
+    return imports.flatMap(([alias, name]) => {
+        if (alias === undefined) return []
+        const [root, member] = alias
+        if (member !== undefined) return [`const ${root} = { ${member}: ${name} }`]
+        return root === name ? [] : [`const ${root} = ${name}`]
+    })
 }

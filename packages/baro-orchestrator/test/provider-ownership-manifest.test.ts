@@ -3,7 +3,7 @@ import { spawn, type ChildProcess } from "node:child_process"
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, describe, it } from "node:test"
+import { afterEach, describe, it } from "@rstest/core"
 
 import {
     configureProviderOwnershipManifest,
@@ -89,9 +89,7 @@ describe("provider ownership manifest", () => {
         assert.equal(readFileSync(fixture.path, "utf8"), before)
     })
 
-    it("kills a newly spawned owned group when its first durable registration fails", {
-        skip: !POSIX_PROCESS_GROUPS_SUPPORTED,
-    }, async () => {
+    it.skipIf(!POSIX_PROCESS_GROUPS_SUPPORTED,)("kills a newly spawned owned group when its first durable registration fails", async () => {
         const fixture = manifestFixture(TOKEN)
         configureProviderOwnershipManifest(fixture.path, TOKEN)
         fixture.remove()
@@ -121,9 +119,7 @@ describe("provider ownership manifest", () => {
         assert.equal(processAlive(child.pid), false)
     })
 
-    it("publishes a live same-group provider when its shim exits immediately", {
-        skip: !POSIX_PROCESS_GROUPS_SUPPORTED,
-    }, async () => {
+    it.skipIf(!POSIX_PROCESS_GROUPS_SUPPORTED,)("publishes a live same-group provider when its shim exits immediately", async () => {
         const fixture = manifestFixture(TOKEN)
         const providerPidPath = join(fixture.directory, "immediate-provider-pid")
         configureProviderOwnershipManifest(fixture.path, TOKEN)
@@ -175,9 +171,7 @@ process.exit(0)
         assert.equal(processAlive(providerPid), true)
     })
 
-    it("certifies a clean root exit without reporting an ownership failure", {
-        skip: !POSIX_PROCESS_GROUPS_SUPPORTED,
-    }, async () => {
+    it.skipIf(!POSIX_PROCESS_GROUPS_SUPPORTED,)("certifies a clean root exit without reporting an ownership failure", async () => {
         const fixture = manifestFixture(TOKEN)
         configureProviderOwnershipManifest(fixture.path, TOKEN)
         const child = spawn(
@@ -218,9 +212,7 @@ process.exit(0)
         assert.deepEqual(manifest.providers, [])
     })
 
-    it(
-        "retains an observed same-group provider after its short-lived shim exits",
-        { skip: !POSIX_PROCESS_GROUPS_SUPPORTED },
+    it.skipIf(!POSIX_PROCESS_GROUPS_SUPPORTED)("retains an observed same-group provider after its short-lived shim exits",
         async () => {
             const fixture = manifestFixture(TOKEN)
             const providerPidPath = join(fixture.directory, "provider-pid")

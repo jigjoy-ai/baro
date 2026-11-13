@@ -4,7 +4,7 @@ import { createServer, type Server } from "node:http"
 import { streamRequested, streamedCompletion } from "./fake-completion.js"
 import { existsSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import {
     FunctionCallItem,

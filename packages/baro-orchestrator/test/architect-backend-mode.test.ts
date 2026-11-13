@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { chmodSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import { runArchitectClaude } from "../src/planning/adapters/architect-claude.js"
 import { runArchitectCodex } from "../src/planning/adapters/architect-codex.js"

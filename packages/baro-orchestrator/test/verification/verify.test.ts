@@ -10,7 +10,7 @@ import {
 import { join } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import assert from "node:assert/strict"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import {
     createVerifyPlan,
@@ -221,9 +221,7 @@ describe("verifyBuild", () => {
         })
     })
 
-    it(
-        "drains a TERM-resistant inherited-stdio descendant before cancellation settles",
-        { skip: process.platform === "win32" },
+    it.skipIf(process.platform === "win32")("drains a TERM-resistant inherited-stdio descendant before cancellation settles",
         async () => {
             await withTempDir("baro-verify-process-tree-", async (dir) => {
                 const descendantStarted = join(dir, "descendant-started")

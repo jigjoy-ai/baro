@@ -1,4 +1,4 @@
-import { test } from "node:test"
+import { test } from "@rstest/core"
 import assert from "node:assert/strict"
 
 import { Supervisor, type SupervisorOptions } from "../../src/execution/supervisor.js"

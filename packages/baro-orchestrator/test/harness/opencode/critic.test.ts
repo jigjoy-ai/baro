@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { join } from "node:path"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import { CriticOpenCode } from "../../../src/harness/opencode/critic.js"
 import {

@@ -4,7 +4,7 @@ import { createHash } from "node:crypto"
 import { chmodSync, readFileSync, writeFileSync } from "node:fs"
 import { delimiter, join } from "node:path"
 import { fileURLToPath } from "node:url"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 import { promisify } from "node:util"
 
 import {

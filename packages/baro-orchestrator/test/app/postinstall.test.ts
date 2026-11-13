@@ -11,7 +11,7 @@ import {
     writeFileSync,
 } from "node:fs"
 import { dirname, join, resolve } from "node:path"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 import { fileURLToPath, pathToFileURL } from "node:url"
 
 import { withTempDir } from "../execution/helpers.js"
@@ -131,10 +131,10 @@ function installedVersion(fixture: Fixture): string {
     return out.trim()
 }
 
-const unix = { skip: process.platform === "win32" }
+const unixIt = it.skipIf(process.platform === "win32")
 
 describe("baro-ai postinstall and the installed baro", () => {
-    it("leaves ~/.baro/bin alone when it runs from a source checkout", unix, async () => {
+    unixIt("leaves ~/.baro/bin alone when it runs from a source checkout", async () => {
         await withTempDir("baro-postinstall-", (root) => {
             const fixture = stage(root, "checkout", "0.130.0", "0.132.0")
             const before = snapshot(fixture.baroBin)
@@ -150,7 +150,7 @@ describe("baro-ai postinstall and the installed baro", () => {
         })
     })
 
-    it("stages a source checkout when BARO_INSTALL_FROM_CHECKOUT=1 asks for it", unix, async () => {
+    unixIt("stages a source checkout when BARO_INSTALL_FROM_CHECKOUT=1 asks for it", async () => {
         await withTempDir("baro-postinstall-", (root) => {
             const fixture = stage(root, "checkout", "0.133.0", "0.132.0")
 
@@ -164,7 +164,7 @@ describe("baro-ai postinstall and the installed baro", () => {
         })
     })
 
-    it("creates nothing under ~/.baro from a checkout on a machine without baro", unix, async () => {
+    unixIt("creates nothing under ~/.baro from a checkout on a machine without baro", async () => {
         await withTempDir("baro-postinstall-", (root) => {
             const fixture = stage(root, "checkout", "0.130.0")
 
@@ -174,7 +174,7 @@ describe("baro-ai postinstall and the installed baro", () => {
         })
     })
 
-    it("installs the binary and bundles from node_modules when none is installed", unix, async () => {
+    unixIt("installs the binary and bundles from node_modules when none is installed", async () => {
         await withTempDir("baro-postinstall-", (root) => {
             const fixture = stage(root, "installed", "0.132.0")
 
@@ -192,7 +192,7 @@ describe("baro-ai postinstall and the installed baro", () => {
         })
     })
 
-    it("replaces an installed binary of the same or an older version", unix, async () => {
+    unixIt("replaces an installed binary of the same or an older version", async () => {
         for (const installed of ["0.131.9", "0.132.0"]) {
             await withTempDir("baro-postinstall-", (root) => {
                 const fixture = stage(root, "installed", "0.132.0", installed)
@@ -205,7 +205,7 @@ describe("baro-ai postinstall and the installed baro", () => {
         }
     })
 
-    it("refuses to downgrade the installed baro unless BARO_ALLOW_DOWNGRADE=1", unix, async () => {
+    unixIt("refuses to downgrade the installed baro unless BARO_ALLOW_DOWNGRADE=1", async () => {
         await withTempDir("baro-postinstall-", (root) => {
             const fixture = stage(root, "installed", "0.130.0", "0.132.0")
             const before = snapshot(fixture.baroBin)
@@ -224,7 +224,7 @@ describe("baro-ai postinstall and the installed baro", () => {
         })
     })
 
-    it("leaves ~/.baro/bin alone under BARO_SKIP_POSTINSTALL=1", unix, async () => {
+    unixIt("leaves ~/.baro/bin alone under BARO_SKIP_POSTINSTALL=1", async () => {
         await withTempDir("baro-postinstall-", (root) => {
             const fixture = stage(root, "installed", "0.133.0", "0.132.0")
             const before = snapshot(fixture.baroBin)

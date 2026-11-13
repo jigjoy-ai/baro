@@ -3,7 +3,7 @@ import { execFileSync, spawnSync } from "node:child_process"
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import { confinedSpawn, storyCredentialEnv } from "../../src/harness/os-sandbox.js"
 import { storyPackageCache } from "../../src/harness/package-cache.js"
@@ -38,7 +38,7 @@ describe("OS confinement of a story's CLI lane", () => {
         }
     })
 
-    it("holds the whole CLI process tree to the worktree on macOS", { skip: process.platform !== "darwin" }, () => {
+    it.skipIf(process.platform !== "darwin")("holds the whole CLI process tree to the worktree on macOS", () => {
         const root = realpathSync(mkdtempSync(join(tmpdir(), "baro-confine-")))
         try {
             execFileSync("git", ["init", "-q", "-b", "main", join(root, "repo")])

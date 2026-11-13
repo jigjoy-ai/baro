@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { Buffer } from "node:buffer"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import { capRunDiff, MAX_RUN_DIFF_BYTES } from "../src/integration/run-diff-cap.js"
 

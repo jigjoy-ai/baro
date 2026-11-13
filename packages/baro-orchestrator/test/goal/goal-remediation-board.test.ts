@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import { CollectiveBoard } from "../../src/execution/collective-board.js"
 import { GoalGuardian } from "../../src/goal/goal-guardian.js"
@@ -1031,7 +1031,10 @@ async function waitFor<T>(
     events: readonly unknown[],
     guard: (event: unknown) => event is T,
 ): Promise<T> {
-    for (let attempt = 0; attempt < 100; attempt += 1) {
+    // Bounded by time, not event-loop turns: how many turns the board's file
+    // writes take differs by platform.
+    const deadline = Date.now() + 10_000
+    while (Date.now() < deadline) {
         const found = events.find(guard)
         if (found) return found
         await new Promise<void>((resolve) => setImmediate(resolve))

@@ -7,7 +7,7 @@ import {
 } from "node:fs"
 import { join } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 import assert from "node:assert/strict"
 
 import { execFileCli, execFileCliBuffer } from "../../src/harness/exec-file-cli.js"
@@ -105,6 +105,25 @@ console.log("ready");
 
             assert.equal(result.stdout, "ready\n")
             assert.equal(readFileSync(captured, "utf8"), input)
+        })
+    })
+
+    it("reports the CLI's own outcome when it exits without reading its stdin", async () => {
+        await withTempDir("exec-file-cli-unread-stdin-", async (dir) => {
+            // Larger than a pipe buffer, so the write is still pending when
+            // the CLI exits and stdin fails with EPIPE.
+            const input = "x".repeat(1024 * 1024)
+            const answered = writeCli(dir, `process.stdout.write("answered\\n")`)
+            assert.equal((await execFileCli(answered, [], { input })).stdout, "answered\n")
+
+            const refused = writeCli(
+                dir,
+                `process.stderr.write("bad flag\\n"); process.exitCode = 2`,
+            )
+            await assert.rejects(
+                execFileCli(refused, [], { input }),
+                /exited with code 2\nbad flag/,
+            )
         })
     })
 
@@ -215,9 +234,7 @@ const timer = setInterval(() => {
         })
     })
 
-    it(
-        "cleans an inherited-stdio descendant after a natural root exit",
-        { skip: process.platform === "win32" },
+    it.skipIf(process.platform === "win32")("cleans an inherited-stdio descendant after a natural root exit",
         async () => {
             await withTempDir("baro-exec-natural-tree-", async (dir) => {
                 const escaped = join(dir, "descendant-escaped")

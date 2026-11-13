@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { createServer, type Server } from "node:http"
 import type { AddressInfo } from "node:net"
-import { after, before, describe, it } from "node:test"
+import { afterAll, beforeAll, describe, it } from "@rstest/core"
 
 import {
     GenericOpenAIModel,
@@ -21,7 +21,7 @@ describe("OpenAI-native models use the Responses API on a custom endpoint", () =
     let baseURL: string
     const hits: { path: string; auth: string | undefined; model: unknown; body: Record<string, unknown> }[] = []
 
-    before(async () => {
+    beforeAll(async () => {
         server = createServer((req, res) => {
             let raw = ""
             req.on("data", (chunk) => (raw += chunk))
@@ -93,7 +93,7 @@ describe("OpenAI-native models use the Responses API on a custom endpoint", () =
         await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
         baseURL = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`
     })
-    after(() => new Promise<void>((resolve) => server.close(() => resolve())))
+    afterAll(() => new Promise<void>((resolve) => server.close(() => resolve())))
 
     const ask = async (name: string): Promise<string> => {
         const model = new GenericOpenAIModel(name, { baseURL, apiKey: "gateway-key" })

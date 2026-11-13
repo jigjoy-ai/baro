@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, it } from "node:test"
+import { afterEach, beforeEach, describe, it } from "@rstest/core"
 import assert from "node:assert/strict"
 import { execFileSync } from "node:child_process"
 import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync, mkdirSync } from "node:fs"

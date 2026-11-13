@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { chmodSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import {
     type SemanticEvent,
@@ -150,12 +150,8 @@ describe("CLI StoryAgent cooperative suspension", () => {
 
 describe("one-shot CLI process ownership provenance", () => {
     for (const backend of ["codex", "opencode", "pi"] as const) {
-        it(
-            `${backend} does not treat a post-spawn process error as proof that no group exists`,
-            {
-                skip: !PROCESS_TREE_CAPABILITIES
-                    .cooperativeQuiescenceObservation,
-            },
+        it.skipIf(!PROCESS_TREE_CAPABILITIES
+                    .cooperativeQuiescenceObservation,)(`${backend} does not treat a post-spawn process error as proof that no group exists`,
             async () => {
                 await withTempDir(`baro-${backend}-owned-error-`, async (dir) => {
                     const storyId = `${backend}-owned-error`
@@ -223,12 +219,8 @@ describe("one-shot CLI process ownership provenance", () => {
             },
         )
 
-        it(
-            `${backend} preserves the quiescence failure when externally aborted`,
-            {
-                skip: !PROCESS_TREE_CAPABILITIES
-                    .cooperativeQuiescenceObservation,
-            },
+        it.skipIf(!PROCESS_TREE_CAPABILITIES
+                    .cooperativeQuiescenceObservation,)(`${backend} preserves the quiescence failure when externally aborted`,
             async () => {
                 await withTempDir(`baro-${backend}-abort-uncertified-`, async (dir) => {
                     const fixture = writeBlockingHarness(dir, backend)

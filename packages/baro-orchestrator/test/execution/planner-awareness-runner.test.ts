@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import { CoordinationBus, BusMember } from "../../src/runtime/coordination.js"
 import { StoryMerged, StoryMergeFailed } from "../../src/events/integration.js"

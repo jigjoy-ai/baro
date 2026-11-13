@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import {
     type SemanticEvent,
@@ -77,12 +77,8 @@ process.exit(0)
         })
     })
 
-    it(
-        "starts collective review only after the candidate process is quiescent",
-        {
-            skip: !PROCESS_TREE_CAPABILITIES
-                .cooperativeQuiescenceObservation,
-        },
+    it.skipIf(!PROCESS_TREE_CAPABILITIES
+                .cooperativeQuiescenceObservation,)("starts collective review only after the candidate process is quiescent",
         async () => {
             await withTempDir("codex-story-agent-review-barrier-", async (dir) => {
                 const binDir = join(dir, "bin")
@@ -226,12 +222,8 @@ setTimeout(() => {
         },
     )
 
-    it(
-        "discards a staged collective terminal when abort wins before attempt finalization",
-        {
-            skip: !PROCESS_TREE_CAPABILITIES
-                .cooperativeQuiescenceObservation,
-        },
+    it.skipIf(!PROCESS_TREE_CAPABILITIES
+                .cooperativeQuiescenceObservation,)("discards a staged collective terminal when abort wins before attempt finalization",
         async () => {
             await withTempDir("codex-story-agent-abort-barrier-", async (dir) => {
                 const binDir = join(dir, "bin")
@@ -337,12 +329,8 @@ setInterval(() => {}, 1000)
         },
     )
 
-    it(
-        "drains an observed detached writer before publishing the one-shot candidate",
-        {
-            skip: !PROCESS_TREE_CAPABILITIES
-                .cooperativeQuiescenceObservation,
-        },
+    it.skipIf(!PROCESS_TREE_CAPABILITIES
+                .cooperativeQuiescenceObservation,)("drains an observed detached writer before publishing the one-shot candidate",
         async () => {
             await withTempDir("codex-story-agent-detached-barrier-", async (dir) => {
                 const binDir = join(dir, "bin")
@@ -480,10 +468,8 @@ setTimeout(() => process.exit(0), 500)
         },
     )
 
-    it("repairs a rejected candidate with a fresh Codex process in the same worktree", {
-        skip: !PROCESS_TREE_CAPABILITIES
-            .cooperativeQuiescenceObservation,
-    }, async () => {
+    it.skipIf(!PROCESS_TREE_CAPABILITIES
+            .cooperativeQuiescenceObservation,)("repairs a rejected candidate with a fresh Codex process in the same worktree", async () => {
         await withTempDir("codex-story-agent-surgical-", async (dir) => {
             const binDir = join(dir, "bin")
             const cwd = join(dir, "cwd")
@@ -799,13 +785,7 @@ setInterval(() => {}, 1_000)
         })
     })
 
-    it(
-        "settles a hard timeout that wins after provider exit but before tree quiescence",
-        {
-            skip: !PROCESS_TREE_CAPABILITIES
-                .cooperativeQuiescenceObservation,
-            timeout: 5_000,
-        },
+    it.skipIf(!PROCESS_TREE_CAPABILITIES .cooperativeQuiescenceObservation)("settles a hard timeout that wins after provider exit but before tree quiescence", { timeout: 5_000 },
         async () => {
             await withTempDir("codex-story-agent-hard-timeout-race-", async (dir) => {
                 const cwd = join(dir, "cwd")
@@ -882,12 +862,8 @@ descendant.once("message", () => {
         },
     )
 
-    it(
-        "fails closed instead of retrying when owned process quiescence is uncertified",
-        {
-            skip: !PROCESS_TREE_CAPABILITIES
-                .cooperativeQuiescenceObservation,
-        },
+    it.skipIf(!PROCESS_TREE_CAPABILITIES
+                .cooperativeQuiescenceObservation,)("fails closed instead of retrying when owned process quiescence is uncertified",
         async () => {
             await withTempDir("codex-story-agent-quiescence-", async (dir) => {
                 const binDir = join(dir, "bin")

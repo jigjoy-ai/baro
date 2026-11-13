@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, it } from "node:test"
+import { afterEach, beforeEach, describe, it } from "@rstest/core"
 import assert from "node:assert/strict"
 import { execFileSync, spawnSync } from "node:child_process"
 import {
@@ -141,7 +141,7 @@ describe("reclaimStaleRunDirs", () => {
 
     it("leaves a run whose owner is alive, and the current run, untouched", async () => {
         const live = addWorktree("run-live", "S1", "baro-wt/run-live/S1")
-        markOwner("run-live", process.pid)
+        markOwner("run-live", process.ppid)
         markOwner("run-live", deadPid())
         const current = addWorktree("run-current", "S1", "baro-wt/run-current/S1")
         markOwner("run-current", deadPid())
@@ -167,7 +167,7 @@ describe("reclaimStaleRunDirs", () => {
     })
 
     it("keeps an idle markerless run whose run id names a live process", async () => {
-        const runId = `run-${process.pid}`
+        const runId = `run-${process.ppid}`
         const legacy = addWorktree(runId, "S1", `baro-wt/${runId}/S1`)
 
         const summary = await reclaim({ now: Date.now() + 2 * LEGACY_IDLE_MS })

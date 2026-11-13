@@ -7,7 +7,7 @@ import {
 } from "node:fs"
 import { isAbsolute, join } from "node:path"
 import assert from "node:assert/strict"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import {
     createVerifyPlan,
@@ -133,9 +133,7 @@ describe("declared verification policy", () => {
         })
     })
 
-    it(
-        "contains node paths lexically and through symlinks",
-        { skip: process.platform === "win32" },
+    it.skipIf(process.platform === "win32")("contains node paths lexically and through symlinks",
         async () => {
             await withTempDir("baro-verify-declared-outside-", async (outside) => {
                 const outsideFile = join(outside, "outside.js")
@@ -177,9 +175,7 @@ describe("declared verification policy", () => {
         },
     )
 
-    it(
-        "revalidates contained node paths immediately before execution",
-        { skip: process.platform === "win32" },
+    it.skipIf(process.platform === "win32")("revalidates contained node paths immediately before execution",
         async () => {
             await withTempDir("baro-verify-node-swap-outside-", async (outside) => {
                 const outsideFile = join(outside, "outside.js")
@@ -207,9 +203,7 @@ describe("declared verification policy", () => {
         },
     )
 
-    it(
-        "revalidates package focused paths immediately before execution",
-        { skip: process.platform === "win32" },
+    it.skipIf(process.platform === "win32")("revalidates package focused paths immediately before execution",
         async () => {
             await withTempDir("baro-verify-package-swap-outside-", async (outside) => {
                 const outsideFile = join(outside, "focus.js")
@@ -1032,9 +1026,7 @@ describe("declared verification policy", () => {
         })
     })
 
-    it(
-        "rejects package context overrides, response files, and symlink escapes",
-        { skip: process.platform === "win32" },
+    it.skipIf(process.platform === "win32")("rejects package context overrides, response files, and symlink escapes",
         async () => {
             await withTempDir("baro-verify-package-outside-", async (outside) => {
                 writeFileSync(join(outside, "case.js"), "export const outside = true\n")
@@ -1761,9 +1753,7 @@ describe("declared verification policy", () => {
         })
     })
 
-    it(
-        "emits phpunit path arguments repo-relative and the tool host-absolute",
-        { skip: process.platform === "win32" },
+    it.skipIf(process.platform === "win32")("emits phpunit path arguments repo-relative and the tool host-absolute",
         async () => {
             await withTempDir("baro-verify-declared-phpunit-", async (dir) => {
                 mkdirSync(join(dir, "vendor", "bin"), { recursive: true })
@@ -2007,9 +1997,7 @@ describe("declared verification policy", () => {
         })
     })
 
-    it(
-        "leaves no host path in a ddev-wrapped phpunit argv",
-        { skip: process.platform === "win32" },
+    it.skipIf(process.platform === "win32")("leaves no host path in a ddev-wrapped phpunit argv",
         async () => {
             await withTempDir("baro-verify-declared-ddev-", async (dir) => {
                 mkdirSync(join(dir, ".ddev"), { recursive: true })

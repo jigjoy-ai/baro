@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import { RuntimeReplanCoordinator } from "../../src/runtime-graph/runtime-replan-coordinator.js"
 import {

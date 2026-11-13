@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { fileURLToPath } from "node:url"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 import { createInterface } from "node:readline"
 import { Readable, Writable } from "node:stream"
 

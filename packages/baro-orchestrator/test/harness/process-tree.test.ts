@@ -3,7 +3,7 @@ import { spawn } from "node:child_process"
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import {
     activeProcessTreeCount,
@@ -150,9 +150,7 @@ describe("process-tree discovery", () => {
         )
     })
 
-    it(
-        "never signals an unobserved PID after its managed root was closed",
-        { skip: process.platform === "win32" },
+    it.skipIf(process.platform === "win32")("never signals an unobserved PID after its managed root was closed",
         async () => {
             // The live process models an unrelated process which received a
             // rapidly recycled PID. Marking the never-observed managed root as
@@ -190,13 +188,8 @@ describe("process-tree discovery", () => {
         },
     )
 
-    it(
-        "certifies an owned POSIX group only after it disappears",
-        {
-            skip:
-                process.platform !== "linux" &&
-                process.platform !== "darwin",
-        },
+    it.skipIf(process.platform !== "linux" &&
+                process.platform !== "darwin",)("certifies an owned POSIX group only after it disappears",
         async () => {
             const child = spawn(
                 process.execPath,
@@ -237,13 +230,8 @@ describe("process-tree discovery", () => {
         },
     )
 
-    it(
-        "returns false after a bounded permanently-unknown group observation",
-        {
-            skip:
-                process.platform !== "linux" &&
-                process.platform !== "darwin",
-        },
+    it.skipIf(process.platform !== "linux" &&
+                process.platform !== "darwin",)("returns false after a bounded permanently-unknown group observation",
         async () => {
             const child = spawn(
                 process.execPath,
@@ -297,9 +285,7 @@ describe("process-tree discovery", () => {
         }
     })
 
-    it(
-        "uses one canonical Linux identity across async capture and sync signals",
-        { skip: process.platform !== "linux" },
+    it.skipIf(process.platform !== "linux")("uses one canonical Linux identity across async capture and sync signals",
         async () => {
             const child = spawn(
                 process.execPath,
@@ -343,9 +329,7 @@ describe("process-tree discovery", () => {
         },
     )
 
-    it(
-        "shares one non-overlapping asynchronous observer across refresh storms",
-        { skip: process.platform === "win32" },
+    it.skipIf(process.platform === "win32")("shares one non-overlapping asynchronous observer across refresh storms",
         async () => {
             const shims = Array.from({ length: 4 }, () =>
                 spawn(
@@ -393,9 +377,7 @@ describe("process-tree discovery", () => {
         },
     )
 
-    it(
-        "retains an observed provider when its shim exits immediately afterward",
-        { skip: process.platform === "win32" },
+    it.skipIf(process.platform === "win32")("retains an observed provider when its shim exits immediately afterward",
         async () => {
             const providerProgram = [
                 'process.on("SIGTERM", () => {});',
@@ -455,9 +437,7 @@ describe("process-tree discovery", () => {
         },
     )
 
-    it(
-        "retains a descendant snapshot and escalates after the direct shim closes",
-        { skip: process.platform === "win32" },
+    it.skipIf(process.platform === "win32")("retains a descendant snapshot and escalates after the direct shim closes",
         async () => {
             const grandchildProgram = [
                 'process.on("SIGTERM", () => {});',
@@ -515,9 +495,7 @@ describe("process-tree discovery", () => {
         },
     )
 
-    it(
-        "cleans stdio-detached descendants after natural zero and nonzero shim exits",
-        { skip: process.platform === "win32" },
+    it.skipIf(process.platform === "win32")("cleans stdio-detached descendants after natural zero and nonzero shim exits",
         async () => {
             for (const exitCode of [0, 7]) {
                 const { shim, tree } = naturalExitTree(exitCode)
@@ -559,13 +537,8 @@ describe("process-tree discovery", () => {
         },
     )
 
-    it(
-        "drains an identity-captured descendant that creates a new process group",
-        {
-            skip:
-                process.platform !== "linux" &&
-                process.platform !== "darwin",
-        },
+    it.skipIf(process.platform !== "linux" &&
+                process.platform !== "darwin",)("drains an identity-captured descendant that creates a new process group",
         async () => {
             const dir = await mkdtemp(join(tmpdir(), "baro-detached-tree-"))
             const latePath = join(dir, "late.txt")
@@ -644,13 +617,8 @@ describe("process-tree discovery", () => {
         },
     )
 
-    it(
-        "fails closed when newly observed ownership membership cannot be published",
-        {
-            skip:
-                process.platform !== "linux" &&
-                process.platform !== "darwin",
-        },
+    it.skipIf(process.platform !== "linux" &&
+                process.platform !== "darwin",)("fails closed when newly observed ownership membership cannot be published",
         async () => {
             let generation = 0
             let failedPublications = 0
@@ -758,13 +726,8 @@ describe("process-tree discovery", () => {
         },
     )
 
-    it(
-        "a young neighbour without a snapshot does not poison the batch publish",
-        {
-            skip:
-                process.platform !== "linux" &&
-                process.platform !== "darwin",
-        },
+    it.skipIf(process.platform !== "linux" &&
+                process.platform !== "darwin",)("a young neighbour without a snapshot does not poison the batch publish",
         async () => {
             let generation = 0
             const publishedCounts: number[] = []
@@ -856,9 +819,7 @@ describe("process-tree discovery", () => {
         },
     )
 
-    it(
-        "uses taskkill while the Windows root is still live",
-        { skip: process.platform !== "win32" },
+    it.skipIf(process.platform !== "win32")("uses taskkill while the Windows root is still live",
         async () => {
             const childProgram = "setInterval(() => {}, 1000);"
             const shimProgram = [

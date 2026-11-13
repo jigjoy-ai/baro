@@ -2,7 +2,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync }
 import { homedir } from "node:os"
 import { join } from "node:path"
 import assert from "node:assert/strict"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import { cargoEnvFor, resolveCargoTargetDir } from "../../src/verification/cargo-env.js"
 import { verifyBuild, type VerifyPlan } from "../../src/verification/verify.js"

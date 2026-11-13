@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { execFileSync } from "node:child_process"
 import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import { GitGate } from "../../src/integration/git.js"
 import { GitCoordinator } from "../../src/integration/git-coordinator.js"

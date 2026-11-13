@@ -12,7 +12,7 @@ import {
 import { join } from "node:path"
 import { createServer, type Server } from "node:http"
 import { promisify } from "node:util"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import {
     decodeInboxAgentId,

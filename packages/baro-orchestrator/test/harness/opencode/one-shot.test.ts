@@ -2,7 +2,9 @@ import assert from "node:assert/strict"
 import { chmodSync, existsSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
+
+import { assertProcessGone, readPidFile } from "../../process-liveness.js"
 
 import { knownMetric, unknownMetric } from "../../../src/telemetry/model-telemetry.js"
 import { runOpenCodeOneShot } from "../../../src/harness/opencode/one-shot.js"
@@ -312,13 +314,11 @@ setInterval(() => {}, 1000);
     it("kills an inherited-stdio, TERM-resistant descendant before cancellation settles", async () => {
         await withTempDir("baro-opencode-tree-", async (dir) => {
             const started = join(dir, "descendant-started")
-            const escaped = join(dir, "descendant-escaped")
             const bin = join(dir, "tree-opencode.mjs")
             const descendantSource = `
 import { writeFileSync } from "node:fs";
-writeFileSync(${JSON.stringify(started)}, "yes");
+writeFileSync(${JSON.stringify(started)}, String(process.pid));
 process.on("SIGTERM", () => {});
-setTimeout(() => writeFileSync(${JSON.stringify(escaped)}, "yes"), 700);
 setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_000);
 `
             writeFileSync(bin, `#!/usr/bin/env node
@@ -349,10 +349,8 @@ setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_0
                 controller.abort()
             }
 
-            await delay(750)
-            assert.equal(
-                existsSync(escaped),
-                false,
+            await assertProcessGone(
+                await readPidFile(started),
                 "OpenCode descendant survived timeout escalation",
             )
         })

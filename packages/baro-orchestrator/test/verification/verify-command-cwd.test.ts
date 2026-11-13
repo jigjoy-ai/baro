@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs"
 import { join } from "node:path"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import {
     defaultSleep,

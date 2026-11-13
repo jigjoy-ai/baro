@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { describe, it } from "node:test"
+import { describe, it, onTestFinished, rs } from "@rstest/core"
 
 import {
     AcceptanceGate,
@@ -55,8 +55,9 @@ describe("AcceptanceGate", () => {
         assert.equal(quality.payload.status, "passed")
     })
 
-    it("keeps the default gate open for a bounded Critic evaluation", async (t) => {
-        t.mock.timers.enable({ apis: ["setTimeout"] })
+    it("keeps the default gate open for a bounded Critic evaluation", async () => {
+        rs.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+        onTestFinished(() => { rs.useRealTimers() })
         assert.equal(DEFAULT_ACCEPTANCE_TIMEOUT_MS, 240_000)
 
         const gate = new AcceptanceGate({
@@ -69,7 +70,7 @@ describe("AcceptanceGate", () => {
         deliverStoryResult(env, "run-default-timeout", "S1", "lease-1", 1)
         await gate.idle()
 
-        t.mock.timers.tick(DEFAULT_ACCEPTANCE_TIMEOUT_MS - 1)
+        rs.advanceTimersByTime(DEFAULT_ACCEPTANCE_TIMEOUT_MS - 1)
         await gate.idle()
         assert.equal(env.events.filter(StoryQualityTimedOut.is).length, 0)
         assert.equal(env.events.filter(StoryQualityCompleted.is).length, 0)
@@ -374,8 +375,9 @@ describe("AcceptanceGate", () => {
         assert.equal(env.events.filter(StoryResult.is).length, 1)
     })
 
-    it("rechecks the same candidate after a missing-Critic timeout, then stops boundedly", async (t) => {
-        t.mock.timers.enable({ apis: ["setTimeout"] })
+    it("rechecks the same candidate after a missing-Critic timeout, then stops boundedly", async () => {
+        rs.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+        onTestFinished(() => { rs.useRealTimers() })
         const runId = "run-reverification-timeout"
         const broker = source("broker")
         const story = source("S1")
@@ -424,13 +426,13 @@ describe("AcceptanceGate", () => {
         )
         await gate.idle()
 
-        t.mock.timers.tick(10)
+        rs.advanceTimersByTime(10)
         await gate.idle()
         assert.equal(env.events.filter(StoryQualityReverificationRequested.is).length, 1)
         assert.equal(env.events.filter(AgentTurnCompleted.is).length, 1)
         assert.equal(env.events.filter(StoryQualityCompleted.is).length, 0)
 
-        t.mock.timers.tick(10)
+        rs.advanceTimersByTime(10)
         await gate.idle()
         const quality = env.events.find(StoryQualityCompleted.is)
         assert.ok(quality)

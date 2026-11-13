@@ -1,4 +1,4 @@
-import { describe, it } from "node:test"
+import { describe, it, onTestFinished, rs } from "@rstest/core"
 import assert from "node:assert/strict"
 import { join } from "node:path"
 
@@ -798,9 +798,10 @@ describe("StoryFactory", () => {
         })
     })
 
-    it("learns a historical bid from authoritative deduplicated costs and an integrated lease", async (t) => {
+    it("learns a historical bid from authoritative deduplicated costs and an integrated lease", async () => {
         let now = 1_000
-        t.mock.method(Date, "now", () => now)
+        const dateNow = rs.spyOn(Date, "now").mockImplementation(() => now)
+        onTestFinished(() => { dateNow.mockRestore() })
 
         await withTempDir("story-factory-route-learning-", async (dir) => {
             const broker = source("broker")
@@ -984,9 +985,10 @@ describe("StoryFactory", () => {
         })
     })
 
-    it("lowers route quality for semantic failure but not operational failure", async (t) => {
+    it("lowers route quality for semantic failure but not operational failure", async () => {
         let now = 5_000
-        t.mock.method(Date, "now", () => now)
+        const dateNow = rs.spyOn(Date, "now").mockImplementation(() => now)
+        onTestFinished(() => { dateNow.mockRestore() })
 
         await withTempDir("story-factory-route-quality-", async (dir) => {
             const broker = source("broker")

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import { FinalizeStarted, PrCreated } from "../../../src/semantic-events.js"
 import type { BaroEvent } from "../../../src/tui-protocol.js"
