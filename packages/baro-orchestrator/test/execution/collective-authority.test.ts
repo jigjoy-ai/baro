@@ -37,6 +37,7 @@ import {
     WorkspaceCleanupRequested,
 } from "../../src/semantic-events.js"
 import { joinWithCapture, source, withTempDir } from "./helpers.js"
+import type { SemanticEvent } from "../../src/runtime/mozaik.js"
 
 describe("collective authority and replay invariants", () => {
     it("accepts run lifecycle events only from the bound operator, context, and repository authorities", async () => {
@@ -839,9 +840,9 @@ async function provideContext(
     )
 }
 
-async function waitForCount<T>(
-    events: readonly unknown[],
-    guard: (event: unknown) => event is T,
+async function waitForCount<T extends SemanticEvent<string, unknown>>(
+    events: readonly SemanticEvent<string, unknown>[],
+    guard: (event: SemanticEvent<string, unknown>) => event is T,
     count: number,
 ): Promise<T[]> {
     for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -852,9 +853,9 @@ async function waitForCount<T>(
     assert.fail(`timed out waiting for ${count} collective events`)
 }
 
-async function waitFor<T>(
-    events: readonly unknown[],
-    guard: (event: unknown) => event is T,
+async function waitFor<T extends SemanticEvent<string, unknown>>(
+    events: readonly SemanticEvent<string, unknown>[],
+    guard: (event: SemanticEvent<string, unknown>) => event is T,
 ): Promise<T> {
     for (let attempt = 0; attempt < 100; attempt += 1) {
         const event = events.find(guard)

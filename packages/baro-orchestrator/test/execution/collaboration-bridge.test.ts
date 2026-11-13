@@ -9,6 +9,8 @@ import { join } from "node:path"
 import { request as httpRequest } from "node:http"
 import { describe, it } from "@rstest/core"
 
+import type { SemanticEvent } from "../../src/runtime/mozaik.js"
+
 import { inboxFilenameForAgentId } from "../../scripts/collaboration-inbox-path.mjs"
 import { CollaborationBridge } from "../../src/execution/collaboration-bridge.js"
 import { CollectiveBoard } from "../../src/execution/collective-board.js"
@@ -2419,9 +2421,9 @@ function stalledBrokerPost(capability: TestCapability): {
     return { headersSent, settled }
 }
 
-async function waitFor<T>(
-    events: readonly unknown[],
-    guard: (event: unknown) => event is T,
+async function waitFor<T extends SemanticEvent<string, unknown>>(
+    events: readonly SemanticEvent<string, unknown>[],
+    guard: (event: SemanticEvent<string, unknown>) => event is T,
 ): Promise<T> {
     for (let attempt = 0; attempt < 200; attempt += 1) {
         const event = events.find(guard)
@@ -2448,7 +2450,7 @@ async function waitForGone(path: string): Promise<void> {
 }
 
 async function waitForProposal(
-    events: readonly unknown[],
+    events: readonly SemanticEvent<string, unknown>[],
     proposalId: string,
 ): Promise<ReturnType<typeof RuntimeReplanProposed.create>> {
     for (let attempt = 0; attempt < 200; attempt += 1) {

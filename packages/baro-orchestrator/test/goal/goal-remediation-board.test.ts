@@ -37,6 +37,7 @@ import {
     WorkOffered,
 } from "../../src/semantic-events.js"
 import { captureEnv, source, withTempDir } from "../execution/helpers.js"
+import type { SemanticEvent } from "../../src/runtime/mozaik.js"
 
 const envelope = {
     objective: "Keep cancellation lossless.",
@@ -1027,9 +1028,9 @@ function aggregateReviewCompletion(
     })
 }
 
-async function waitFor<T>(
-    events: readonly unknown[],
-    guard: (event: unknown) => event is T,
+async function waitFor<T extends SemanticEvent<string, unknown>>(
+    events: readonly SemanticEvent<string, unknown>[],
+    guard: (event: SemanticEvent<string, unknown>) => event is T,
 ): Promise<T> {
     // Bounded by time, not event-loop turns: how many turns the board's file
     // writes take differs by platform.
