@@ -192,7 +192,9 @@ One public boundary exists.
                 assumptions: [],
             },
             trustedDecisionDocument: document,
-            publish: (event) => published.push(event),
+            publish: (event) => {
+                published.push(event)
+            },
         })
         const fragment = {
             fragmentId: "owner",
@@ -223,7 +225,9 @@ One public boundary exists.
                 nonGoals: [],
                 assumptions: [],
             },
-            publish: (event) => published.push(event),
+            publish: (event) => {
+                published.push(event)
+            },
         })
 
         await assert.rejects(
@@ -250,7 +254,7 @@ One public boundary exists.
         assert.equal(admission.nextOrdinal, 2)
         assert.equal(publisher.hasEarlyPlan(), true)
         assert.equal(published.length, 1)
-        assert.deepEqual(published[0]?.stories[0]?.goalInvariantIds, ["G-A1"])
+        assert.deepEqual(goalInvariantIdsOf(published[0]?.stories[0]), ["G-A1"])
     })
 
     it("publishes a validated runtime-ordinal fragment before an exact-prefix final", async () => {
@@ -283,7 +287,9 @@ One public boundary exists.
             progressive: {
                 runId: "run-1",
                 planningId: "planning-1",
-                publish: (event) => published.push(event),
+                publish: (event) => {
+                    published.push(event)
+                },
             },
             testRuntime: sequence.runtime,
         })
@@ -338,7 +344,9 @@ One public boundary exists.
             progressive: {
                 runId: "run-1",
                 planningId: "planning-1",
-                publish: (event) => published.push(event),
+                publish: (event) => {
+                    published.push(event)
+                },
             },
             testRuntime: sequence.runtime,
         })
@@ -407,7 +415,9 @@ One public boundary exists.
             progressive: {
                 runId: "run-1",
                 planningId: "planning-1",
-                publish: (event) => published.push(event),
+                publish: (event) => {
+                    published.push(event)
+                },
             },
             testRuntime: sequence.runtime,
         })
@@ -433,7 +443,9 @@ One public boundary exists.
             progressive: {
                 runId: "run-1",
                 planningId: "planning-1",
-                publish: (event) => published.push(event),
+                publish: (event) => {
+                    published.push(event)
+                },
             },
             testRuntime: sequence.runtime,
         })
@@ -671,6 +683,12 @@ function message(text: string): ContextItem {
     return ModelMessageItem.rehydrate({ text })
 }
 
+function goalInvariantIdsOf(story: unknown): unknown {
+    return typeof story === "object" && story !== null && "goalInvariantIds" in story
+        ? story.goalInvariantIds
+        : undefined
+}
+
 function fakeTool(invoke: Tool["invoke"]): Tool {
     return {
         type: "function",
@@ -707,7 +725,7 @@ function fakeSequence(
                 const items = roundItems[round]
                 assert.ok(items, `unexpected inference round ${round + 1}`)
                 round += 1
-                return { items, usage: undefined }
+                return { items, usage: undefined, billingInvocationId: null }
             },
         },
         contexts,

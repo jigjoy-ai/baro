@@ -79,6 +79,7 @@ describe("GitCoordinator", () => {
                     request: {
                         storyId: "S1",
                         prompt: "implement reviewed work",
+                        model: "standard",
                         retries: 0,
                         timeoutSecs: 60,
                         requiresQualityReview: true,
@@ -134,6 +135,7 @@ describe("GitCoordinator", () => {
                     request: {
                         storyId: "S1",
                         prompt: "work",
+                        model: "standard",
                         retries: 0,
                         timeoutSecs: 60,
                     },
@@ -511,6 +513,7 @@ describe("a merge the machine killed, not the repository", () => {
                 request: {
                     storyId: "S1",
                     prompt: "write the tests",
+                    model: "standard",
                     retries: 0,
                     timeoutSecs: 60,
                 },

@@ -51,6 +51,7 @@ import {
     WorkspaceCleanupRequested,
 } from "../../src/semantic-events.js"
 import { joinWithCapture, source, withTempDir } from "./helpers.js"
+import type { SemanticEvent } from "../../src/runtime/mozaik.js"
 
 describe("CollectiveBoard", () => {
     it("fails closed before execution when a resumed full plan lost an obligation owner", async () => {
@@ -3078,14 +3079,14 @@ function transportFail(
     })
 }
 
-async function waitFor<T>(events: readonly unknown[], guard: (event: unknown) => event is T): Promise<T> {
+async function waitFor<T extends SemanticEvent<string, unknown>>(events: readonly SemanticEvent<string, unknown>[], guard: (event: SemanticEvent<string, unknown>) => event is T): Promise<T> {
     const found = await waitForCount(events, guard, 1)
     return found[0]!
 }
 
-async function waitForCount<T>(
-    events: readonly unknown[],
-    guard: (event: unknown) => event is T,
+async function waitForCount<T extends SemanticEvent<string, unknown>>(
+    events: readonly SemanticEvent<string, unknown>[],
+    guard: (event: SemanticEvent<string, unknown>) => event is T,
     count: number,
 ): Promise<T[]> {
     for (let attempt = 0; attempt < 100; attempt += 1) {

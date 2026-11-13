@@ -100,7 +100,8 @@ describe("OpenAI-native models use the Responses API on a custom endpoint", () =
         const context = ModelContext.create().addContextItem(UserMessageItem.create("hello"))
         const round = await runInferenceRound(context, model)
         const message = round.items.find((item) => item instanceof ModelMessageItem) as ModelMessageItem
-        return toWire(message).content[0].text as string
+        const wire = toWire(message) as { content: { text: string }[] }
+        return wire.content[0].text
     }
 
     it("sends gpt-* to /v1/responses with the connection's own key", async () => {

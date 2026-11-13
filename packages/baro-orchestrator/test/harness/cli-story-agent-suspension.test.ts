@@ -512,7 +512,7 @@ async function assertRetryBackoffWake(
 
     try {
         const startedAt = Date.now()
-        const outcome = await withDeadline(
+        const outcome = await withDeadline<Awaited<ReturnType<SuspendableAgent["run"]>>>(
             agent.run(env),
             1_000,
             `${backend} ${wake} did not wake retry backoff`,
@@ -591,10 +591,11 @@ function writeBlockingHarness(dir: string, backend: Backend): BlockingHarness {
         bin,
         `#!/usr/bin/env node
 import { appendFileSync, writeFileSync } from "node:fs";
-writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));
+process.on("SIGTERM", () => setTimeout(() => process.exit(0), 25));
 appendFileSync(${JSON.stringify(invocationPath)}, "attempt\\n");
 console.log(${JSON.stringify(JSON.stringify(readyEvent))});
-process.on("SIGTERM", () => setTimeout(() => process.exit(0), 25));
+// Last: the pid file is what a test waits on before it aborts this process.
+writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));
 setInterval(() => {}, 1000);
 `,
     )

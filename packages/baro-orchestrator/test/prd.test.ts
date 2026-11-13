@@ -158,7 +158,14 @@ describe("normalizePrd", () => {
     })
 
     it("normalizes durable runtime graph metadata and drops malformed decisions", () => {
-        const validApplied = appliedDecision()
+        const laterMutatedDeps = ["S1"]
+        const validApplied = appliedDecision({
+            mutation: {
+                addedStories: [],
+                removedStoryIds: [],
+                modifiedDeps: { S2: laterMutatedDeps },
+            },
+        })
         const runtimeGraph = {
             runId: "run-runtime",
             version: 4,
@@ -201,9 +208,7 @@ describe("normalizePrd", () => {
             prd.runtimeGraph?.appliedDecisions[0]?.applied.proposalId,
             "proposal-1",
         )
-        runtimeGraph.appliedDecisions[2]!.applied.mutation.modifiedDeps.S2.push(
-            "later-mutation",
-        )
+        laterMutatedDeps.push("later-mutation")
         assert.deepEqual(
             prd.runtimeGraph?.appliedDecisions[0]?.applied.mutation.modifiedDeps,
             { S2: ["S1"] },
@@ -301,6 +306,7 @@ describe("normalizePrd", () => {
                     runId: "run-runtime",
                     version: 4,
                     dynamicStories: 2,
+                    policyStories: 0,
                     appliedDecisions: [
                         { fingerprint: "wrong", applied: mismatched },
                         duplicateRecord,

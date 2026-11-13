@@ -705,7 +705,6 @@ function buildHarness(options: HarnessOptions): Harness {
             admitGraph: ({ proposal, planningState }) => {
                 if (options.rejectTail) {
                     return {
-                        applied: null,
                         event: RuntimeReplanRejected.create({
                             runId: RUN_ID,
                             proposalId: proposal.proposalId,
@@ -724,10 +723,12 @@ function buildHarness(options: HarnessOptions): Harness {
                     ...prd,
                     userStories: [
                         ...prd.userStories,
+                        // The stub host aliases the proposal's readonly arrays
+                        // into the PRD instead of copying them.
                         ...proposal.mutation.addedStories.map((added) => ({
                             ...story(added.id, [...added.dependsOn]),
                             ...added,
-                        })),
+                        }) as PrdStory),
                     ],
                     runtimeGraph: {
                         ...prd.runtimeGraph!,

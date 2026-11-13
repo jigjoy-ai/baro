@@ -17,7 +17,7 @@ import {
 } from "../../src/semantic-events.js"
 import { joinWithCapture, source } from "../execution/helpers.js"
 
-interface AuthorityAwareCritic {
+interface AuthorityAwareCritic extends BusMember {
     onExternalEvent(
         source: BusMember,
         event: SemanticEvent<string, unknown>,

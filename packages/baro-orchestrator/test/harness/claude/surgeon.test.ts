@@ -424,6 +424,7 @@ console.log(${JSON.stringify(JSON.stringify(wrapper))});
                 success: true,
                 attempts: 1,
                 durationSecs: 8,
+                error: null,
             }),
         )
         await surgeon.idle()

@@ -58,7 +58,9 @@ function publisherFor(
         ...(options.onInvariantCoverageGap === undefined
             ? {}
             : { onInvariantCoverageGap: options.onInvariantCoverageGap }),
-        publish: (event) => published.push(event),
+        publish: (event) => {
+            published.push(event)
+        },
     })
     return { publisher, published }
 }

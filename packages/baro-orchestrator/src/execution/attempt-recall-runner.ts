@@ -94,7 +94,7 @@ export class AttemptRecallRunner extends BusMember {
             const call = this.pending.get(item.callId)
             if (!call) return
             this.pending.delete(item.callId)
-            const output = String((item as { output?: unknown }).output ?? "")
+            const output = item.output.text
             this.live.set(
                 call.agentId,
                 withCommand(

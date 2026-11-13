@@ -8,6 +8,7 @@ import {
     type SemanticEvent,
 } from "../../../src/runtime/mozaik.js"
 import { BusMember, CoordinationBus } from "../../../src/runtime/coordination.js"
+import { PlanningFeed } from "../../../src/execution/planning-feed.js"
 import {
     ModelInvocationMeasured,
     PlanFragmentAdmitted,
@@ -85,7 +86,7 @@ const ENVELOPE: GoalEnvelope = {
 
 /** Simulates the Board: every proposed fragment is admitted at graph v7
  *  with one pruned edge, so the receipt the model sees is the host's. */
-class StubFeed extends BusMember {
+class StubFeed extends PlanningFeed {
     readonly opened: PlanningOpenCommand[] = []
     readonly fragments: PlanFragmentCommand[] = []
     readonly completions: PlanCompleteCommand[] = []
@@ -103,7 +104,7 @@ class StubFeed extends BusMember {
             fragmentId: command.fragment_id,
             ordinal: command.ordinal,
             graphVersion: 7,
-            storyIds: command.stories.map((story) => story.id),
+            storyIds: command.stories.map(storyId),
             replay: false,
             droppedEdges: ["S9->S1"],
         })
@@ -119,6 +120,14 @@ class StubFeed extends BusMember {
     failed(command: PlanFailedCommand): void {
         this.failures.push(command)
     }
+}
+
+function storyId(story: unknown): string {
+    assert.ok(
+        typeof story === "object" && story !== null && "id" in story &&
+            typeof story.id === "string",
+    )
+    return story.id
 }
 
 function writeFakeClaude(

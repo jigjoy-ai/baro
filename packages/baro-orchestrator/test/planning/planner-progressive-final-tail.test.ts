@@ -74,7 +74,12 @@ describe("progressive publisher and the host's verdict", () => {
             ["f2", 2],
             ["f2", 2],
         ])
-        assert.deepEqual(events.at(-1)?.stories[0]?.writes, ["src/b.js"])
+        const corrected = events.at(-1)?.stories[0]
+        assert.ok(
+            typeof corrected === "object" && corrected !== null &&
+                "writes" in corrected,
+        )
+        assert.deepEqual(corrected.writes, ["src/b.js"])
     })
 
     it("publishes the appended tail through the fragment path before the plan is composed", async () => {

@@ -50,7 +50,7 @@ printf '%s\n' \
                 // freshly-created temp binary; this is not the behavior under test.
                 timeoutSecs: FIXTURE_TIMEOUT_SECS,
             })
-            const terminalSources: BusMember[] = []
+            const terminalSources: Array<BusMember & { agentId?: string }> = []
             agent.setTerminalSourceRegistrar((source) => terminalSources.push(source))
 
             const outcome = await agent.run(env)

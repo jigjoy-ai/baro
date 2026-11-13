@@ -585,6 +585,7 @@ describe("Architect states decisions, the host writes the document", () => {
         const outcome = parseArchitectOutcome(JSON.stringify(structured()), {
             decisionOnly: true,
         })
+        assert.equal(outcome.kind, "ready")
         const parsed = parseArchitectureDecisionDocument(outcome.decisionDocument)
 
         assert.deepEqual(
@@ -613,6 +614,7 @@ describe("Architect states decisions, the host writes the document", () => {
         const outcome = parseArchitectOutcome(JSON.stringify(annotated), {
             decisionOnly: true,
         })
+        assert.equal(outcome.kind, "ready")
         const parsed = parseArchitectureDecisionDocument(outcome.decisionDocument)
         assert.equal(parsed.decisions.length, 1)
         assert.equal(parsed.decisions[0]!.title, drafts[0]!.title)
@@ -668,6 +670,7 @@ describe("Architect states decisions, the host writes the document", () => {
         const outcome = parseArchitectOutcome(JSON.stringify(wrapped), {
             decisionOnly: true,
         })
+        assert.equal(outcome.kind, "ready")
         assert.match(outcome.decisionDocument, /## ADR-001: Keep authority outside model output\n/u)
     })
 

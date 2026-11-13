@@ -5,6 +5,7 @@ import {
     FunctionCallItem,
     FunctionCallOutputItem,
     ModelMessageItem,
+    SemanticEvent,
     toWire,
 } from "../../../src/runtime/mozaik.js"
 
@@ -37,19 +38,21 @@ function outputText(item: unknown): string {
     return (output ?? []).map((part) => part.text ?? "").join("")
 }
 
-function firstSystem(items: readonly unknown[]) {
-    const item = items.find((candidate) =>
-        OpenCodeSystem.is(candidate as ReturnType<typeof OpenCodeSystem.create>),
+function semanticEvents(items: readonly unknown[]): SemanticEvent<string, unknown>[] {
+    return items.filter(
+        (item): item is SemanticEvent<string, unknown> => item instanceof SemanticEvent,
     )
+}
+
+function firstSystem(items: readonly unknown[]) {
+    const item = semanticEvents(items).find(OpenCodeSystem.is)
     assert.ok(item)
-    assert.ok(OpenCodeSystem.is(item as ReturnType<typeof OpenCodeSystem.create>))
+    assert.ok(OpenCodeSystem.is(item))
     return item
 }
 
 function stepEvents(items: readonly unknown[]) {
-    return items.filter((item): item is ReturnType<typeof OpenCodeStepEvent.create> =>
-        OpenCodeStepEvent.is(item as ReturnType<typeof OpenCodeStepEvent.create>),
-    )
+    return semanticEvents(items).filter(OpenCodeStepEvent.is)
 }
 
 describe("mapOpenCodeEvent", () => {
@@ -261,18 +264,10 @@ describe("mapOpenCodeEvent", () => {
         }
 
         const result = map(event)
-        const unknown = result.items.find((item) =>
-            OpenCodeUnknownEvent.is(
-                item as ReturnType<typeof OpenCodeUnknownEvent.create>,
-            ),
-        )
+        const unknown = semanticEvents(result.items).find(OpenCodeUnknownEvent.is)
 
         assert.ok(unknown)
-        assert.ok(
-            OpenCodeUnknownEvent.is(
-                unknown as ReturnType<typeof OpenCodeUnknownEvent.create>,
-            ),
-        )
+        assert.ok(OpenCodeUnknownEvent.is(unknown))
         assert.equal(unknown.payload.agentId, agentId)
         assert.equal(unknown.payload.openCodeType, "mystery")
         assert.deepEqual(unknown.payload.raw, event)

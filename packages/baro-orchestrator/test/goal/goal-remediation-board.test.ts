@@ -37,6 +37,7 @@ import {
     WorkOffered,
 } from "../../src/semantic-events.js"
 import { captureEnv, source, withTempDir } from "../execution/helpers.js"
+import type { SemanticEvent } from "../../src/runtime/mozaik.js"
 
 const envelope = {
     objective: "Keep cancellation lossless.",
@@ -195,7 +196,7 @@ describe("goal remediation graph admission", () => {
 
             const context = await waitFor(
                 env.events,
-                (event) =>
+                (event): event is ReturnType<typeof WorkContextRequested.create> =>
                     WorkContextRequested.is(event) &&
                     event.payload.storyId === admission.payload.storyId,
             )
@@ -210,7 +211,7 @@ describe("goal remediation graph admission", () => {
             )
             const offer = await waitFor(
                 env.events,
-                (event) =>
+                (event): event is ReturnType<typeof WorkOffered.create> =>
                     WorkOffered.is(event) &&
                     event.payload.request.storyId === admission.payload.storyId,
             )
@@ -263,7 +264,7 @@ describe("goal remediation graph admission", () => {
             )
             await waitFor(
                 env.events,
-                (event) =>
+                (event): event is ReturnType<typeof StoryIntegrationRequested.create> =>
                     StoryIntegrationRequested.is(event) &&
                     event.payload.storyId === admission.payload.storyId,
             )
@@ -279,7 +280,7 @@ describe("goal remediation graph admission", () => {
 
             const secondVerification = await waitFor(
                 env.events,
-                (event) =>
+                (event): event is ReturnType<typeof RunVerificationRequested.create> =>
                     RunVerificationRequested.is(event) &&
                     event.payload.verificationId !==
                         firstVerification.payload.verificationId,
@@ -323,7 +324,7 @@ describe("goal remediation graph admission", () => {
             )
             const secondReview = await waitFor(
                 env.events,
-                (event) =>
+                (event): event is ReturnType<typeof GoalAggregateReviewRequested.create> =>
                     GoalAggregateReviewRequested.is(event) &&
                     event.payload.basis.verificationId ===
                         secondVerification.payload.verificationId,
@@ -514,7 +515,7 @@ describe("goal remediation graph admission", () => {
 
             const context = await waitFor(
                 env.events,
-                (event) =>
+                (event): event is ReturnType<typeof WorkContextRequested.create> =>
                     WorkContextRequested.is(event) &&
                     event.payload.storyId === "S1",
             )
@@ -529,7 +530,7 @@ describe("goal remediation graph admission", () => {
             )
             const offer = await waitFor(
                 env.events,
-                (event) =>
+                (event): event is ReturnType<typeof WorkOffered.create> =>
                     WorkOffered.is(event) &&
                     event.payload.request.storyId === "S1",
             )
@@ -560,7 +561,7 @@ describe("goal remediation graph admission", () => {
             )
             await waitFor(
                 env.events,
-                (event) =>
+                (event): event is ReturnType<typeof StoryIntegrationRequested.create> =>
                     StoryIntegrationRequested.is(event) &&
                     event.payload.storyId === "S1",
             )
@@ -915,7 +916,7 @@ describe("goal remediation graph admission", () => {
 
             const contextRequest = await waitFor(
                 env.events,
-                (event) =>
+                (event): event is ReturnType<typeof WorkContextRequested.create> =>
                     WorkContextRequested.is(event) &&
                     event.payload.storyId === "S1",
             )
@@ -930,7 +931,7 @@ describe("goal remediation graph admission", () => {
             )
             const offer = await waitFor(
                 env.events,
-                (event) =>
+                (event): event is ReturnType<typeof WorkOffered.create> =>
                     WorkOffered.is(event) &&
                     event.payload.request.storyId === "S1",
             )
@@ -961,7 +962,7 @@ describe("goal remediation graph admission", () => {
             )
             await waitFor(
                 env.events,
-                (event) =>
+                (event): event is ReturnType<typeof StoryIntegrationRequested.create> =>
                     StoryIntegrationRequested.is(event) &&
                     event.payload.storyId === "S1",
             )
@@ -995,7 +996,7 @@ describe("goal remediation graph admission", () => {
 })
 
 function aggregateReviewCompletion(
-    request: ReturnType<typeof GoalAggregateReviewRequested.create>["data"],
+    request: ReturnType<typeof GoalAggregateReviewRequested.create>["payload"],
     status: "passed" | "failed",
     failedInvariantId?: string,
 ) {
@@ -1027,9 +1028,9 @@ function aggregateReviewCompletion(
     })
 }
 
-async function waitFor<T>(
-    events: readonly unknown[],
-    guard: (event: unknown) => event is T,
+async function waitFor<T extends SemanticEvent<string, unknown>>(
+    events: readonly SemanticEvent<string, unknown>[],
+    guard: (event: SemanticEvent<string, unknown>) => event is T,
 ): Promise<T> {
     // Bounded by time, not event-loop turns: how many turns the board's file
     // writes take differs by platform.

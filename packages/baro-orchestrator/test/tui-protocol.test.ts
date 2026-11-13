@@ -29,7 +29,7 @@ function captureEmit(event: Parameters<typeof emit>[0]): Record<string, unknown>
 describe("headless event stream", () => {
     it("timestamps every line, so a consumer can tell how long anything took", () => {
         const before = Date.now()
-        const line = captureEmit({ type: "architect_start" })
+        const line = captureEmit({ type: "finalize_start" })
         const after = Date.now()
 
         const ts = Date.parse(String(line.ts))
@@ -129,7 +129,7 @@ describe("stdout flush before exit", () => {
         const restore = stubStdoutWrite(true)
         const pending = Symbol("pending")
         try {
-            emit({ type: "architect_start" })
+            emit({ type: "finalize_start" })
 
             assert.equal(process.stdout.listenerCount("drain"), 0, "no drain listener")
             const winner = await Promise.race([flushTuiProtocol(), Promise.resolve(pending)])
@@ -144,7 +144,7 @@ describe("stdout flush before exit", () => {
         const restore = stubStdoutWrite(false)
         const pending = Symbol("pending")
         try {
-            emit({ type: "architect_start" })
+            emit({ type: "finalize_start" })
             assert.ok(process.stdout.listenerCount("drain") <= 1, "one drain listener at most")
 
             let settled = false
@@ -170,7 +170,7 @@ describe("stdout flush before exit", () => {
     it("covers a line emitted after the flush started, on a single drain", async () => {
         const restore = stubStdoutWrite(false)
         try {
-            emit({ type: "architect_start" })
+            emit({ type: "finalize_start" })
             const listeners = process.stdout.listenerCount("drain")
             assert.ok(listeners <= 1, "one drain listener at most")
 

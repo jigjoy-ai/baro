@@ -356,7 +356,12 @@ describe("progressive planner lifecycle wire", () => {
         const fragment = events[1]
         assert.ok(fragment?.type === "plan_fragment")
         assert.equal(fragment.ordinal, 1)
-        assert.deepEqual(fragment.stories[0]?.goalInvariantIds, ["G-A1"])
+        const story = fragment.stories[0]
+        assert.ok(
+            typeof story === "object" && story !== null &&
+                "goalInvariantIds" in story,
+        )
+        assert.deepEqual(story.goalInvariantIds, ["G-A1"])
     })
 
     it("publishes one correlated open, direct fragment, and complete", () => {
@@ -680,7 +685,8 @@ describe("progressive planner lifecycle wire", () => {
             }
             callsUntilEagain -= 1
             // A pipe accepts at most its free capacity per write(2) call.
-            const written = Math.min(length!, 64 * 1024)
+            assert.ok(typeof length === "number")
+            const written = Math.min(length, 64 * 1024)
             chunks.push(Buffer.from(buffer as Buffer).subarray(
                 offset!,
                 offset! + written,

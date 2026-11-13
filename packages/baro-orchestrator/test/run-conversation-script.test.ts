@@ -185,7 +185,9 @@ describe("run-conversation isolated turn", () => {
             assert.equal(run.signal, null)
             assert.equal(run.stdout, "")
             assert.deepEqual(readResult(dir), response)
-            assert.deepEqual(Object.keys(readResult(dir)).sort(), [
+            const result = readResult(dir)
+            assert.ok(typeof result === "object" && result !== null)
+            assert.deepEqual(Object.keys(result).sort(), [
                 "goalEnvelope",
                 "kind",
                 "message",

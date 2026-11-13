@@ -43,9 +43,9 @@ describe("baro launcher self-update", () => {
         assert.equal(skipReason({ ...base, liveRuns: 1 }), "another baro run is active")
     })
 
-    async function withStagedHome<T>(
-        run: (home: string) => Promise<T>,
-    ): Promise<T> {
+    async function withStagedHome(
+        run: (home: string) => Promise<void>,
+    ): Promise<void> {
         return withTempDir("baro-self-update-", async (root) => {
             const home = join(root, "home")
             const bin = join(root, "bin")

@@ -185,7 +185,6 @@ describe("Finalizer", () => {
             assert.deepEqual(state.levels.get(1), ["S1"])
 
             const storyResult = StoryResult.create({
-                storyId: "S1",
                 success: true,
                 attempts: 1,
                 durationSecs: 2,
@@ -197,7 +196,6 @@ describe("Finalizer", () => {
             await finalizer.onExternalEvent(
                 worker,
                 StoryResult.create({
-                    storyId: "S1",
                     success: false,
                     attempts: 1,
                     durationSecs: 1,
@@ -284,7 +282,10 @@ describe("Finalizer", () => {
             )
             assert.equal(state.objectiveVerification, null)
             await finalizer.onExternalEvent(verifier, verification)
-            assert.equal(state.objectiveVerification?.runId, runId)
+            // The null assertions above narrowed the property for the checker;
+            // a closure reads its declared type.
+            const accepted = () => state.objectiveVerification
+            assert.equal(accepted()?.runId, runId)
 
             const completed = RunCompleted.create({
                 success: true,

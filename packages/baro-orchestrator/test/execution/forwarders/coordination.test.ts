@@ -544,10 +544,11 @@ describe("CoordinationForwarder", () => {
             leaseId: "lease-1",
             workerId: "worker",
             generation: 1,
-            request: { storyId: "S1", prompt: "work", retries: 0, timeoutSecs: 60 },
+            request: { storyId: "S1", prompt: "work", model: "standard", retries: 0, timeoutSecs: 60 },
         })
         const release = WorkLeaseReleased.create({
             runId: "run-turns",
+            offerId: "offer-1",
             storyId: "S1",
             leaseId: "lease-1",
             workerId: "worker",
@@ -645,6 +646,7 @@ describe("CoordinationForwarder", () => {
             request: {
                 storyId: "S1",
                 prompt: "work",
+                model: "standard",
                 retries: 0,
                 timeoutSecs: 60,
             },
@@ -662,6 +664,7 @@ describe("CoordinationForwarder", () => {
                 broker,
                 WorkLeaseReleased.create({
                     runId: "run-quality",
+                    offerId: "offer-1",
                     storyId: "S1",
                     leaseId: "lease-1",
                     workerId: "worker",

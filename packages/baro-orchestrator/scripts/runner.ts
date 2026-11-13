@@ -831,20 +831,21 @@ export class RunnerProtocolController {
 
     handle(message: ToRunner): boolean {
         switch (message.t) {
+            // The open `{ t: string }` member keeps `t` from narrowing the union.
             case "dispatch_run":
-                this.dispatch(message)
+                this.dispatch(message as RunDispatchMsg)
                 return true
             case "cancel":
-                this.cancel(message)
+                this.cancel(message as Extract<ToRunner, { t: "cancel" }>)
                 return true
             case "agent_message":
-                this.agentMessage(message)
+                this.agentMessage(message as Extract<ToRunner, { t: "agent_message" }>)
                 return true
             case "conversation_message":
-                this.conversationMessage(message)
+                this.conversationMessage(message as Extract<ToRunner, { t: "conversation_message" }>)
                 return true
             case "confirm_mode":
-                this.confirmMode(message)
+                this.confirmMode(message as Extract<ToRunner, { t: "confirm_mode" }>)
                 return true
             default:
                 return false

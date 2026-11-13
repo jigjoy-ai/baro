@@ -280,6 +280,7 @@ describe("AgentTurnProjector", () => {
                 request: {
                     storyId: "S1",
                     prompt: "work",
+                    model: "standard",
                     retries: 0,
                     timeoutSecs: 60,
                 },
@@ -352,6 +353,7 @@ describe("AgentTurnProjector", () => {
                 request: {
                     storyId: correlation.storyId,
                     prompt: "work",
+                    model: "standard",
                     retries: 0,
                     timeoutSecs: 60,
                 },
@@ -464,6 +466,7 @@ describe("AgentTurnProjector", () => {
                 request: {
                     storyId: correlation.storyId,
                     prompt: "work",
+                    model: "standard",
                     retries: 1,
                     timeoutSecs: 60,
                 },

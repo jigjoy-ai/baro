@@ -120,7 +120,13 @@ describe("AttemptRecallRunner on the bus", () => {
             leaseId: `lease-${generation}`,
             workerId: "worker",
             generation,
-            request: { storyId, prompt: "migrate the DTOs", retries: 0, timeoutSecs: 60 },
+            request: {
+                storyId,
+                prompt: "migrate the DTOs",
+                model: "standard",
+                retries: 0,
+                timeoutSecs: 60,
+            },
         })
     }
 
@@ -146,7 +152,7 @@ describe("AttemptRecallRunner on the bus", () => {
         )
         env.publishFunctionCallOutput(
             agent,
-            FunctionCallOutputItem.rehydrate({ callId: "c1", output: "TS OK" }),
+            FunctionCallOutputItem.create("c1", "TS OK"),
         )
         env.publishFunctionCall(
             agent,
@@ -175,6 +181,31 @@ describe("AttemptRecallRunner on the bus", () => {
             "the path must mean the same thing in the new worktree",
         )
         assert.doesNotMatch(text, /\/private|\/var\/wt/u)
+    })
+
+    it("recalls a command that failed as failed", () => {
+        const { env, broker, delivered } = harness()
+        const agent = new FakeAgent("S2")
+        agent.join(env)
+        env.publishFunctionCall(
+            agent,
+            FunctionCallItem.rehydrate({
+                callId: "c1",
+                name: "Bash",
+                args: JSON.stringify({ command: "npm test" }),
+            }),
+        )
+        env.publishFunctionCallOutput(
+            agent,
+            FunctionCallOutputItem.create("c1", "error: 3 tests failed\nexit code 1"),
+        )
+
+        env.publish(broker, killed("S2"))
+        env.publish(broker, lease("S2", 2))
+
+        assert.equal(delivered.length, 1)
+        assert.match(delivered[0]!.text, /✗ npm test/u)
+        assert.doesNotMatch(delivered[0]!.text, /✓ npm test/u)
     })
 
     it("hands it over once, not to every later lease", () => {

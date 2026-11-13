@@ -263,7 +263,7 @@ describe("aggregate goal governance", () => {
         assert.equal(remediation.payload.invariantId, "G-A1")
         assert.deepEqual(remediation.payload.story.goalInvariantIds, ["G-A1"])
         assert.equal(
-            remediation.payload.story.acceptance[0],
+            remediation.payload.story.acceptance?.[0],
             `[G-A1] ${request.payload.basis.invariants[0]!.text}`,
         )
         assert.match(remediation.payload.reason, /run-level semantic review/i)
@@ -646,7 +646,7 @@ function completionRequest(
 }
 
 function aggregateCompletion(
-    request: ReturnType<typeof GoalAggregateReviewRequested.create>["data"],
+    request: ReturnType<typeof GoalAggregateReviewRequested.create>["payload"],
     status: "passed" | "failed" | "inconclusive",
 ) {
     return GoalAggregateReviewCompleted.create({

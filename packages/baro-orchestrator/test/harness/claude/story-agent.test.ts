@@ -73,7 +73,7 @@ process.stdin.resume()
                 timeoutSecs: FIXTURE_TIMEOUT_SECS,
                 quietTimeoutMs: 5,
             })
-            const terminalSources: BusMember[] = []
+            const terminalSources: Array<BusMember & { agentId?: string }> = []
             agent.setTerminalSourceRegistrar((source) => terminalSources.push(source))
 
             const outcome = await agent.run(env)

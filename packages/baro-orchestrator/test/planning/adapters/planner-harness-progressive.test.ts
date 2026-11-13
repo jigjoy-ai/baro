@@ -80,7 +80,10 @@ function record(value: unknown, label: string): Record<string, unknown> {
     return value as Record<string, unknown>
 }
 
-function toolPayload(response: JsonRpcResponse): Record<string, unknown> {
+function toolPayload(response: JsonRpcResponse): {
+    result: Record<string, unknown>
+    text: unknown
+} {
     assert.equal(response.error, undefined)
     const result = record(response.result, "tools/call must return an MCP result")
     const content = result.content
@@ -485,7 +488,10 @@ describe("progressive planner harness MCP", () => {
                 record(responses[1]!.result, "tool result").isError,
                 false,
             )
-            assert.equal(published[0]!.stories[0]!.title, "Compose the 🧩 plan")
+            assert.equal(
+                record(published[0]!.stories[0], "published story").title,
+                "Compose the 🧩 plan",
+            )
         } finally {
             await support.close()
         }

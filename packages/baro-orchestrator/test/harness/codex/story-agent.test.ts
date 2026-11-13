@@ -55,9 +55,7 @@ process.exit(0)
                 timeoutSecs: FIXTURE_TIMEOUT_SECS,
                 skipGitRepoCheck: true,
             })
-            const terminalSources: Array<BusMember & {
-                getPhase?(): string
-            }> = []
+            const terminalSources: Array<BusMember & { agentId?: string }> = []
             agent.setTerminalSourceRegistrar((source) => terminalSources.push(source))
 
             const outcome = await agent.run(env)
@@ -186,6 +184,7 @@ setTimeout(() => {
                         request: {
                             storyId: correlation.storyId,
                             prompt: "finish the candidate",
+                            model: "fake-model",
                             retries: 0,
                             timeoutSecs: FIXTURE_TIMEOUT_SECS,
                         },
@@ -296,6 +295,7 @@ setInterval(() => {}, 1000)
                         request: {
                             storyId: correlation.storyId,
                             prompt: "stage then wait",
+                            model: "fake-model",
                             retries: 0,
                             timeoutSecs: FIXTURE_TIMEOUT_SECS,
                         },
@@ -444,6 +444,7 @@ setTimeout(() => process.exit(0), 500)
                         request: {
                             storyId: correlation.storyId,
                             prompt: "finish without background work",
+                            model: "fake-model",
                             retries: 0,
                             timeoutSecs: FIXTURE_TIMEOUT_SECS,
                         },
@@ -500,7 +501,7 @@ process.exit(0)
             const env = captureEnv()
             const projector = source("projector")
             const critic = source("critic")
-            const terminalSources: BusMember[] = []
+            const terminalSources: Array<BusMember & { getPhase?(): string }> = []
             const originalPrompt = "Implement request cancellation and its race test."
             const agent = new CodexStoryAgent({
                 id: "story-codex-surgical",

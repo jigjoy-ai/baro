@@ -1,0 +1,10 @@
+{
+    "extends": "./tsconfig.json",
+    "compilerOptions": {
+        "noEmit": true,
+        "rootDir": ".",
+        "declaration": false,
+        "sourceMap": false
+    },
+    "include": ["src", "test", "scripts", "rstest.config.ts"]
+}

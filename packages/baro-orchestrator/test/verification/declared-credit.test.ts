@@ -71,7 +71,7 @@ describe("runner-flag allowlist", () => {
                                 "node --test --experimental-vm-modules test/x.test.ts",
                         },
                     ],
-                    ["npm"],
+                    [{ manager: "npm" }],
                 )
 
             assert.equal(trailing?.incompleteReason, undefined)
@@ -268,7 +268,7 @@ describe("verifyBuild declared-requirement crediting", () => {
                     { storyId: "S1", command: "jest test/a.test.ts" },
                     { storyId: "S2", command: "jest test/missing.test.ts" },
                 ],
-                ["npm"],
+                [{ manager: "npm" }],
             )
             assert.ok(credited?.incompleteReason)
             assert.ok(orphan?.incompleteReason)

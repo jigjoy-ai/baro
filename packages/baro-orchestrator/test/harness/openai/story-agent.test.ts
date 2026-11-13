@@ -26,6 +26,7 @@ import {
     type RuntimeReplanMutation,
 } from "../../../src/semantic-events.js"
 import { captureEnv, source, withTempDir } from "../../execution/helpers.js"
+import type { SemanticEvent } from "../../../src/runtime/mozaik.js"
 
 describe("OpenAIStoryAgent", () => {
     it("waits for a delayed authoritative review instead of completing on quiet", async () => {
@@ -473,7 +474,7 @@ describe("OpenAIStoryAgent", () => {
                 const address = server.address()
                 assert.notEqual(address, null)
                 assert.notEqual(typeof address, "string")
-                const port = typeof address === "object" ? address.port : 0
+                const port = typeof address === "object" && address !== null ? address.port : 0
                 const env = captureEnv()
                 const agent = new OpenAIStoryAgent(
                     {
@@ -628,7 +629,7 @@ describe("OpenAIStoryAgent", () => {
                 const address = server.address()
                 assert.notEqual(address, null)
                 assert.notEqual(typeof address, "string")
-                const port = typeof address === "object" ? address.port : 0
+                const port = typeof address === "object" && address !== null ? address.port : 0
                 const env = captureEnv()
                 const agent = new OpenAIStoryAgent(
                     {
@@ -1849,9 +1850,9 @@ function functionOutputCallIds(context: ModelContext): string[] {
         .map((item) => item.call_id)
 }
 
-async function waitFor<T>(
-    events: readonly unknown[],
-    guard: (event: unknown) => event is T,
+async function waitFor<T extends SemanticEvent<string, unknown>>(
+    events: readonly SemanticEvent<string, unknown>[],
+    guard: (event: SemanticEvent<string, unknown>) => event is T,
 ): Promise<T> {
     for (let attempt = 0; attempt < 100; attempt += 1) {
         const event = events.find(guard)
@@ -1861,9 +1862,9 @@ async function waitFor<T>(
     assert.fail("timed out waiting for semantic event")
 }
 
-async function waitForCount<T>(
-    events: readonly unknown[],
-    guard: (event: unknown) => event is T,
+async function waitForCount<T extends SemanticEvent<string, unknown>>(
+    events: readonly SemanticEvent<string, unknown>[],
+    guard: (event: SemanticEvent<string, unknown>) => event is T,
     count: number,
 ): Promise<T[]> {
     for (let attempt = 0; attempt < 100; attempt += 1) {

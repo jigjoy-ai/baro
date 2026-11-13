@@ -75,7 +75,7 @@ describe("DevinCliParticipant", () => {
         await withTempDir("baro-devin-", async (dir) => {
             const env = captureEnv()
             env.publishFunctionCallOutput =
-                (() => {}) as typeof env.deliverFunctionCallOutput
+                (() => {}) as typeof env.publishFunctionCallOutput
             const participant = new DevinCliParticipant("S1", { cwd: dir, prompt: "touch a", devinBin: writeFakeDevin(dir, "story") })
             participant.start(env)
             await participant.ready

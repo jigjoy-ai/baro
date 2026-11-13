@@ -196,7 +196,6 @@ describe("one file, one name across worktrees", () => {
         assert.equal(delivered[0]!.metadata.collides, true, "same file, different worktree")
         assert.match(delivered[0]!.text, /internal\/order\/x_test\.go/u)
         assert.doesNotMatch(delivered[0]!.text, /\/tmp\/wt/u, "a worktree path means nothing to the reader")
-        runner.stop?.()
     })
 
     // The fix above still reported absolute paths in the next live run: the

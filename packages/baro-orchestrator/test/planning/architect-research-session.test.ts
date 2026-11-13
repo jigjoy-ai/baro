@@ -3,11 +3,11 @@ import { chmodSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, it } from "@rstest/core"
 
+import type { SemanticEvent } from "../../src/runtime/mozaik.js"
 import { CoordinationBus, BusMember } from "../../src/runtime/coordination.js"
 import {
     ScoutDispatched,
     ScoutFindingPublished,
-    type SemanticEvent,
 } from "../../src/semantic-events.js"
 import { runArchitectResearchSession } from "../../src/planning/adapters/architect-research-session.js"
 import { withTempDir } from "../execution/helpers.js"

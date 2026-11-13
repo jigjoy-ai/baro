@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url"
 import { join } from "node:path"
 import { describe, it } from "@rstest/core"
 
+import type { BaroEvent } from "../src/tui-protocol.js"
 import { withTempDir } from "./execution/helpers.js"
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url))
@@ -18,6 +19,9 @@ const GAP_LINE =
 
 const SUSPENDED_MS = 4 * 60 * 60 * 1_000
 const PHASE_BUDGET_MS = 4_000
+// The absorb case finishes in about a second; its budget only has to be far
+// below the suspend, so a loaded machine does not trip it for real.
+const ABSORB_BUDGET_MS = 60_000
 
 const DECISION_DOCUMENT = `## Existing context
 The fixture repository has one provider-neutral contract.
@@ -44,7 +48,7 @@ describe("run-architect awake phase budget", () => {
             })
             const run = await runArchitect(dir, [
                 "--codex-bin", binary,
-                "--timeout-ms", String(PHASE_BUDGET_MS),
+                "--timeout-ms", String(ABSORB_BUDGET_MS),
             ], writeSuspendPreload(dir, marker))
 
             assert.equal(run.code, 0, run.stderr)
@@ -90,10 +94,7 @@ describe("run-architect awake phase budget", () => {
     })
 })
 
-interface GapEvent {
-    type: "suspension_gap_absorbed"
-    gap_ms: number
-}
+type GapEvent = Extract<BaroEvent, { type: "suspension_gap_absorbed" }>
 
 function gapEvents(stdout: string): GapEvent[] {
     return stdout

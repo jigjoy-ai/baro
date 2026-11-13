@@ -9,6 +9,8 @@ import { join } from "node:path"
 import { request as httpRequest } from "node:http"
 import { describe, it } from "@rstest/core"
 
+import type { SemanticEvent } from "../../src/runtime/mozaik.js"
+
 import { inboxFilenameForAgentId } from "../../scripts/collaboration-inbox-path.mjs"
 import { CollaborationBridge } from "../../src/execution/collaboration-bridge.js"
 import { CollectiveBoard } from "../../src/execution/collective-board.js"
@@ -647,7 +649,7 @@ describe("CollaborationBridge", () => {
                     leaseId: "lease-S1",
                     storyId: "S1",
                     workerId: "worker",
-                    reason: "completed",
+                    reason: "integrated",
                 }),
             )
             await bridge.idle()
@@ -720,7 +722,7 @@ describe("CollaborationBridge", () => {
                     leaseId: "lease-S1",
                     storyId: "S1",
                     workerId: "worker",
-                    reason: "completed",
+                    reason: "integrated",
                 }),
             )
             await bridge.idle()
@@ -810,6 +812,7 @@ describe("CollaborationBridge", () => {
                 mappings: [],
                 integrations: [],
                 qualities: [],
+                aggregateReviews: [],
                 challenges: [{
                     challengeId: "challenge-durable",
                     invariantId: "G-A1",
@@ -2302,7 +2305,7 @@ function releaseLease(
             leaseId,
             storyId,
             workerId: "worker",
-            reason: "test release",
+            reason: "aborted",
         }),
     )
 }
@@ -2419,9 +2422,9 @@ function stalledBrokerPost(capability: TestCapability): {
     return { headersSent, settled }
 }
 
-async function waitFor<T>(
-    events: readonly unknown[],
-    guard: (event: unknown) => event is T,
+async function waitFor<T extends SemanticEvent<string, unknown>>(
+    events: readonly SemanticEvent<string, unknown>[],
+    guard: (event: SemanticEvent<string, unknown>) => event is T,
 ): Promise<T> {
     for (let attempt = 0; attempt < 200; attempt += 1) {
         const event = events.find(guard)
@@ -2448,7 +2451,7 @@ async function waitForGone(path: string): Promise<void> {
 }
 
 async function waitForProposal(
-    events: readonly unknown[],
+    events: readonly SemanticEvent<string, unknown>[],
     proposalId: string,
 ): Promise<ReturnType<typeof RuntimeReplanProposed.create>> {
     for (let attempt = 0; attempt < 200; attempt += 1) {

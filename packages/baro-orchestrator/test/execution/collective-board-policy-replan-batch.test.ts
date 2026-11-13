@@ -3,6 +3,8 @@ import { readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, it } from "@rstest/core"
 
+import type { SemanticEvent } from "../../src/runtime/mozaik.js"
+
 import type { PrdFile, PrdStory } from "../../src/prd.js"
 import { CollectiveBoard } from "../../src/execution/collective-board.js"
 import {
@@ -1281,7 +1283,7 @@ function singleStoryPrd(id: string): PrdFile {
     }
 }
 
-function story(id: string, priority: number, dependsOn: readonly string[]): PrdStory {
+function story(id: string, priority: number, dependsOn: string[]): PrdStory {
     return {
         id,
         priority,
@@ -1451,16 +1453,16 @@ function readPrd(path: string): PrdFile {
     return JSON.parse(readFileSync(path, "utf8")) as PrdFile
 }
 
-async function waitFor<T>(
-    events: readonly unknown[],
-    guard: (event: unknown) => event is T,
+async function waitFor<T extends SemanticEvent<string, unknown>>(
+    events: readonly SemanticEvent<string, unknown>[],
+    guard: (event: SemanticEvent<string, unknown>) => event is T,
 ): Promise<T> {
     return (await waitForCount(events, guard, 1))[0]!
 }
 
-async function waitForCount<T>(
-    events: readonly unknown[],
-    guard: (event: unknown) => event is T,
+async function waitForCount<T extends SemanticEvent<string, unknown>>(
+    events: readonly SemanticEvent<string, unknown>[],
+    guard: (event: SemanticEvent<string, unknown>) => event is T,
     count: number,
 ): Promise<T[]> {
     for (let attempt = 0; attempt < 100; attempt += 1) {

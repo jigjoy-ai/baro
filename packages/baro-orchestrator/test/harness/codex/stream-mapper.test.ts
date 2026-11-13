@@ -5,6 +5,7 @@ import {
     FunctionCallItem,
     FunctionCallOutputItem,
     ModelMessageItem,
+    SemanticEvent,
     toWire,
 } from "../../../src/runtime/mozaik.js"
 
@@ -28,8 +29,14 @@ function json(item: unknown): any {
     return JSON.parse(JSON.stringify(toWire(item as Parameters<typeof toWire>[0])))
 }
 
+function semanticEvents(items: readonly unknown[]): SemanticEvent<string, unknown>[] {
+    return items.filter(
+        (item): item is SemanticEvent<string, unknown> => item instanceof SemanticEvent,
+    )
+}
+
 function itemEvents(items: unknown[]) {
-    return items.filter(CodexItemEvent.is).map((item) => item.payload)
+    return semanticEvents(items).filter(CodexItemEvent.is).map((item) => item.payload)
 }
 
 function assertNoMozaikBuiltins(items: unknown[]) {
@@ -66,7 +73,7 @@ describe("mapCodexEvent", () => {
     it("maps thread.started to CodexSystem and returns thread id", () => {
         const event = { type: "thread.started", thread_id: "thread-1" }
         const result = map(event)
-        const system = result.items.find(CodexSystem.is)
+        const system = semanticEvents(result.items).find(CodexSystem.is)
 
         assert.equal(result.threadId, "thread-1")
         assert.ok(system)
@@ -78,7 +85,7 @@ describe("mapCodexEvent", () => {
     it("maps thread.completed to CodexSystem", () => {
         const event = { type: "thread.completed" }
         const result = map(event)
-        const system = result.items.find(CodexSystem.is)
+        const system = semanticEvents(result.items).find(CodexSystem.is)
 
         assert.ok(system)
         assert.equal(system.payload.agentId, agentId)
@@ -90,7 +97,7 @@ describe("mapCodexEvent", () => {
         for (const phase of ["started", "completed", "failed"]) {
             const event = { type: `turn.${phase}` }
             const result = map(event)
-            const turn = result.items.find(CodexTurnEvent.is)
+            const turn = semanticEvents(result.items).find(CodexTurnEvent.is)
 
             assert.ok(turn)
             assert.equal(turn.payload.agentId, agentId)
@@ -102,7 +109,7 @@ describe("mapCodexEvent", () => {
     it("maps error envelopes to CodexSystem", () => {
         const event = { type: "error", message: "bad request" }
         const result = map(event)
-        const system = result.items.find(CodexSystem.is)
+        const system = semanticEvents(result.items).find(CodexSystem.is)
 
         assert.ok(system)
         assert.equal(system.payload.agentId, agentId)
@@ -270,7 +277,7 @@ describe("mapCodexEvent", () => {
     it("maps unknown envelope types to CodexUnknownEvent", () => {
         const event = { type: "unexpected.event", payload: true }
         const result = map(event)
-        const unknown = result.items.find(CodexUnknownEvent.is)
+        const unknown = semanticEvents(result.items).find(CodexUnknownEvent.is)
 
         assert.ok(unknown)
         assert.equal(unknown.payload.agentId, agentId)

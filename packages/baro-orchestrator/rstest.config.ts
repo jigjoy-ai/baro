@@ -29,7 +29,7 @@ const PROCESS_TESTS = [
     "test/**/*scripts-smoke*.test.ts",
     "test/**/*progressive-cli-smoke*.test.ts",
     "test/**/*story-tool-containment*.test.ts",
-    "test/**/*run-architect-outcome*.test.ts",
+    "test/**/*run-architect-*.test.ts",
     "test/**/*run-conversation-script*.test.ts",
     "test/**/*runner-protocol*.test.ts",
     "test/**/*runner-helpers*.test.ts",

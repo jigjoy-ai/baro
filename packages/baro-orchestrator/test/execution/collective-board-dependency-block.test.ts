@@ -29,6 +29,7 @@ import {
     WorkspaceCleanupRequested,
 } from "../../src/semantic-events.js"
 import { joinWithCapture, source, withTempDir } from "./helpers.js"
+import type { SemanticEvent } from "../../src/runtime/mozaik.js"
 
 describe("CollectiveBoard dependency suspension", () => {
     it("suspends a story whose own replan adds its prerequisite (#199)", async () => {
@@ -229,7 +230,7 @@ describe("CollectiveBoard dependency suspension", () => {
                 env.events.some(
                     (event) =>
                         ConductorState.is(event) &&
-                        event.payload.detail.includes("healing action"),
+                        event.payload.detail?.includes("healing action"),
                 ),
                 false,
             )
@@ -601,9 +602,9 @@ async function answerNewContexts(
     assert.fail("timed out waiting for work context request")
 }
 
-async function waitFor<T>(
-    events: readonly unknown[],
-    guard: (event: unknown) => event is T,
+async function waitFor<T extends SemanticEvent<string, unknown>>(
+    events: readonly SemanticEvent<string, unknown>[],
+    guard: (event: SemanticEvent<string, unknown>) => event is T,
 ): Promise<T> {
     for (let attempt = 0; attempt < 300; attempt += 1) {
         const found = events.find(guard)
@@ -613,9 +614,9 @@ async function waitFor<T>(
     assert.fail("timed out waiting for event")
 }
 
-async function waitForCount<T>(
-    events: readonly unknown[],
-    guard: (event: unknown) => event is T,
+async function waitForCount<T extends SemanticEvent<string, unknown>>(
+    events: readonly SemanticEvent<string, unknown>[],
+    guard: (event: SemanticEvent<string, unknown>) => event is T,
     count: number,
 ): Promise<T[]> {
     for (let attempt = 0; attempt < 300; attempt += 1) {

@@ -1630,7 +1630,7 @@ function offerAndClaim(
 
 function successfulResult(
     runId: string,
-    lease: ReturnType<typeof WorkLeaseGranted.create>["data"],
+    lease: ReturnType<typeof WorkLeaseGranted.create>["payload"],
 ): ReturnType<typeof StoryResult.create> {
     return StoryResult.create({
         storyId: lease.request.storyId,
@@ -1646,7 +1646,7 @@ function successfulResult(
 
 function passedQuality(
     runId: string,
-    lease: ReturnType<typeof WorkLeaseGranted.create>["data"],
+    lease: ReturnType<typeof WorkLeaseGranted.create>["payload"],
 ): ReturnType<typeof StoryQualityCompleted.create> {
     return StoryQualityCompleted.create({
         runId,

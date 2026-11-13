@@ -4,6 +4,7 @@ import { describe, it } from "@rstest/core"
 import {
     MAX_REPOSITORY_BRIEF_BYTES,
     validateRepositoryBriefV1,
+    type RepositoryFactV1,
 } from "../../../src/conversation/session/repository-brief.js"
 
 describe("RepositoryBriefV1", () => {
@@ -89,17 +90,20 @@ describe("RepositoryBriefV1", () => {
     })
 })
 
+type MutableFact = { -readonly [K in keyof RepositoryFactV1]: RepositoryFactV1[K] }
+
 function validBrief() {
+    const facts: MutableFact[] = [{
+        statement: "The goal term appears here.",
+        evidencePath: "src/index.ts",
+        line: 7,
+        confidence: "high",
+    }]
     return {
         schemaVersion: 1 as const,
         snapshotId: `sha256:${"a".repeat(64)}`,
         summary: "Bounded repository evidence.",
-        facts: [{
-            statement: "The goal term appears here.",
-            evidencePath: "src/index.ts",
-            line: 7,
-            confidence: "high" as const,
-        }],
+        facts,
         relevantPaths: ["src/index.ts"],
         unknowns: ["Runtime behavior was not executed."],
         truncated: false,

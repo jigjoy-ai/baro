@@ -389,6 +389,7 @@ describe("ProgressForwarder", () => {
                 broker,
                 WorkLeaseReleased.create({
                     runId: "run-1",
+                    offerId: "offer-1",
                     storyId: "S1",
                     leaseId: "lease-1",
                     workerId: "worker-1",
