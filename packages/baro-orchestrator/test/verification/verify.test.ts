@@ -354,6 +354,42 @@ setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_0
         })
     })
 
+    // #286: a package whose `test` is its whole suite ran for half an hour as a gate.
+    it("runs the script a package names for a gate, and the plain one when the name is not a script", async () => {
+        await withTempDir("baro-verify-gate-script-", async (dir) => {
+            writeFileSync(
+                join(dir, "package.json"),
+                JSON.stringify({ name: "root", private: true, workspaces: ["packages/*"] }),
+            )
+            const pkg = (name: string, manifest: Record<string, unknown>): void => {
+                mkdirSync(join(dir, "packages", name), { recursive: true })
+                writeFileSync(join(dir, "packages", name, "package.json"), JSON.stringify({ name, ...manifest }))
+            }
+            pkg("named", {
+                scripts: { test: "node -e 1", "test:fast": "node -e 2", build: "node -e 3" },
+                baro: { verification: { scripts: { test: "test:fast" } } },
+            })
+            pkg("typo", {
+                scripts: { test: "node -e 1" },
+                baro: { verification: { scripts: { test: "test:quick" } } },
+            })
+            pkg("only-fast", {
+                scripts: { "test:fast": "node -e 2" },
+                baro: { verification: { scripts: { test: "test:fast" } } },
+            })
+
+            assert.deepEqual(
+                createVerifyPlan(dir).commands.map(({ label, args }) => ({ label, script: args.at(-1) })),
+                [
+                    { label: "npm run build (packages/named)", script: "build" },
+                    { label: "npm run test:fast (packages/named)", script: "test:fast" },
+                    { label: "npm run test:fast (packages/only-fast)", script: "test:fast" },
+                    { label: "npm run test (packages/typo)", script: "test" },
+                ],
+            )
+        })
+    })
+
     it("refreshes stale dependencies without letting baro-ai's postinstall replace the installed baro (#262)", async () => {
         await withTempDir("baro-verify-refresh-env-", async (dir) => {
             writeFileSync(

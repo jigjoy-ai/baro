@@ -220,6 +220,8 @@ export interface VerifyBuildOptions {
     storyExecutorsActive?: () => boolean
     /** Run only detected commands whose ecosystem changed since this commit (change-scope.ts). */
     changedSince?: string | null
+    /** With `changedSince`: also skip workspace packages the change cannot reach. */
+    scopeByPackage?: boolean
     /** Test seam: lowers the ABSOLUTE_COMMAND_TIMEOUT_MS ceiling floor. */
     ceilingFloorMs?: number
     /** Overrides `cwd`, re-read per spawn; see command-cwd.ts `spawnRunCwd`. */
@@ -243,6 +245,7 @@ interface PackageManifest {
     name?: unknown
     packageManager?: unknown
     scripts?: Record<string, unknown>
+    baro?: { verification?: { scripts?: unknown } }
     workspaces?: unknown
     dependencies?: unknown
     devDependencies?: unknown
@@ -336,6 +339,26 @@ function packageManagerCommand(
         }
     }
     return { tool: pm, args: ["run", script, ...trailingArgs] }
+}
+
+/**
+ * The script a gate runs in a package. A package whose `test` is its whole
+ * suite can name the part meant for a gate in its own manifest:
+ * `"baro": { "verification": { "scripts": { "test": "test:fast" } } }`.
+ * A name that is not one of the package's scripts is ignored.
+ */
+function gateScript(
+    manifest: PackageManifest | null | undefined,
+    gate: "build" | "typecheck" | "test" | "lint",
+): string | null {
+    const scripts = manifest?.scripts ?? {}
+    const declared = manifest?.baro?.verification?.scripts
+    const override =
+        declared && typeof declared === "object"
+            ? (declared as Record<string, unknown>)[gate]
+            : undefined
+    if (typeof override === "string" && typeof scripts[override] === "string") return override
+    return typeof scripts[gate] === "string" ? gate : null
 }
 
 function readPackageManifest(path: string): PackageManifest | null {
@@ -534,13 +557,14 @@ function detectCommands(cwd: string): DetectedVerifyPlan {
                 preflightFailure: `${displayCwd}/package.json is not valid JSON`,
             })
         }
-        for (const script of managerResolutionFailed
+        for (const gate of managerResolutionFailed
             ? []
             : (["build", "typecheck", "test", "lint"] as const)) {
-            if (typeof scripts[script] === "string") {
-                const command = packageManagerCommand(pm, declared, script)
+            const rootScript = gateScript(manifest, gate)
+            if (rootScript) {
+                const command = packageManagerCommand(pm, declared, rootScript)
                 cmds.push({
-                    label: `${pm} run ${script}`,
+                    label: `${pm} run ${rootScript}`,
                     ...command,
                 })
                 continue
@@ -550,7 +574,8 @@ function detectCommands(cwd: string): DetectedVerifyPlan {
             // each package that explicitly declares the command; otherwise a
             // monorepo such as Baro would silently check only its Rust half.
             for (const workspace of workspaces) {
-                if (typeof workspace.manifest?.scripts?.[script] !== "string") continue
+                const script = gateScript(workspace.manifest, gate)
+                if (!script) continue
                 const displayCwd = relative(cwd, workspace.cwd).replace(/\\/g, "/")
                 const command = packageManagerCommand(pm, declared, script)
                 cmds.push({
@@ -1521,7 +1546,13 @@ export async function verifyBuild(
     const emitActivity = options.emitActivity ?? emit
     const ceilingFor = createCeilingResolver(cwd, hostRepoRoot, options.ceilingFloorMs)
     const scoped = options.changedSince
-        ? scopeCommandsToChange(plan.commands, changedPathsSince(cwd, options.changedSince), cwd)
+        ? scopeCommandsToChange(
+              plan.commands,
+              changedPathsSince(cwd, options.changedSince),
+              cwd,
+              process.env,
+              { byPackage: options.scopeByPackage === true },
+          )
         : { run: plan.commands, notAffected: [] }
     if (scoped.notAffected.length > 0) {
         emitActivity({

@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { tmpdir } from "node:os"
 import { describe, it } from "@rstest/core"
 
-import { ContinuousGateRunner } from "../../src/verification/continuous-gate-runner.js"
+import { ContinuousGateRunner, gateCommandOutcomes } from "../../src/verification/continuous-gate-runner.js"
 import type { GateCommandOutcome } from "../../src/verification/continuous-gate.js"
 import type { VerifyPlan } from "../../src/verification/verify.js"
 
@@ -221,6 +221,22 @@ describe("the gate runs when it is worth running, not constantly", () => {
         assert.doesNotMatch(text, /FAIL/u)
         assert.doesNotMatch(text, /cargo build/u)
         h.runner.stop()
+    })
+
+    it("carries a command stopped at the host's ceiling as unfinished, and drops one that never ran", () => {
+        assert.deepEqual(
+            gateCommandOutcomes([
+                { command: "npm run build", status: "passed" },
+                { command: "npm run test", status: "failed", tail: "npm timed out after 600000ms", timedOut: true },
+                { command: "npm run lint", status: "failed", tail: "1 problem" },
+                { command: "cargo build", status: "skipped", tail: "cargo is not installed" },
+            ]),
+            [
+                { label: "npm run build", passed: true, detail: "" },
+                { label: "npm run test", passed: false, detail: "npm timed out after 600000ms", timedOut: true },
+                { label: "npm run lint", passed: false, detail: "1 problem" },
+            ],
+        )
     })
 
     it("treats a signal death as our failure, not the agent's", async () => {

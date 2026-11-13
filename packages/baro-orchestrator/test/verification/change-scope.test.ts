@@ -98,6 +98,91 @@ describe("scopeCommandsToChange", () => {
     })
 })
 
+// #286: a six-file change in one package built, type-checked and tested all four.
+describe("scopeCommandsToChange within a JavaScript workspace", () => {
+    function workspace(root: string): Record<"core" | "app" | "site" | "lint", VerifyCommandSpec> {
+        writeFileSync(join(root, "package.json"), JSON.stringify({ workspaces: ["packages/*"] }))
+        const pkg = (dir: string, manifest: Record<string, unknown>): void => {
+            mkdirSync(join(root, "packages", dir, "src"), { recursive: true })
+            writeFileSync(join(root, "packages", dir, "package.json"), JSON.stringify(manifest))
+        }
+        pkg("core", { name: "@t/core" })
+        pkg("app", { name: "@t/app", dependencies: { "@t/core": "*" } })
+        pkg("site", { name: "@t/site", devDependencies: { left: "1.0.0" } })
+        const test = (dir: string): VerifyCommandSpec => ({
+            label: `npm run test (packages/${dir})`,
+            tool: "npm",
+            args: ["run", "test"],
+            cwd: join(root, "packages", dir),
+        })
+        return {
+            core: test("core"),
+            app: test("app"),
+            site: test("site"),
+            lint: { label: "npm run lint", tool: "npm", args: ["run", "lint"] },
+        }
+    }
+    const labels = (commands: readonly VerifyCommandSpec[]): string[] => commands.map((c) => c.label)
+
+    it("runs the changed package and leaves the others out", async () => {
+        await withTempDir("baro-scope-pkg-", async (root) => {
+            const { core, app, site, lint } = workspace(root)
+            const scoped = scopeCommandsToChange([core, app, site, lint], ["packages/app/src/a.ts"], root, {}, { byPackage: true })
+            assert.deepEqual(labels(scoped.run), ["npm run test (packages/app)", "npm run lint"])
+            assert.deepEqual(labels(scoped.notAffected), ["npm run test (packages/core)", "npm run test (packages/site)"])
+        })
+    })
+
+    it("also runs every package that depends on the changed one", async () => {
+        await withTempDir("baro-scope-pkg-", async (root) => {
+            const { core, app, site, lint } = workspace(root)
+            const scoped = scopeCommandsToChange([core, app, site, lint], ["packages/core/src/a.ts"], root, {}, { byPackage: true })
+            assert.deepEqual(labels(scoped.run), [
+                "npm run test (packages/core)",
+                "npm run test (packages/app)",
+                "npm run lint",
+            ])
+            assert.deepEqual(labels(scoped.notAffected), ["npm run test (packages/site)"])
+        })
+    })
+
+    it("runs every package for a change outside all of them", async () => {
+        await withTempDir("baro-scope-pkg-", async (root) => {
+            const { core, app, site, lint } = workspace(root)
+            for (const shared of ["package-lock.json", "tsconfig.base.json", "package.json"]) {
+                const scoped = scopeCommandsToChange([core, app, site, lint], ["packages/app/src/a.ts", shared], root, {}, { byPackage: true })
+                assert.deepEqual(scoped.notAffected, [], shared)
+            }
+        })
+    })
+
+    it("scopes nothing when a package manifest cannot be read, or a command is not in a known package", async () => {
+        await withTempDir("baro-scope-pkg-", async (root) => {
+            const { core, app, site, lint } = workspace(root)
+            const stray: VerifyCommandSpec = { ...site, label: "stray", cwd: "/elsewhere/packages/site" }
+            assert.deepEqual(
+                labels(scopeCommandsToChange([core, stray, lint], ["packages/app/src/a.ts"], root, {}, { byPackage: true }).run),
+                ["stray", "npm run lint"],
+            )
+
+            writeFileSync(join(root, "packages", "site", "package.json"), "{ not json")
+            assert.deepEqual(
+                scopeCommandsToChange([core, app, site, lint], ["packages/app/src/a.ts"], root, {}, { byPackage: true }).notAffected,
+                [],
+            )
+        })
+    })
+    it("leaves the packages alone unless asked: a run-level gate checks the whole ecosystem", async () => {
+        await withTempDir("baro-scope-pkg-", async (root) => {
+            const { core, app, site, lint } = workspace(root)
+            assert.deepEqual(
+                scopeCommandsToChange([core, app, site, lint], ["packages/app/src/a.ts"], root, {}).notAffected,
+                [],
+            )
+        })
+    })
+})
+
 describe("verifyBuild scoped to a change", () => {
     it("runs only the commands of what changed since the base commit", async () => {
         await withTempDir("baro-scope-git-", async (root) => {
