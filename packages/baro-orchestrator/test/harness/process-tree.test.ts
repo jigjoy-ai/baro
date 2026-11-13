@@ -260,6 +260,80 @@ describe("process-tree discovery", () => {
         },
     )
 
+    it.skipIf(process.platform === "win32")("certifies an ordinary exit from the group probe, without a process-table read",
+        async () => {
+            const child = spawn(process.execPath, ["-e", ""], {
+                stdio: "ignore",
+                detached: true,
+            })
+            const tree = new ManagedProcessTree(child, { ownsProcessGroup: true })
+            const before = processTreeObserverStats()
+            child.once("exit", () => tree.markRootClosed())
+
+            assert.deepEqual(await tree.quiescenceObservation, {
+                assurance: "cooperative-observed",
+                mechanism: "posix-owned-group-plus-identity-table",
+                groupAbsent: true,
+                trackedAbsent: true,
+            })
+            assert.equal(
+                processTreeObserverStats().terminalTableReads,
+                before.terminalTableReads,
+            )
+        },
+    )
+
+    it.skipIf(process.platform === "win32")("reads the process table when a group member outlives the root",
+        async () => {
+            const survivorProgram =
+                'process.on("SIGTERM", () => {}); console.log("ready"); setInterval(() => {}, 1000);'
+            const shimProgram = [
+                'const { spawn } = require("node:child_process");',
+                `const child = spawn(process.execPath, ["-e", ${JSON.stringify(survivorProgram)}], { stdio: ["ignore", "pipe", "ignore"] });`,
+                'child.stdout.once("data", () => { console.log(child.pid); process.exit(0); });',
+            ].join("")
+            const shim = spawn(process.execPath, ["-e", shimProgram], {
+                stdio: ["ignore", "pipe", "ignore"],
+                detached: true,
+            })
+            const tree = new ManagedProcessTree(shim, {
+                ownsProcessGroup: true,
+                terminationGraceMs: 100,
+                pollIntervalMs: 10,
+            })
+            let survivorPid: number | undefined
+            try {
+                const exited = new Promise<void>((resolve) => {
+                    shim.once("exit", () => resolve())
+                })
+                survivorPid = await firstNumericLine(shim)
+                await exited
+                const before = processTreeObserverStats()
+
+                tree.markRootClosed()
+
+                assert.equal(
+                    processTreeObserverStats().terminalTableReads,
+                    before.terminalTableReads + 1,
+                )
+                assert.equal(activeProcessTreeCount(), 1)
+                assert.equal(isAlive(survivorPid), true)
+
+                assert.equal(await tree.terminateAndWait("SIGKILL"), true)
+                await waitForPidExit(survivorPid)
+            } finally {
+                tree.terminate("SIGKILL")
+                if (survivorPid !== undefined) {
+                    try {
+                        process.kill(survivorPid, "SIGKILL")
+                    } catch {
+                        // already exited
+                    }
+                }
+            }
+        },
+    )
+
     it("returns false for a tree without OS-level group ownership", async () => {
         const child = spawn(
             process.execPath,

@@ -136,27 +136,48 @@ export function cpuAdvanced(
     return current.totalCpuMs! - previous.totalCpuMs! >= required
 }
 
+/** How long a command must live before its CPU baseline is read. */
+export const CPU_BASELINE_DELAY_MS = 250
+
+export interface DefaultCpuActivityProbeOptions {
+    baselineDelayMs?: number
+    /** False once the root has exited; the baseline is then never read. */
+    stillRunning?: () => boolean
+}
+
 /**
- * Default probe for the idle watchdog. The spawn-time sample is what lets the
+ * Default probe for the idle watchdog. The early sample is what lets the
  * FIRST expiry be measured instead of assumed, so a silent, idle command dies
- * at the end of its first no-output window rather than the second.
+ * at the end of its first no-output window rather than the second. It is read
+ * a moment after spawn, not at spawn: most commands (every git call) are gone
+ * by then and never pay for a process-table read.
  */
 export function createDefaultCpuActivityProbe(
     rootPid: number | undefined,
     clock: AwakeClock = sharedAwakeClock(),
     readTable: ProcessCpuTableReader = defaultReadTable,
+    options: DefaultCpuActivityProbeOptions = {},
 ): CpuActivityProbe {
-    const baseline: Promise<CpuActivitySample> =
+    let baseline: Promise<CpuActivitySample> | null =
         rootPid === undefined
             ? Promise.resolve({
                   at: clock.awakeNow(),
                   totalCpuMs: null,
                   observed: false,
               })
-            : sampleProcessTreeCpu(rootPid, readTable, clock)
+            : null
+    const readBaseline = (pid: number): Promise<CpuActivitySample> =>
+        (baseline ??= sampleProcessTreeCpu(pid, readTable, clock))
+    if (rootPid !== undefined) {
+        const stillRunning = options.stillRunning ?? (() => pidAnswers(rootPid))
+        const timer = setTimeout(() => {
+            if (stillRunning()) void readBaseline(rootPid)
+        }, options.baselineDelayMs ?? CPU_BASELINE_DELAY_MS)
+        timer.unref?.()
+    }
     let windowAbsorbedMs = clock.absorbedGapMs()
     return async (pid, previous) => {
-        const reference = previous ?? (await baseline)
+        const reference = previous ?? (await readBaseline(pid))
         const current = await sampleProcessTreeCpu(pid, readTable, clock)
         clock.sample()
         const absorbedMs = clock.absorbedGapMs()
@@ -166,5 +187,14 @@ export function createDefaultCpuActivityProbe(
         // gap in it is no evidence of a hang. Re-baseline from this sample.
         if (sleptThrough) return { active: true, sample: current }
         return { active: cpuAdvanced(reference, current), sample: current }
+    }
+}
+
+function pidAnswers(pid: number): boolean {
+    try {
+        process.kill(pid, 0)
+        return true
+    } catch (error) {
+        return (error as NodeJS.ErrnoException).code === "EPERM"
     }
 }
