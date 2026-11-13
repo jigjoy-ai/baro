@@ -185,6 +185,43 @@ describe("shell containment — one rule, the native lane and the Claude hook", 
         })
     })
 
+    it("reads through a dependency link into the run's integration worktree, and into nothing else", async () => {
+        await withTempDir("shell-containment-run-deps-", async (dir) => {
+            const origin = join(dir, "origin")
+            const story = join(dir, "run-1", "S1", "origin")
+            const integration = join(dir, "run-1", "__run", "origin")
+            const elsewhere = join(dir, "elsewhere", "node_modules")
+            mkdirSync(origin)
+            const git = (...args: string[]) =>
+                execFileSync("git", args, { cwd: origin, stdio: "ignore" })
+            git("init")
+            writeFileSync(join(origin, "README.md"), "base\n")
+            git("add", "-A")
+            git("-c", "user.name=Baro", "-c", "user.email=baro@example.invalid", "commit", "-m", "base")
+            git("worktree", "add", "-b", "run-branch", integration)
+            git("worktree", "add", "-b", "story-run-deps", story)
+            mkdirSync(join(integration, "node_modules", "fx"), { recursive: true })
+            writeFileSync(join(integration, "node_modules", "fx", "index.js"), "ok\n")
+            symlinkSync(join(integration, "node_modules"), join(story, "node_modules"), "dir")
+
+            const linked = hookShellAccessContext(story, null)
+            assert.equal(shellContainmentRefusal(story, "cat node_modules/fx/index.js", linked), null)
+            assert.match(
+                shellContainmentRefusal(story, "cp README.md node_modules/fx/index.js", linked) ?? "",
+                /escapes the project/,
+            )
+
+            rmSync(join(story, "node_modules"))
+            mkdirSync(join(elsewhere, "fx"), { recursive: true })
+            writeFileSync(join(elsewhere, "fx", "index.js"), "ok\n")
+            symlinkSync(elsewhere, join(story, "node_modules"), "dir")
+            assert.match(
+                shellContainmentRefusal(story, "cat node_modules/fx/index.js", hookShellAccessContext(story, null)) ?? "",
+                /escapes the project/,
+            )
+        })
+    })
+
     it("a story with no write surface is contained too", async () => {
         await withTempDir("shell-containment-guard-only-", async (dir) => {
             const worktree = join(dir, "wt")

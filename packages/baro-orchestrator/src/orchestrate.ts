@@ -866,7 +866,13 @@ export async function orchestrate(
     }
     const integrationRoot = integrationWorktree?.integrationRoot ?? repoRoot
     try {
-        await materializeDependencies({ hostRoot: repoRoot, integrationRoot })
+        const { workspaces } = await materializeDependencies({ hostRoot: repoRoot, integrationRoot })
+        for (const workspace of workspaces) {
+            if (workspace.action === "skipped") continue
+            const line = `[deps] ${workspace.action} in ${workspace.dir} (${workspace.reason})`
+            process.stderr.write(`${line}\n`)
+            if (emitTui) emit({ type: "story_log", id: "_git", line })
+        }
     } catch (error) {
         // Verification's own dependency refresh is still the safety net.
         const line = `warn: could not reuse host dependencies: ${error instanceof Error ? error.message : String(error)}`

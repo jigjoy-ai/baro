@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, it } from "@rstest/core"
 import assert from "node:assert/strict"
 import { execFileSync } from "node:child_process"
-import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync, mkdirSync } from "node:fs"
+import { chmodSync, existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync, mkdirSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, dirname, join } from "node:path"
 
@@ -469,8 +469,8 @@ describe("WorktreeManager — failed execution recovery", () => {
 })
 
 describe("WorktreeManager — uncommitted safety net", () => {
-    it("never commits the symlinked dep dirs, even if the repo doesn't gitignore them", async () => {
-        // Repo with NO node_modules ignore + a real root node_modules to link.
+    it("never commits the shared dep dirs, even if the repo doesn't gitignore them", async () => {
+        // Repo with NO node_modules ignore + a real root node_modules to share.
         writeFileSync(join(repo, ".gitignore"), "")
         git(repo, "commit", "-am", "drop gitignore")
         mkdirSync(join(repo, "node_modules", "pkg"), { recursive: true })
@@ -484,7 +484,7 @@ describe("WorktreeManager — uncommitted safety net", () => {
         assert.ok(tracked.includes("real.txt"), "real work committed")
         assert.ok(
             !tracked.some((f) => f.startsWith("node_modules")),
-            "symlinked node_modules never committed",
+            "shared node_modules never committed",
         )
     })
 
@@ -788,7 +788,7 @@ describe("WorktreeManager — cleanup", () => {
     })
 })
 
-describe("WorktreeManager — dependency dir symlink", () => {
+describe("WorktreeManager — dependency dirs", () => {
     it("keeps an agent's explicit git add from committing the dependency symlink", async () => {
         writeFileSync(join(repo, "package.json"), '{"scripts":{}}\n')
         git(repo, "add", "package.json")
@@ -807,15 +807,63 @@ describe("WorktreeManager — dependency dir symlink", () => {
         assert.equal(existsSync(join(repo, "node_modules")), true)
     })
 
-    it("symlinks root node_modules into the worktree so deps resolve", async () => {
+    it("gives the worktree the root node_modules so deps resolve", async () => {
         mkdirSync(join(repo, "node_modules", "pkg"), { recursive: true })
         writeFileSync(join(repo, "node_modules", "pkg", "index.js"), "module.exports=1\n")
 
         const p = (await mgr.create("S1"))!
         assert.ok(
             existsSync(join(p, "node_modules", "pkg", "index.js")),
-            "worktree sees root node_modules via symlink",
+            "worktree sees the root node_modules",
         )
+    })
+
+    // #284: `npm ci` empties node_modules entry by entry, through a link.
+    it("copies a dep dir the host already has, so a delete in the story never reaches the host", async () => {
+        mkdirSync(join(repo, "node_modules", "pkg"), { recursive: true })
+        writeFileSync(join(repo, "node_modules", "pkg", "index.js"), "module.exports=1\n")
+
+        const p = (await mgr.create("S1"))!
+        assert.equal(lstatSync(join(p, "node_modules")).isSymbolicLink(), false)
+        rmSync(join(p, "node_modules", "pkg"), { recursive: true })
+
+        assert.equal(
+            readFileSync(join(repo, "node_modules", "pkg", "index.js"), "utf8"),
+            "module.exports=1\n",
+        )
+    })
+
+    it("links stories to the integration worktree's copy, never to the host's", async () => {
+        mkdirSync(join(repo, "node_modules", "pkg"), { recursive: true })
+        writeFileSync(join(repo, "node_modules", "pkg", "index.js"), "module.exports=1\n")
+        const integrationRunId = uniqueRunId("run-integration")
+        const integrationRoot = join(mkdtempSync(join(tmpdir(), "baro-wt-integration-")), "tree")
+        git(repo, "worktree", "add", "-b", "run-branch", integrationRoot)
+        const shared = new WorktreeManager(repo, new GitGate(), integrationRunId, {
+            integrationRoot,
+            onLog: () => {},
+        })
+        try {
+            const p1 = (await shared.create("S1"))!
+            assert.equal(
+                realpathSync(join(p1, "node_modules")),
+                realpathSync(join(integrationRoot, "node_modules")),
+            )
+            assert.ok(existsSync(join(p1, "node_modules", "pkg", "index.js")), "seeded from the host")
+
+            rmSync(join(p1, "node_modules", "pkg"), { recursive: true })
+            mkdirSync(join(p1, "node_modules", "added"))
+            const p2 = (await shared.create("S2"))!
+
+            assert.ok(existsSync(join(repo, "node_modules", "pkg", "index.js")), "host untouched")
+            assert.equal(existsSync(join(repo, "node_modules", "added")), false, "host untouched")
+            assert.ok(existsSync(join(p2, "node_modules", "added")), "S2 sees what S1 installed")
+        } finally {
+            await shared.cleanupAll()
+            await removeWorktreeRun(repo, integrationRunId)
+            git(repo, "worktree", "remove", "--force", integrationRoot)
+            rmSync(dirname(integrationRoot), { recursive: true, force: true })
+        }
     })
 
     it("shares deps installed by one story with the others (fresh clone, no node_modules yet)", async () => {
