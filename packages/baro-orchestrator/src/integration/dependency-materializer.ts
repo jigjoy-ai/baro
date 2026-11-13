@@ -28,11 +28,12 @@ export interface MaterializeDependenciesOptions {
     integrationRoot: string
     signal?: AbortSignal
     runInstall?: (workspaceDir: string) => Promise<void>
+    runBuild?: (workspaceDir: string) => Promise<void>
 }
 
 export interface MaterializedWorkspace {
     dir: string
-    action: "copied" | "installed" | "skipped"
+    action: "copied" | "installed" | "built" | "build_failed" | "skipped"
     reason: string
 }
 
@@ -84,7 +85,99 @@ export async function materializeDependencies(
             }),
         )
     }
+    const runBuild =
+        options.runBuild ?? ((workspaceDir: string) => npmRunBuild(workspaceDir, options.signal))
+    workspaces.push(...(await buildConsumedWorkspaces(root, runBuild)))
     return { workspaces }
+}
+
+/**
+ * A workspace package another one imports resolves through its built entry
+ * (`dist/`), which git does not carry: a fresh worktree fails every typecheck
+ * on it although the host passes. Built here, dependencies first.
+ */
+async function buildConsumedWorkspaces(
+    root: string,
+    runBuild: (workspaceDir: string) => Promise<void>,
+): Promise<MaterializedWorkspace[]> {
+    const members = [root, ...declaredWorkspaceDirs(root)]
+        .map(readMember)
+        .filter((member): member is WorkspaceMember => member !== null)
+    const byName = new Map(members.filter((m) => m.dir !== root).map((m) => [m.name, m]))
+    const consumed = new Set(members.flatMap((m) => m.deps.filter((dep) => byName.has(dep))))
+    const results: MaterializedWorkspace[] = []
+    const visited = new Set<string>()
+    const visit = async (member: WorkspaceMember): Promise<void> => {
+        if (visited.has(member.name)) return
+        visited.add(member.name)
+        for (const dep of member.deps) {
+            const target = byName.get(dep)
+            if (target) await visit(target)
+        }
+        if (!consumed.has(member.name) || !member.hasBuild) return
+        const missing = member.entries.filter((entry) => !existsSync(join(member.dir, entry)))
+        if (missing.length === 0) return
+        try {
+            await runBuild(member.dir)
+            results.push({ dir: member.dir, action: "built", reason: `${missing[0]} is not in the checkout` })
+        } catch (error) {
+            results.push({ dir: member.dir, action: "build_failed", reason: errMsg(error) })
+        }
+    }
+    for (const member of byName.values()) await visit(member)
+    return results
+}
+
+interface WorkspaceMember {
+    dir: string
+    name: string
+    deps: string[]
+    entries: string[]
+    hasBuild: boolean
+}
+
+function readMember(dir: string): WorkspaceMember | null {
+    let manifest: Record<string, unknown>
+    try {
+        manifest = JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as Record<string, unknown>
+    } catch {
+        return null
+    }
+    if (typeof manifest.name !== "string") return null
+    const deps = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"]
+        .flatMap((field) => Object.keys(objectField(manifest[field])))
+    const entries = new Set<string>()
+    for (const field of ["main", "module", "types", "typings"]) {
+        const value = manifest[field]
+        if (typeof value === "string") entries.add(value)
+    }
+    collectExportTargets(manifest.exports, entries)
+    const scripts = objectField(manifest.scripts)
+    return {
+        dir,
+        name: manifest.name,
+        deps,
+        entries: [...entries].filter((entry) => !entry.includes("*")),
+        hasBuild: typeof scripts.build === "string",
+    }
+}
+
+function collectExportTargets(value: unknown, into: Set<string>): void {
+    if (typeof value === "string") {
+        if (value.startsWith("./")) into.add(value)
+        return
+    }
+    if (Array.isArray(value)) {
+        for (const item of value) collectExportTargets(item, into)
+        return
+    }
+    for (const item of Object.values(objectField(value))) collectExportTargets(item, into)
+}
+
+function objectField(value: unknown): Record<string, unknown> {
+    return value !== null && typeof value === "object" && !Array.isArray(value)
+        ? (value as Record<string, unknown>)
+        : {}
 }
 
 async function materializeWorkspace(
@@ -156,11 +249,19 @@ async function npmCi(workspaceDir: string, signal: AbortSignal | undefined): Pro
     })
 }
 
-function workspaceDirs(root: string): string[] {
-    const declared = workspacePackageDirs(root, [
+async function npmRunBuild(workspaceDir: string, signal: AbortSignal | undefined): Promise<void> {
+    await runRepositoryCommand("npm", ["run", "build"], { cwd: workspaceDir, signal })
+}
+
+function declaredWorkspaceDirs(root: string): string[] {
+    return workspacePackageDirs(root, [
         ...workspacePatterns(readWorkspacesField(root)),
         ...pnpmWorkspacePatterns(root),
     ])
+}
+
+function workspaceDirs(root: string): string[] {
+    const declared = declaredWorkspaceDirs(root)
     const seen = new Set([resolve(root), ...declared.map((dir) => resolve(dir))])
     // An independent package in a subdirectory (`js/` with its own lockfile)
     // is no workspace, yet its tests import what its lockfile pins; smoke
