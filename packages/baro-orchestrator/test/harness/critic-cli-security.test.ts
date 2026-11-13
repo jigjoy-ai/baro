@@ -18,6 +18,7 @@ import {
     Critic,
     VERDICT_SYSTEM_PROMPT,
 } from "../../src/harness/claude/critic.js"
+import type { SemanticEvent } from "../../src/runtime/mozaik.js"
 import { AgentResult, Critique } from "../../src/semantic-events.js"
 import {
     assertHarnessEnvironmentWasSanitized,
@@ -384,7 +385,7 @@ function assertLargePromptUsedStdin(item: Capture): void {
     assert.doesNotMatch(item.args.join("\n"), /TOOL_REQUEST_SENTINEL/)
 }
 
-function assertPass(events: readonly unknown[]): void {
+function assertPass(events: readonly SemanticEvent<string, unknown>[]): void {
     const critiques = events.filter(Critique.is)
     assert.equal(critiques.length, 1)
     assert.equal(critiques[0]!.payload.verdict, "pass")

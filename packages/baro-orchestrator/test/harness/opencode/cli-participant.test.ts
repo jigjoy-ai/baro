@@ -168,9 +168,9 @@ console.log(JSON.stringify({ type: "step_finish", timestamp: 2, sessionID: "env-
     it("maps fake JSONL output into lifecycle and tool events", async () => {
         await withTempDir("baro-opencode-cli-", async (dir) => {
             const env = captureEnv()
-            env.publishFunctionCall = (() => {}) as typeof env.deliverFunctionCall
+            env.publishFunctionCall = (() => {}) as typeof env.publishFunctionCall
             env.publishFunctionCallOutput =
-                (() => {}) as typeof env.deliverFunctionCallOutput
+                (() => {}) as typeof env.publishFunctionCallOutput
             const participant = new OpenCodeCliParticipant("opencode-agent", {
                 cwd: dir,
                 prompt: "do the work",
@@ -234,8 +234,8 @@ console.log(JSON.stringify({ type: "step_finish", timestamp: 2, sessionID: "env-
             process.env.BARO_OPENCODE_MAJOR = "2"
             try {
                 const env = captureEnv()
-                env.publishFunctionCall = (() => {}) as typeof env.deliverFunctionCall
-                env.publishFunctionCallOutput = (() => {}) as typeof env.deliverFunctionCallOutput
+                env.publishFunctionCall = (() => {}) as typeof env.publishFunctionCall
+                env.publishFunctionCallOutput = (() => {}) as typeof env.publishFunctionCallOutput
                 const participant = new OpenCodeCliParticipant("opencode-agent", {
                     cwd: dir,
                     prompt: "do the work",
@@ -293,9 +293,9 @@ console.log(JSON.stringify({ type: "step_finish", timestamp: 2, sessionID: "env-
     it("waits for inherited stdio to flush final JSON and stderr after process exit", async () => {
         await withTempDir("baro-opencode-cli-final-line-", async (dir) => {
             const env = captureEnv()
-            env.publishFunctionCall = (() => {}) as typeof env.deliverFunctionCall
+            env.publishFunctionCall = (() => {}) as typeof env.publishFunctionCall
             env.publishFunctionCallOutput =
-                (() => {}) as typeof env.deliverFunctionCallOutput
+                (() => {}) as typeof env.publishFunctionCallOutput
             const participant = new OpenCodeCliParticipant("opencode-agent", {
                 cwd: dir,
                 prompt: "finish",

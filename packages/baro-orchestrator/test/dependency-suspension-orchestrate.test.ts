@@ -4,7 +4,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, it } from "@rstest/core"
 
-import type { CoordinationBus, BusMember } from "../src/runtime/coordination.js"
+import type { CoordinationBus } from "../src/runtime/coordination.js"
 
 import { orchestrate } from "../src/orchestrate.js"
 import type {
@@ -18,7 +18,7 @@ import {
     StoryResult,
     type StorySpawnRequestData,
 } from "../src/semantic-events.js"
-import { withTempDir } from "./execution/helpers.js"
+import { source, withTempDir } from "./execution/helpers.js"
 import { worktreeLeafName } from "../src/integration/integration-worktree.js"
 import {
     removeWorktreeRun,
@@ -46,9 +46,7 @@ class NeverQuiescingExecutor implements StoryExecutor {
         options: StoryExecOpts,
     ): StoryExecution {
         this.started.push(request.storyId)
-        const resultSource = {
-            agentId: `never-quiescing:${request.storyId}`,
-        } as BusMember
+        const resultSource = source(`never-quiescing:${request.storyId}`)
         options.registerResultAuthority?.(resultSource)
 
         if (request.storyId === "S1") {
@@ -90,9 +88,7 @@ class UncertifiedTerminalExecutor implements StoryExecutor {
         environment: CoordinationBus,
         options: StoryExecOpts,
     ): StoryExecution {
-        const resultSource = {
-            agentId: `uncertified-terminal:${request.storyId}`,
-        } as BusMember
+        const resultSource = source(`uncertified-terminal:${request.storyId}`)
         options.registerResultAuthority?.(resultSource)
         writeFileSync(join(cwd, "partial.txt"), "unsafe live partial work\n")
         setImmediate(() => {

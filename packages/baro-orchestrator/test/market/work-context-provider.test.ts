@@ -49,11 +49,9 @@ describe("WorkContextProvider", () => {
         )
         await provider.idle()
 
-        const result = env.events.find(
-            (event) =>
-                WorkContextProvided.is(event) &&
-                event.payload.requestId === "bound-request",
-        )
+        const result = env.events
+            .filter(WorkContextProvided.is)
+            .find((event) => event.payload.requestId === "bound-request")
         assert.equal(result?.payload.context, null)
     })
 
@@ -158,11 +156,9 @@ describe("WorkContextProvider", () => {
         )
         await provider.idle()
 
-        const result = env.events.find(
-            (event) =>
-                WorkContextProvided.is(event) &&
-                event.payload.requestId === "context-later-wave",
-        )
+        const result = env.events
+            .filter(WorkContextProvided.is)
+            .find((event) => event.payload.requestId === "context-later-wave")
         assert.match(result?.payload.context ?? "", /repository context/)
         assert.match(
             result?.payload.context ?? "",

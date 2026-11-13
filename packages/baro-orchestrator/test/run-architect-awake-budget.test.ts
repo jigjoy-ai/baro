@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url"
 import { join } from "node:path"
 import { describe, it } from "@rstest/core"
 
+import type { BaroEvent } from "../src/tui-protocol.js"
 import { withTempDir } from "./execution/helpers.js"
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url))
@@ -90,10 +91,7 @@ describe("run-architect awake phase budget", () => {
     })
 })
 
-interface GapEvent {
-    type: "suspension_gap_absorbed"
-    gap_ms: number
-}
+type GapEvent = Extract<BaroEvent, { type: "suspension_gap_absorbed" }>
 
 function gapEvents(stdout: string): GapEvent[] {
     return stdout

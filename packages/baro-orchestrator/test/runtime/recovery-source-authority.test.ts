@@ -29,6 +29,7 @@ describe("RecoverySourceAuthority", () => {
             request: {
                 storyId: "S1",
                 prompt: "work",
+                model: "standard",
                 retries: 0,
                 timeoutSecs: 60,
             },
@@ -137,6 +138,7 @@ describe("RecoverySourceAuthority", () => {
 
         const release = WorkLeaseReleased.create({
             runId,
+            offerId: "offer-S1",
             storyId: "S1",
             leaseId: "lease-S1",
             workerId: "worker",

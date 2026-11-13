@@ -15,11 +15,12 @@ describe("CriticTargetRegistry runtime replans", () => {
     it("delivers canonical Architect obligations to the collective Critic unchanged", () => {
         const obligation =
             "[O-004]; Subject: direct public adapter boundary; Scenario: the adapter is invoked without its outer wrapper; Required outcome: the contract remains independently observable; Required evidence: focused direct-boundary regression test"
-        const targets = buildCriticTargets([{
+        const story = {
             id: "S-provider",
             acceptance: [obligation, "The provider preserves its request fields"],
             goalInvariantIds: ["G-A1", "G-C1"],
-        }])
+        }
+        const targets = buildCriticTargets([story])
 
         assert.deepEqual(targets.get("S-provider"), [
             obligation,

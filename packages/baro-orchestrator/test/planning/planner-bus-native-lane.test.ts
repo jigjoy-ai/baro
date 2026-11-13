@@ -62,10 +62,12 @@ class AlwaysAdmit extends BusMember {
             runId: event.payload.runId,
             planningId: event.payload.planningId,
             fragmentId: event.payload.fragmentId,
+            ordinal: event.payload.ordinal,
             graphVersion: ++this.version,
             storyIds: event.payload.stories.map(
                 (item) => (item as { id: string }).id,
             ),
+            replay: false,
             droppedEdges: [],
         })
         for (const environment of this.getBuses()) {

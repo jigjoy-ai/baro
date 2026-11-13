@@ -877,6 +877,7 @@ describe("agent-collab runtime replan transport", () => {
                     { stdio: ["ignore", outputFd, "pipe"] },
                 )
                 let stderr = ""
+                assert.ok(child.stderr, "stderr is piped")
                 child.stderr.setEncoding("utf8")
                 child.stderr.on("data", (chunk: string) => {
                     stderr += chunk

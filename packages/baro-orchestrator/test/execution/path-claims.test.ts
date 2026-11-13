@@ -95,7 +95,7 @@ describe("runtime path claims", () => {
         const s6 = story("S6", ["bridge.py"])
         const claims = new Map([["tests/test_tools.py", "S5"]])
         assert.deepEqual(
-            storyWriteSurface(s5, [s5, s6], claims)?.writes.sort(),
+            [...(storyWriteSurface(s5, [s5, s6], claims)?.writes ?? [])].sort(),
             ["tests/test_tools.py", "tools.py"],
         )
         assert.equal(

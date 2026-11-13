@@ -512,8 +512,13 @@ describe("ArchitectOpenAI bounded finalization", () => {
                               items: [message(DECISION_DOCUMENT.slice(0, 60))],
                               usage: undefined,
                               truncated: true,
+                              billingInvocationId: null,
                           }
-                        : { items: [message(DECISION_DOCUMENT)], usage: undefined }
+                        : {
+                              items: [message(DECISION_DOCUMENT)],
+                              usage: undefined,
+                              billingInvocationId: null,
+                          }
                 },
             },
         })
@@ -829,7 +834,11 @@ describe("ArchitectOpenAI bounded finalization", () => {
                 round += 1
                 if (round === 1) {
                     await new Promise((resolve) => setTimeout(resolve, 25))
-                    return { items: [call("continue")], usage: undefined }
+                    return {
+                        items: [call("continue")],
+                        usage: undefined,
+                        billingInvocationId: null,
+                    }
                 }
                 return await new Promise<never>(() => {})
             },
@@ -1087,7 +1096,7 @@ function fakeSequence(roundItems: ContextItem[][], tool: Tool): {
                 const items = roundItems[round]
                 assert.ok(items, `unexpected inference round ${round + 1}`)
                 round += 1
-                return { items, usage: undefined }
+                return { items, usage: undefined, billingInvocationId: null }
             },
         },
         contexts,

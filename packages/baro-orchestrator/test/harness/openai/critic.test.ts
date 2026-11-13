@@ -347,7 +347,7 @@ describe("CriticOpenAI", () => {
         assert.deepEqual(
             projector.terminalCorrelationFor(
                 storyId,
-                replay.payload.terminalId,
+                replay.payload.terminalId ?? null,
             ),
             correlation,
         )

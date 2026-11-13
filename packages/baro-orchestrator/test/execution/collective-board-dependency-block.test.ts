@@ -230,7 +230,7 @@ describe("CollectiveBoard dependency suspension", () => {
                 env.events.some(
                     (event) =>
                         ConductorState.is(event) &&
-                        event.payload.detail.includes("healing action"),
+                        event.payload.detail?.includes("healing action"),
                 ),
                 false,
             )

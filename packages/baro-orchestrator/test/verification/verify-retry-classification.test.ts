@@ -521,6 +521,7 @@ describe("the operator's view of a classified retry", () => {
             },
             { command: "npm run build", status: "passed", durationMs: 3 },
         ],
+        durationMs: 12,
     }
 
     it("projects failure_bucket and remedy beside first_failure_tail, and no output", () => {

@@ -84,6 +84,7 @@ describe("Auditor", () => {
                     request: {
                         storyId: "S1",
                         prompt: `node helper emit --lease "${rawLease}" --kind note`,
+                        model: "standard",
                         retries: 0,
                         timeoutSecs: 30,
                     },

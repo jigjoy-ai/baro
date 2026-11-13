@@ -1014,7 +1014,7 @@ async function offerFor(
     env: CapturedEnvironment,
     runId: string,
     storyId: string,
-): Promise<ReturnType<typeof WorkOffered.create>["data"]> {
+): Promise<ReturnType<typeof WorkOffered.create>["payload"]> {
     const context = await waitFor(
         env.events,
         (event): event is ReturnType<typeof WorkContextRequested.create> =>
@@ -1040,7 +1040,7 @@ async function offerFor(
 async function completeStory(
     env: CapturedEnvironment,
     runId: string,
-    offer: ReturnType<typeof WorkOffered.create>["data"],
+    offer: ReturnType<typeof WorkOffered.create>["payload"],
     leaseId: string,
 ): Promise<void> {
     const storyId = offer.request.storyId

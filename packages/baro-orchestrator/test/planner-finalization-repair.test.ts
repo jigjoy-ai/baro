@@ -8,6 +8,7 @@ import {
     PlanFragmentAdmitted,
     PlanFragmentRejected,
 } from "../src/semantic-events.js"
+import { PlanningFeed } from "../src/execution/planning-feed.js"
 import { registerLane } from "../src/harness/lane-registry.js"
 import type {
     HostFunction,
@@ -139,7 +140,20 @@ const finalPrd = (userStories: readonly unknown[]): string =>
 const EMPTY_TAIL_PRD = finalPrd([])
 const OWNED_TAIL_PRD = finalPrd([OWNER_TAIL_STORY])
 
-class StubFeed extends BusMember {
+function storyId(story: unknown): string {
+    assert.ok(
+        typeof story === "object" &&
+            story !== null &&
+            "id" in story &&
+            typeof story.id === "string",
+        "a published story carries its id",
+    )
+    return story.id
+}
+
+// The session's `feed` is typed as the concrete class, so the stub subclasses
+// it and replaces every method the session calls.
+class StubFeed extends PlanningFeed {
     readonly opened: PlanningOpenCommand[] = []
     readonly fragments: PlanFragmentCommand[] = []
     readonly completions: PlanCompleteCommand[] = []
@@ -155,7 +169,7 @@ class StubFeed extends BusMember {
         this.fragments.push(command)
         if (command.fragment_id.startsWith("final-tail") && this.refuseTailTimes > 0) {
             this.refuseTailTimes -= 1
-            const candidateStoryId = command.stories[0]!.id
+            const candidateStoryId = storyId(command.stories[0])
             const rejected = PlanFragmentRejected.create({
                 runId: command.run_id,
                 planningId: command.planning_id,
@@ -180,7 +194,7 @@ class StubFeed extends BusMember {
             fragmentId: command.fragment_id,
             ordinal: command.ordinal,
             graphVersion: 7,
-            storyIds: command.stories.map((story) => story.id),
+            storyIds: command.stories.map(storyId),
             replay: false,
             droppedEdges: [],
         })

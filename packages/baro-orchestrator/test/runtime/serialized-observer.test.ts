@@ -33,6 +33,10 @@ class ProbeObserver extends SerializedObserver {
 class EventReportingObserver extends SerializedObserver {
     readonly handled: string[] = []
 
+    constructor() {
+        super()
+    }
+
     protected override handleEvent(context: SerializedEventContext): void {
         const id = eventId(context)
         if (id === "explode") throw new Error("mailbox exploded")
@@ -101,7 +105,11 @@ describe("SerializedObserver", () => {
                 if (id === "bad") throw "non-error failure"
                 handled.push(id)
             },
-            { onFailure: (failure) => failures.push(failure) },
+            {
+                onFailure: (failure) => {
+                    failures.push(failure)
+                },
+            },
         )
         const env = captureEnv()
         observer.join(env)
@@ -170,7 +178,11 @@ describe("SerializedObserver", () => {
                     if (id === "bad-task") throw new Error("review failed")
                 })
             },
-            { onFailure: (failure) => failures.push(failure) },
+            {
+                onFailure: (failure) => {
+                    failures.push(failure)
+                },
+            },
         )
         const env = captureEnv()
         observer.join(env)

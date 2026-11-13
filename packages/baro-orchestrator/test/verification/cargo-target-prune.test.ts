@@ -132,7 +132,7 @@ describe("pruneCargoTargetCaches", () => {
 
 const cargoAvailable = spawnSync("cargo", ["--version"]).status === 0
 
-describe.skipIf(!cargoAvailable && "cargo not installed")("pruneCargoTargetCaches with real cargo", () => {
+describe.skipIf(!cargoAvailable)("pruneCargoTargetCaches with real cargo", () => {
     it("keeps a story worktree's build fresh after pruning what an earlier build left", () => {
         const cacheRoot = join(scratch, "cache", "cargo-target")
         const target = join(cacheRoot, "demo-key")

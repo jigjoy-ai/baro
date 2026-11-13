@@ -63,7 +63,7 @@ import {
 } from "../src/telemetry/model-telemetry.js"
 import type { PrdFile } from "../src/prd.js"
 import { acceptsTargetedMessage } from "../src/runtime/targeted-message-authority.js"
-import { captureStdout, withTempDir } from "./execution/helpers.js"
+import { captureStdout, source, withTempDir } from "./execution/helpers.js"
 
 class PassingExecutor implements StoryExecutor {
     readonly started: string[] = []
@@ -660,7 +660,7 @@ class StallingAuthorityExecutor implements StoryExecutor {
         environment: CoordinationBus,
         options: StoryExecOpts,
     ): StoryExecution {
-        const resultSource = { agentId: request.storyId } as BusMember
+        const resultSource = source(request.storyId)
         options.registerResultAuthority?.(resultSource)
         let settled = false
         const settle = () => {
@@ -1335,7 +1335,7 @@ describe("orchestrate collective mode", () => {
             input.userStories = [input.userStories[0]!]
             writeFileSync(prdPath, JSON.stringify(input, null, 2) + "\n")
 
-            let result: Awaited<ReturnType<typeof orchestrate>> | null = null
+            let result: Awaited<ReturnType<typeof orchestrate>> | undefined
             const lines = await captureStdout(async () => {
                 result = await orchestrate({
                     prdPath,

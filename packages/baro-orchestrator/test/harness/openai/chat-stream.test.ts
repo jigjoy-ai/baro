@@ -44,6 +44,9 @@ const text = (content: string): ChatCompletionChunk => ({
     choices: [{ delta: { content } }],
 })
 
+const wireText = (item: ModelMessageItem): string =>
+    (toWire(item) as { content: { text: string }[] }).content[0].text
+
 const ended = (reason: string): ChatCompletionChunk => ({
     choices: [{ finish_reason: reason, delta: {} }],
 })
@@ -82,7 +85,7 @@ describe("a streamed round is assembled into what a round returns", () => {
         const round = await streamChatRound(client, {})
         assert.equal(round.items.length, 1)
         assert.equal(
-            toWire((round.items[0] as ModelMessageItem)).content[0].text,
+            wireText(round.items[0] as ModelMessageItem),
             "The decision is to add an audit table.",
         )
     })
@@ -329,7 +332,7 @@ describe("through the provider client, on the wire", () => {
         )
 
         assert.equal(
-            toWire((round.items[0] as ModelMessageItem)).content[0].text,
+            wireText(round.items[0] as ModelMessageItem),
             "reading the service",
         )
         const call = round.items[1] as FunctionCallItem

@@ -2,6 +2,7 @@ import { describe, it } from "@rstest/core"
 import assert from "node:assert/strict"
 
 import type { BusMember, CoordinationBus } from "../../src/runtime/coordination.js"
+import { participantAgentId } from "../../src/runtime/participant-identity.js"
 
 import { StorySpawned } from "../../src/semantic-events.js"
 import { LocalStoryExecutor } from "../../src/execution/story-executor.js"
@@ -93,7 +94,7 @@ describe("StoryFactory — StoryExecutor seam", () => {
                     registerTerminalAuthority,
                     registerResultAuthority: (sourceParticipant) => {
                         registered = sourceParticipant
-                        assert.equal(sourceParticipant.agentId, "S-local")
+                        assert.equal(participantAgentId(sourceParticipant), "S-local")
                         assert.equal(
                             (sourceParticipant as unknown as {
                                 resultAuthority: BusMember

@@ -638,7 +638,6 @@ describe("AcceptanceGate", () => {
         env.publish(
             native,
             StoryResult.create({
-                storyId: "S1",
                 success: true,
                 attempts: 1,
                 durationSecs: 1,

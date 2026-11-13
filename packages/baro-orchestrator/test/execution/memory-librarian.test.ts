@@ -252,6 +252,7 @@ describe("MemoryLibrarian", () => {
             request: {
                 storyId: "S1",
                 prompt: "old generation",
+                model: "standard",
                 retries: 0,
                 timeoutSecs: 60,
             },
@@ -282,6 +283,7 @@ describe("MemoryLibrarian", () => {
                 request: {
                     storyId: "S1",
                     prompt: "new generation",
+                    model: "standard",
                     retries: 0,
                     timeoutSecs: 60,
                 },

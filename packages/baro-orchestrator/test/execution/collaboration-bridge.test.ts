@@ -649,7 +649,7 @@ describe("CollaborationBridge", () => {
                     leaseId: "lease-S1",
                     storyId: "S1",
                     workerId: "worker",
-                    reason: "completed",
+                    reason: "integrated",
                 }),
             )
             await bridge.idle()
@@ -722,7 +722,7 @@ describe("CollaborationBridge", () => {
                     leaseId: "lease-S1",
                     storyId: "S1",
                     workerId: "worker",
-                    reason: "completed",
+                    reason: "integrated",
                 }),
             )
             await bridge.idle()
@@ -812,6 +812,7 @@ describe("CollaborationBridge", () => {
                 mappings: [],
                 integrations: [],
                 qualities: [],
+                aggregateReviews: [],
                 challenges: [{
                     challengeId: "challenge-durable",
                     invariantId: "G-A1",
@@ -2304,7 +2305,7 @@ function releaseLease(
             leaseId,
             storyId,
             workerId: "worker",
-            reason: "test release",
+            reason: "aborted",
         }),
     )
 }

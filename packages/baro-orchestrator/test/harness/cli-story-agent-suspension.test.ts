@@ -512,7 +512,7 @@ async function assertRetryBackoffWake(
 
     try {
         const startedAt = Date.now()
-        const outcome = await withDeadline(
+        const outcome = await withDeadline<Awaited<ReturnType<SuspendableAgent["run"]>>>(
             agent.run(env),
             1_000,
             `${backend} ${wake} did not wake retry backoff`,

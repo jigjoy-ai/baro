@@ -238,7 +238,7 @@ describe("GoalGuardian", () => {
 
         const proposal = env.events.find(GoalInvariantRemediationProposed.is)
         assert.ok(proposal)
-        const criterion = proposal.payload.story.acceptance.find((entry) =>
+        const criterion = proposal.payload.story.acceptance?.find((entry) =>
             entry.startsWith("Challenge challenge-essay"),
         )
         assert.ok(criterion)

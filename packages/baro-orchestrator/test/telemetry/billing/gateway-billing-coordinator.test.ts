@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { createServer, type Server } from "node:http"
+import { createServer, type RequestListener, type Server } from "node:http"
 import { afterEach, describe, it } from "@rstest/core"
 
 import {
@@ -102,13 +102,15 @@ describe("GatewayBillingCoordinator", () => {
         let cloudAttempts = 0
         const commits: string[] = []
         const published: string[] = []
-        const gateway = new GatewayBillingCoordinator({
+        const gateway: GatewayBillingCoordinator = new GatewayBillingCoordinator({
             runId: "run-1",
             gatewayBaseUrl: "https://gateway.example/v1",
             apiKey: "tenant-a",
             drainTimeoutMs: 1_000,
             feedMaxRetries: 0,
-            commitCursor: (cursor) => commits.push(cursor),
+            commitCursor: (cursor) => {
+                commits.push(cursor)
+            },
             publishMeasurement: async (measurement) => {
                 await new Promise((resolve) => setTimeout(resolve, 5))
                 if (measurement.evidence.producer === "cloud") {
@@ -193,7 +195,7 @@ describe("GatewayBillingCoordinator", () => {
 
     it("skips the drain wait when the gateway does not advertise authoritative receipts", async () => {
         let feedCalls = 0
-        const gateway = new GatewayBillingCoordinator({
+        const gateway: GatewayBillingCoordinator = new GatewayBillingCoordinator({
             runId: "run-no-receipts",
             gatewayBaseUrl: "https://gateway.example/v1",
             apiKey: "tenant-a",
@@ -228,7 +230,7 @@ describe("GatewayBillingCoordinator", () => {
     })
 
     it("does not let missing receipts hide a runner measurement that failed to publish", async () => {
-        const gateway = new GatewayBillingCoordinator({
+        const gateway: GatewayBillingCoordinator = new GatewayBillingCoordinator({
             runId: "run-publish-fails",
             gatewayBaseUrl: "https://gateway.example/v1",
             apiKey: "tenant-a",
@@ -256,7 +258,7 @@ describe("GatewayBillingCoordinator", () => {
 
     it("still ingests receipts from a gateway that does not advertise them", async () => {
         let receipt: CloudBillingReceipt | null = null
-        const gateway = new GatewayBillingCoordinator({
+        const gateway: GatewayBillingCoordinator = new GatewayBillingCoordinator({
             runId: "run-unadvertised-receipt",
             gatewayBaseUrl: "https://gateway.example/v1",
             apiKey: "tenant-a",
@@ -284,7 +286,7 @@ describe("GatewayBillingCoordinator", () => {
     })
 
     it("keeps waiting for receipts a gateway advertises as authoritative", async () => {
-        const gateway = new GatewayBillingCoordinator({
+        const gateway: GatewayBillingCoordinator = new GatewayBillingCoordinator({
             runId: "run-authoritative",
             gatewayBaseUrl: "https://gateway.example/v1",
             apiKey: "tenant-a",
@@ -321,7 +323,7 @@ describe("GatewayBillingCoordinator", () => {
             releaseFirst = resolve
         })
         let feedCalls = 0
-        const gateway = new GatewayBillingCoordinator({
+        const gateway: GatewayBillingCoordinator = new GatewayBillingCoordinator({
             runId: "run-stale-pull",
             gatewayBaseUrl: "https://gateway.example/v1",
             apiKey: "tenant-a",
@@ -357,7 +359,9 @@ describe("GatewayBillingCoordinator", () => {
 
     it("uses one upstream HTTP attempt and sends correlation only to the trusted gateway", async () => {
         let providerCalls = 0
-        let requestBody: Record<string, unknown> | null = null
+        // Widened by assertion: an annotation would narrow to `null` at the asserts,
+        // because the only assignment happens inside the request handler.
+        let requestBody = null as Record<string, unknown> | null
         let receipt: CloudBillingReceipt | null = null
         const baseUrl = await listen(async (request, response) => {
             if (request.method === "POST" && request.url === "/v1/chat/completions") {
@@ -436,7 +440,7 @@ describe("GatewayBillingCoordinator", () => {
     })
 
     it("strips reserved metadata from an ordinary compatible endpoint", async () => {
-        let requestBody: Record<string, unknown> | null = null
+        let requestBody = null as Record<string, unknown> | null
         const baseUrl = await listen(async (request, response) => {
             requestBody = JSON.parse(await readBody(request)) as Record<string, unknown>
             replyChatCompletion(response, requestBody)
@@ -1025,9 +1029,7 @@ function chatCompletion() {
     }
 }
 
-async function listen(
-    handler: Parameters<typeof createServer>[0],
-): Promise<string> {
+async function listen(handler: RequestListener): Promise<string> {
     const server = createServer(handler)
     servers.add(server)
     await new Promise<void>((resolve, reject) => {

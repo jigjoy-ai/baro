@@ -4,6 +4,7 @@ import {
     FunctionCallItem,
     FunctionCallOutputItem,
     ModelMessageItem,
+    SemanticEvent,
     toWire,
 } from "../../../src/runtime/mozaik.js"
 
@@ -44,6 +45,11 @@ function assertFunctionCallOutput(item: unknown): FunctionCallOutputItem {
     return item
 }
 
+function assertSemanticEvent(item: unknown): SemanticEvent<string, unknown> {
+    assert.ok(item instanceof SemanticEvent)
+    return item
+}
+
 describe("mapClaudeEvent", () => {
     it("maps system init events and surfaces session ids", () => {
         const event = {
@@ -52,10 +58,10 @@ describe("mapClaudeEvent", () => {
             session_id: "claude-session",
         }
         const result = map(event)
-        const item = result.items[0]
+        const item = assertSemanticEvent(result.items[0])
 
         assert.equal(result.sessionId, "claude-session")
-        assert.ok(ClaudeSystem.is(item as ReturnType<typeof ClaudeSystem.create>))
+        assert.ok(ClaudeSystem.is(item))
         assert.equal(item.payload.agentId, AGENT_ID)
         assert.equal(item.payload.subtype, "init")
         assert.deepEqual(item.payload.raw, event)
@@ -67,10 +73,10 @@ describe("mapClaudeEvent", () => {
             detail: "slow down",
         }
         const result = map(event)
-        const item = result.items[0]
+        const item = assertSemanticEvent(result.items[0])
 
         assert.equal(result.sessionId, null)
-        assert.ok(ClaudeRateLimit.is(item as ReturnType<typeof ClaudeRateLimit.create>))
+        assert.ok(ClaudeRateLimit.is(item))
         assert.equal(item.payload.agentId, AGENT_ID)
         assert.deepEqual(item.payload.raw, event)
     })
@@ -81,9 +87,9 @@ describe("mapClaudeEvent", () => {
             event: { type: "content_block_delta" },
         }
         const result = map(event)
-        const item = result.items[0]
+        const item = assertSemanticEvent(result.items[0])
 
-        assert.ok(ClaudeStreamChunk.is(item as ReturnType<typeof ClaudeStreamChunk.create>))
+        assert.ok(ClaudeStreamChunk.is(item))
         assert.equal(item.payload.agentId, AGENT_ID)
         assert.deepEqual(item.payload.raw, event)
     })
@@ -93,9 +99,9 @@ describe("mapClaudeEvent", () => {
             type: "user",
             message: { content: "please inspect README" },
         })
-        const item = result.items[0]
+        const item = assertSemanticEvent(result.items[0])
 
-        assert.ok(AgentUserMessage.is(item as ReturnType<typeof AgentUserMessage.create>))
+        assert.ok(AgentUserMessage.is(item))
         assert.equal(item.payload.agentId, AGENT_ID)
         assert.equal(item.payload.text, "please inspect README")
     })
@@ -162,10 +168,10 @@ describe("mapClaudeEvent", () => {
             num_turns: 3,
             duration_ms: 4567,
         })
-        const item = result.items[0]
+        const item = assertSemanticEvent(result.items[0])
 
         assert.equal(result.sessionId, "claude-session")
-        assert.ok(AgentResult.is(item as ReturnType<typeof AgentResult.create>))
+        assert.ok(AgentResult.is(item))
         assert.equal(item.type, "claude_result")
         assert.equal(item.payload.agentId, AGENT_ID)
         assert.equal(item.payload.subtype, "success")
@@ -184,9 +190,9 @@ describe("mapClaudeEvent", () => {
             payload: { value: 1 },
         }
         const result = map(event)
-        const item = result.items[0]
+        const item = assertSemanticEvent(result.items[0])
 
-        assert.ok(ClaudeUnknownEvent.is(item as ReturnType<typeof ClaudeUnknownEvent.create>))
+        assert.ok(ClaudeUnknownEvent.is(item))
         assert.equal(item.payload.agentId, AGENT_ID)
         assert.equal(item.payload.claudeType, "new_claude_event")
         assert.deepEqual(item.payload.raw, event)

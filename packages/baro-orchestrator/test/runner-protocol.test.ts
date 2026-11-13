@@ -1,6 +1,8 @@
 import assert from "node:assert/strict"
 import { describe, it } from "@rstest/core"
 
+import type { RunnerCommandSink } from "../scripts/runner.js"
+
 process.env.BARO_RUNNER_LIBRARY_ONLY = "1"
 
 const {
@@ -226,7 +228,7 @@ describe("bundled runner v2 protocol", () => {
     it("delivers a correlated front-door clarification before init", async () => {
         const sent: Array<Record<string, unknown>> = []
         const writes: string[] = []
-        let bind!: (runId: string, sink: { writable: boolean; destroyed: boolean; write(data: string, callback?: (error?: Error | null) => void): boolean } | null) => void
+        let bind!: (runId: string, sink: RunnerCommandSink | null, readyForRunCommands?: boolean) => void
         let emitChild!: (event: { type: string; agentId: string; data: unknown }) => void
         let finish!: (outcome: { success: boolean; durationSecs: number; error: string | null }) => void
         const outcome = new Promise<{ success: boolean; durationSecs: number; error: string | null }>((resolve) => {
@@ -241,7 +243,7 @@ describe("bundled runner v2 protocol", () => {
             },
         )
         controller.handle({ t: "dispatch_run", runId: "early", goal: "x", workspaceId: "default", parallel: 1, timeoutSecs: 60, conversation: true })
-        const sink = {
+        const sink: RunnerCommandSink = {
             writable: true,
             destroyed: false,
             write(data, callback) {
@@ -315,7 +317,7 @@ describe("bundled runner v2 protocol", () => {
     it("rejects a reply that arrives after baro decided on its own", async () => {
         const sent: Array<Record<string, unknown>> = []
         const writes: string[] = []
-        let bind!: (runId: string, sink: { writable: boolean; destroyed: boolean; write(data: string, callback?: (error?: Error | null) => void): boolean } | null) => void
+        let bind!: (runId: string, sink: RunnerCommandSink | null, readyForRunCommands?: boolean) => void
         let emitChild!: (event: { type: string; agentId: string; data: unknown }) => void
         let finish!: (outcome: { success: boolean; durationSecs: number; error: string | null }) => void
         const outcome = new Promise<{ success: boolean; durationSecs: number; error: string | null }>((resolve) => {

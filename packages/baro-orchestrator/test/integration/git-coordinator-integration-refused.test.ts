@@ -185,6 +185,7 @@ describe("GitCoordinator integration_refused", () => {
                     request: {
                         storyId: "S1",
                         prompt: "implement reviewed work",
+                        model: "standard",
                         retries: 0,
                         timeoutSecs: 60,
                         requiresQualityReview: true,

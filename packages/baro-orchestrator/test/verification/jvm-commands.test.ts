@@ -192,10 +192,10 @@ describe("detectJvmCommands (#210)", () => {
     })
 
     describe("declared mvn/gradle story tests (#215)", () => {
-        async function withToolchain<T>(
+        async function withToolchain(
             tools: readonly string[],
-            run: (repo: string) => T,
-        ): Promise<T> {
+            run: (repo: string) => void,
+        ): Promise<void> {
             return withTempDir("baro-jvm-", async (root) => {
                 const repo = join(root, "repo")
                 const bin = join(root, "bin")

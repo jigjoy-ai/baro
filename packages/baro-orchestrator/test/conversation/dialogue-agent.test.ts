@@ -152,6 +152,7 @@ describe("DialogueAgent", () => {
                     request: {
                         storyId: "S1",
                         prompt: "implement S1",
+                        model: "standard",
                         retries: 0,
                         timeoutSecs: 60,
                     },
@@ -281,6 +282,7 @@ describe("DialogueAgent", () => {
                 request: {
                     storyId: "S1",
                     prompt: "old generation",
+                    model: "standard",
                     retries: 0,
                     timeoutSecs: 60,
                 },
@@ -324,6 +326,7 @@ describe("DialogueAgent", () => {
                 request: {
                     storyId: "S1",
                     prompt: "replacement generation",
+                    model: "standard",
                     retries: 0,
                     timeoutSecs: 60,
                 },
@@ -651,6 +654,7 @@ describe("DialogueAgent", () => {
                 request: {
                     storyId: "S1",
                     prompt: "implement S1",
+                    model: "standard",
                     retries: 0,
                     timeoutSecs: 60,
                 },
@@ -732,6 +736,7 @@ describe("DialogueAgent", () => {
                 request: {
                     storyId: "S1",
                     prompt: "retry S1",
+                    model: "standard",
                     retries: 0,
                     timeoutSecs: 60,
                 },

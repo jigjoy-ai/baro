@@ -76,13 +76,21 @@ async function busLaneSupport(
         publish: async (event: PlannerOpenAIPlanFragmentEvent) => {
             const feedback: Record<string, unknown> = {
                 graphVersion: 7,
-                admittedStoryIds: event.stories.map(({ id }) => id),
+                admittedStoryIds: event.stories.map(storyId),
                 replayed: false,
             }
             hooks.onHostFeedback?.(feedback)
             return feedback
         },
     })
+}
+
+function storyId(story: unknown): string {
+    assert.ok(
+        typeof story === "object" && story !== null && "id" in story &&
+            typeof story.id === "string",
+    )
+    return story.id
 }
 
 const RESERVED_RECEIPT_KEYS = [

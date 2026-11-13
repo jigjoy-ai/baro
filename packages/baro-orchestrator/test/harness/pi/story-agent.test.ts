@@ -20,12 +20,6 @@ import {
     withTempDir,
 } from "../../execution/helpers.js"
 
-// A freshly-created executable can be held by corporate endpoint scanning for
-// several seconds when the complete suite launches many child processes in
-// parallel. This is scheduling headroom for semantic fixtures, not timeout
-// coverage; the timer is cleared as soon as each local fixture exits.
-const FIXTURE_TIMEOUT_SECS = 60
-
 describe("PiStoryAgent", () => {
     it("emits a successful terminal StoryResult from a fake Pi backend", async () => {
         await withTempDir("pi-story-agent-", async (dir) => {
@@ -62,7 +56,7 @@ process.exit(0)
                 retries: 0,
                 timeoutSecs: FIXTURE_TIMEOUT_SECS,
             })
-            const terminalSources: BusMember[] = []
+            const terminalSources: Array<BusMember & { agentId?: string }> = []
             agent.setTerminalSourceRegistrar((source) => terminalSources.push(source))
 
             const outcome = await agent.run(env)

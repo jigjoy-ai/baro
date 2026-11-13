@@ -8,13 +8,11 @@ import {
     ModelMessageItem,
     type ContextItem,
     type ModelContext,
+    type SemanticEvent,
 } from "../../src/runtime/mozaik.js"
 import type { InferenceModel } from "../../src/harness/openai/runtime.js"
 import { BusMember, CoordinationBus } from "../../src/runtime/coordination.js"
-import {
-    ScoutFindingPublished,
-    type SemanticEvent,
-} from "../../src/semantic-events.js"
+import { ScoutFindingPublished } from "../../src/semantic-events.js"
 import { runArchitectBusSession } from "../../src/planning/adapters/architect-bus-session.js"
 import { MozaikModelParticipant } from "../../src/harness/mozaik/model-participant.js"
 import { registerLane } from "../../src/harness/lane-registry.js"

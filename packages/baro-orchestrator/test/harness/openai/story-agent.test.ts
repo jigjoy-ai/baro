@@ -474,7 +474,7 @@ describe("OpenAIStoryAgent", () => {
                 const address = server.address()
                 assert.notEqual(address, null)
                 assert.notEqual(typeof address, "string")
-                const port = typeof address === "object" ? address.port : 0
+                const port = typeof address === "object" && address !== null ? address.port : 0
                 const env = captureEnv()
                 const agent = new OpenAIStoryAgent(
                     {
@@ -629,7 +629,7 @@ describe("OpenAIStoryAgent", () => {
                 const address = server.address()
                 assert.notEqual(address, null)
                 assert.notEqual(typeof address, "string")
-                const port = typeof address === "object" ? address.port : 0
+                const port = typeof address === "object" && address !== null ? address.port : 0
                 const env = captureEnv()
                 const agent = new OpenAIStoryAgent(
                     {

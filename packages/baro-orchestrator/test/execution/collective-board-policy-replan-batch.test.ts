@@ -1283,7 +1283,7 @@ function singleStoryPrd(id: string): PrdFile {
     }
 }
 
-function story(id: string, priority: number, dependsOn: readonly string[]): PrdStory {
+function story(id: string, priority: number, dependsOn: string[]): PrdStory {
     return {
         id,
         priority,

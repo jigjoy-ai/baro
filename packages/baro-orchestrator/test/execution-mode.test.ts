@@ -544,8 +544,8 @@ describe("enforceModeContract", () => {
 describe("widestDagLevel", () => {
     it("calculates independent width and rejects cycles/unknown dependencies", () => {
         assert.equal(widestDagLevel([
-            { id: "S1", dependsOn: [] } as PrdStory,
-            { id: "S2", dependsOn: [] } as PrdStory,
+            { id: "S1", dependsOn: [] as string[] } as PrdStory,
+            { id: "S2", dependsOn: [] as string[] } as PrdStory,
             { id: "S3", dependsOn: ["S1", "S2"] } as PrdStory,
         ]), 2)
         assert.throws(

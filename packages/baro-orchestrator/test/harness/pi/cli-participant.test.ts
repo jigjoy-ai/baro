@@ -175,7 +175,7 @@ console.log(JSON.stringify({ type: "agent_end", messages: [], willRetry: false }
         await withTempDir("baro-pi-cli-", async (dir) => {
             const env = captureEnv()
             env.publishFunctionCallOutput =
-                (() => {}) as typeof env.deliverFunctionCallOutput
+                (() => {}) as typeof env.publishFunctionCallOutput
             const participant = new PiCliParticipant("pi-agent", {
                 cwd: dir,
                 prompt: "do the work",
@@ -223,7 +223,7 @@ console.log(JSON.stringify({ type: "agent_end", messages: [], willRetry: false }
         await withTempDir("baro-pi-cli-failed-tool-", async (dir) => {
             const env = captureEnv()
             env.publishFunctionCallOutput =
-                (() => {}) as typeof env.deliverFunctionCallOutput
+                (() => {}) as typeof env.publishFunctionCallOutput
             const participant = new PiCliParticipant("pi-agent", {
                 cwd: dir,
                 prompt: "run a failing tool",
@@ -255,7 +255,7 @@ console.log(JSON.stringify({ type: "agent_end", messages: [], willRetry: false }
         await withTempDir("baro-pi-cli-final-line-", async (dir) => {
             const env = captureEnv()
             env.publishFunctionCallOutput =
-                (() => {}) as typeof env.deliverFunctionCallOutput
+                (() => {}) as typeof env.publishFunctionCallOutput
             const participant = new PiCliParticipant("pi-agent", {
                 cwd: dir,
                 prompt: "finish",

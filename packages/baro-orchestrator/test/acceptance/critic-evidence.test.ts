@@ -514,6 +514,7 @@ describe("Critic repository evidence", () => {
                             text: "npm test completed successfully",
                             commands: [
                                 {
+                                    command: "npm test",
                                     terminal: true,
                                     freshness: "fresh",
                                     sandboxBlocked: false,

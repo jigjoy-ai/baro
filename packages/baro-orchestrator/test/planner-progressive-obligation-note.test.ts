@@ -96,7 +96,9 @@ function publisherFor(
         ...(options.decisionDocument === undefined
             ? {}
             : { trustedDecisionDocument: options.decisionDocument }),
-        publish: (event) => published.push(event),
+        publish: (event) => {
+            published.push(event)
+        },
     })
     return { publisher, published }
 }

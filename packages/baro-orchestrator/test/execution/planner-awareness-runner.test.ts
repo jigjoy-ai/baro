@@ -90,6 +90,7 @@ describe("PlannerAwarenessRunner", () => {
                         tail: "3 tests failed",
                     },
                 ],
+                durationMs: 1000,
             }),
         )
 

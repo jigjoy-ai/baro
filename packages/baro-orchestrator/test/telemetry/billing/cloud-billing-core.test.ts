@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { createServer, type Server } from "node:http"
+import { createServer, type RequestListener, type Server } from "node:http"
 import { afterEach, describe, it } from "@rstest/core"
 
 import {
@@ -415,7 +415,9 @@ describe("authenticated billing cursor feed", () => {
             apiKey: "test-secret",
             billingSessionId: expectedSession,
             maxRetries: 0,
-            commitCursor: (cursor) => commits.push(cursor),
+            commitCursor: (cursor) => {
+                commits.push(cursor)
+            },
         })
         const ledger = new BillingReceiptLedger(registry)
         const accepted: string[] = []
@@ -497,10 +499,13 @@ describe("authenticated billing cursor feed", () => {
             maxRetries: 0,
         })
         const seen: string[] = []
+        const collect = (receipt: CloudBillingReceipt): void => {
+            seen.push(receipt.receiptId)
+        }
 
-        assert.equal((await client.drain((receipt) => seen.push(receipt.receiptId))).deliveredReceipts, 0)
+        assert.equal((await client.drain(collect)).deliveredReceipts, 0)
         late = completeReceipt(expectedSession, record.invocationId)
-        assert.equal((await client.drain((receipt) => seen.push(receipt.receiptId))).deliveredReceipts, 1)
+        assert.equal((await client.drain(collect)).deliveredReceipts, 1)
         assert.deepEqual(seen, [late.receiptId])
     })
 
@@ -598,9 +603,7 @@ function page(
     }
 }
 
-async function listen(
-    handler: Parameters<typeof createServer>[0],
-): Promise<string> {
+async function listen(handler: RequestListener): Promise<string> {
     const server = createServer(handler)
     servers.add(server)
     await new Promise<void>((resolve, reject) => {

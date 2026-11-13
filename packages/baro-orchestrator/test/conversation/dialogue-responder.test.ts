@@ -718,6 +718,7 @@ process.stdin.on("end", () => {
                     new InputTokenDetails(0),
                     new OutputTokenDetails(2),
                 ),
+                billingInvocationId: null,
             }),
         })
 
@@ -785,11 +786,17 @@ process.stdin.on("end", () => {
                 },
                 billingCoordinator: billing,
                 openaiRunRound: async (_context, _model, options) => {
-                    phases.push(options.billing?.context.phase ?? "missing")
-                    attempts.push(options.billing?.context.attempt ?? null)
+                    phases.push(options?.billing?.context.phase ?? "missing")
+                    attempts.push(options?.billing?.context.attempt ?? null)
                     return {
                         items: [ModelMessageItem.rehydrate({ text: "{\"message\":\"Ready.\",\"messages\":[]}" })] as never,
-                        usage: new TokenUsage(1, 1, 2),
+                        usage: new TokenUsage(
+                            1,
+                            1,
+                            2,
+                            new InputTokenDetails(0),
+                            new OutputTokenDetails(0),
+                        ),
                         billingInvocationId: null,
                     }
                 },
@@ -842,7 +849,7 @@ process.stdin.on("end", () => {
             cwd: process.cwd(),
             openaiRunRound: async (_context, _model, options) =>
                 new Promise((_resolve, reject) => {
-                    const signal = options.signal
+                    const signal = options?.signal
                     assert.ok(signal)
                     signal.addEventListener(
                         "abort",
@@ -982,11 +989,11 @@ setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_0
             cwd: process.cwd(),
             timeoutMs: 20,
             openaiRunRound: async (_context, _model, options) => {
-                providerSignal = options.signal
+                providerSignal = options?.signal
                 return await new Promise((_resolve, reject) => {
-                    options.signal?.addEventListener(
+                    options?.signal?.addEventListener(
                         "abort",
-                        () => reject(options.signal?.reason),
+                        () => reject(options?.signal?.reason),
                         { once: true },
                     )
                 })
@@ -1025,9 +1032,9 @@ setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_0
                 openaiRunRound: async (_context, _model, options) => {
                     onStarted?.()
                     return await new Promise((_resolve, reject) => {
-                        options.signal?.addEventListener(
+                        options?.signal?.addEventListener(
                             "abort",
-                            () => reject(options.signal?.reason),
+                            () => reject(options?.signal?.reason),
                             { once: true },
                         )
                     })
@@ -1046,7 +1053,7 @@ setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_0
                             systemPrompt: input.systemPrompt,
                             userPrompt: input.userPrompt,
                         }, signal)
-                        return result.text
+                        return typeof result === "string" ? result : result.text
                     },
                 },
             })

@@ -1179,7 +1179,7 @@ describe("declared verification policy", () => {
                         command: `node --test "${first}" "${second}"`,
                     },
                 ],
-                ["npm"],
+                [{ manager: "npm" }],
             )
 
             assert.equal(double?.incompleteReason, undefined)
@@ -1207,7 +1207,7 @@ describe("declared verification policy", () => {
                     { storyId: "S1", command: `node --test ""` },
                     { storyId: "S1", command: `node --test "'${path}'"` },
                 ],
-                ["npm"],
+                [{ manager: "npm" }],
             )
 
             for (const spec of specs) {
@@ -1244,7 +1244,7 @@ describe("declared verification policy", () => {
                             command: `node --import other --test ${path}`,
                         },
                     ],
-                    ["npm"],
+                    [{ manager: "npm" }],
                 )
 
             // Whitespace splits before unwrapping, so a quoted space can never
@@ -1295,7 +1295,7 @@ describe("declared verification policy", () => {
                         command: `node --import tsx --check ${first}`,
                     },
                 ],
-                ["npm"],
+                [{ manager: "npm" }],
             )
 
             assert.equal(single?.incompleteReason, undefined)
@@ -1360,7 +1360,7 @@ describe("declared verification policy", () => {
                         { storyId: "S1", command: "node --loader tsx --test x" },
                         { storyId: "S1", command: "node --require tsx --test x" },
                     ],
-                    ["npm"],
+                    [{ manager: "npm" }],
                 )
 
             // The loader value stays pinned to the literal `tsx`.
@@ -1387,7 +1387,7 @@ describe("declared verification policy", () => {
                 translateDeclaredTests(
                     dir,
                     [{ storyId: "S1", command: `node --import tsx ${path}` }],
-                    ["npm"],
+                    [{ manager: "npm" }],
                 )[0]?.incompleteReason ?? "",
                 new RegExp(modeGate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
             )
@@ -1413,7 +1413,7 @@ describe("declared verification policy", () => {
                         },
                         { storyId: "S1", command: "node --test --reporter" },
                     ],
-                    ["npm"],
+                    [{ manager: "npm" }],
                 )
 
             assert.equal(test?.incompleteReason, undefined)
@@ -1446,7 +1446,7 @@ describe("declared verification policy", () => {
                     { storyId: "S1", command: "node test.js" },
                     { storyId: "S1", command: "node --import tsx test.js" },
                 ],
-                ["npm"],
+                [{ manager: "npm" }],
             )
 
             assert.equal(bare?.incompleteReason, undefined)
@@ -2383,7 +2383,7 @@ describe("greenfield bare node declarations", () => {
         const bare = mkdtempSync(join(tmpdir(), "baro-df-bare-"))
         try {
             writeFileSync(join(bare, "test.js"), "process.exit(0)")
-            const [spec] = translateDeclaredTests(bare, [requirement], ["npm"])
+            const [spec] = translateDeclaredTests(bare, [requirement], [{ manager: "npm" }])
             assert.equal(spec?.tool, "node")
             assert.deepEqual(spec?.args, ["test.js"])
         } finally {
@@ -2395,7 +2395,7 @@ describe("greenfield bare node declarations", () => {
             const [spec] = translateDeclaredTests(
                 withManifest,
                 [requirement],
-                ["npm"],
+                [{ manager: "npm" }],
             )
             assert.match(spec?.incompleteReason ?? "", /without package\.json/)
         } finally {
@@ -2406,7 +2406,7 @@ describe("greenfield bare node declarations", () => {
             const [spec] = translateDeclaredTests(
                 traversal,
                 [{ storyId: "S1", command: "node ../evil.js" }],
-                ["npm"],
+                [{ manager: "npm" }],
             )
             assert.ok(spec?.incompleteReason)
         } finally {
@@ -2774,6 +2774,7 @@ describe("declared package scripts in npm-workspaces monorepos", () => {
             ...(changedFiles ? { changedFiles } : {}),
         }
         const plan = createVerifyPlan(dir, { declaredTests: [requirement] })
+        assert.ok(plan.javascriptPackageManagers)
         // A resolved spec identical to a detected workspace command is deduped
         // out of the plan, so the translation itself is asserted directly.
         const [spec] = translateDeclaredTests(

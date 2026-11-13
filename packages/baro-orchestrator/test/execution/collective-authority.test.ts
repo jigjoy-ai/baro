@@ -700,9 +700,12 @@ function prd(): PrdFile {
                 title: "Implement the story",
                 description: "Complete the requested behavior.",
                 dependsOn: [],
+                retries: 2,
                 acceptance: ["tests pass"],
                 tests: [],
                 passes: false,
+                completedAt: null,
+                durationSecs: null,
             },
         ],
     }

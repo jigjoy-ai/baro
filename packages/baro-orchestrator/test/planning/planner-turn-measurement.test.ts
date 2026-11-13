@@ -3,6 +3,11 @@ import { describe, it } from "@rstest/core"
 
 import { plannerTurnMeasurement } from "../../src/planning/adapters/planner-bus-session.js"
 import type { AgentResultData } from "../../src/semantic-events.js"
+import type { Metric } from "../../src/telemetry/model-telemetry.js"
+
+function knownValue(metric: Metric): number | undefined {
+    return metric.state === "known" ? metric.value : undefined
+}
 
 function turn(usage: Record<string, unknown> | null): AgentResultData {
     return {
@@ -41,9 +46,9 @@ describe("a planner turn is measured on the lane that answered it", () => {
 
         assert.equal(measurement.backend, "jigjoy")
         assert.equal(measurement.requestedModel, "glm-5.2")
-        assert.equal(measurement.tokens.inputTotal.value, 120_000)
-        assert.equal(measurement.tokens.cachedInput.value, 90_000)
-        assert.equal(measurement.tokens.outputTotal.value, 4_000)
+        assert.equal(knownValue(measurement.tokens.inputTotal), 120_000)
+        assert.equal(knownValue(measurement.tokens.cachedInput), 90_000)
+        assert.equal(knownValue(measurement.tokens.outputTotal), 4_000)
         assert.equal(measurement.evidence.granularity, "turn")
     })
 
@@ -64,10 +69,10 @@ describe("a planner turn is measured on the lane that answered it", () => {
         })
 
         assert.equal(measurement.backend, "claude")
-        assert.equal(measurement.tokens.cachedInput.value, 40_000)
-        assert.equal(measurement.tokens.outputTotal.value, 200)
+        assert.equal(knownValue(measurement.tokens.cachedInput), 40_000)
+        assert.equal(knownValue(measurement.tokens.outputTotal), 200)
         // The wrapper reports what the turn cost; a native lane never can.
-        assert.equal(measurement.cost.equivalentUsd.value, 1.25)
+        assert.equal(knownValue(measurement.cost.equivalentUsd), 1.25)
         assert.equal(measurement.evidence.granularity, "process")
     })
 
