@@ -331,6 +331,96 @@ describe("StoryLifecycleForwarder", () => {
         ])
     })
 
+    // #287: a story the run had dropped was shown as Running for 40 more minutes.
+    it("closes a story whose lease ends without a merge after it reported success", async () => {
+        for (const [reason, error] of [
+            ["quality_failed", "the work was not accepted (acceptance gate failed)"],
+            ["quality_inconclusive", "the work was neither accepted nor rejected (acceptance could not decide)"],
+            ["aborted", "the story ended without a merge (aborted)"],
+        ] as const) {
+            const forwarder = new StoryLifecycleForwarder()
+            const events = parseEvents(await captureStdout(async () => {
+                await forwarder.onExternalEvent(
+                    source("broker"),
+                    WorkLeaseGranted.create({
+                        runId: "run-1",
+                        offerId: "offer-1",
+                        leaseId: "lease-1",
+                        workerId: "worker",
+                        generation: 1,
+                        request: { storyId: "S1", prompt: "work", model: "standard", retries: 2, timeoutSecs: 60 },
+                    }),
+                )
+                await forwarder.onExternalEvent(
+                    source("S1"),
+                    StoryResult.create({
+                        storyId: "S1",
+                        success: true,
+                        attempts: 1,
+                        durationSecs: 4,
+                        error: null,
+                        runId: "run-1",
+                        leaseId: "lease-1",
+                        generation: 1,
+                    }),
+                )
+                await forwarder.onExternalEvent(
+                    source("broker"),
+                    WorkLeaseReleased.create({
+                        runId: "run-1",
+                        offerId: "offer-1",
+                        leaseId: "lease-1",
+                        storyId: "S1",
+                        workerId: "worker",
+                        reason,
+                    }),
+                )
+            }))
+
+            assert.deepEqual(events, [
+                { type: "story_error", id: "S1", error, attempt: 1, max_retries: 1 },
+            ], reason)
+        }
+    })
+
+    it("says nothing more when the lease of a merged story is released", async () => {
+        const forwarder = new StoryLifecycleForwarder()
+        const lease = { runId: "run-1", offerId: "offer-1", leaseId: "lease-1", workerId: "worker" }
+        const events = parseEvents(await captureStdout(async () => {
+            await forwarder.onExternalEvent(
+                source("broker"),
+                WorkLeaseGranted.create({
+                    ...lease,
+                    generation: 1,
+                    request: { storyId: "S1", prompt: "work", model: "standard", retries: 1, timeoutSecs: 60 },
+                }),
+            )
+            await forwarder.onExternalEvent(
+                source("S1"),
+                StoryResult.create({
+                    storyId: "S1",
+                    success: true,
+                    attempts: 1,
+                    durationSecs: 4,
+                    error: null,
+                    runId: "run-1",
+                    leaseId: "lease-1",
+                    generation: 1,
+                }),
+            )
+            await forwarder.onExternalEvent(
+                source("repo"),
+                StoryMerged.create({ storyId: "S1", mode: "worktree", runId: "run-1", leaseId: "lease-1" }),
+            )
+            await forwarder.onExternalEvent(
+                source("broker"),
+                WorkLeaseReleased.create({ ...lease, storyId: "S1", reason: "integrated" }),
+            )
+        }))
+
+        assert.deepEqual(events.map(({ type }) => type), ["story_complete", "story_merged"])
+    })
+
     it("suppresses terminal events from a superseded lease", async () => {
         const forwarder = new StoryLifecycleForwarder()
         const lease = (

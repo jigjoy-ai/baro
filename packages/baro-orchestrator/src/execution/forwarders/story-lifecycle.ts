@@ -80,8 +80,22 @@ export class StoryLifecycleForwarder extends BusMember {
                 )
             ) return
             const key = integrationKey(event.payload.runId, event.payload.leaseId)
+            const unmerged = key ? this.pendingIntegration.get(key) : undefined
             if (key) this.pendingIntegration.delete(key)
             if (event.payload.reason !== "integrated") {
+                // The agent reported success and the lease then ended without
+                // a merge: acceptance failed or could not decide. Nothing else
+                // closes the story on the stream, and a client kept showing it
+                // as running for the rest of the run (#287).
+                if (unmerged) {
+                    emit({
+                        type: "story_error",
+                        id: event.payload.storyId,
+                        error: unmergedReleaseError(event.payload.reason),
+                        attempt: unmerged.attempts,
+                        max_retries: this.retryBudget.get(event.payload.storyId) ?? unmerged.attempts,
+                    })
+                }
                 this.filesByStory.delete(event.payload.storyId)
                 this.startedStories.delete(event.payload.storyId)
             }
@@ -423,6 +437,14 @@ export interface CollectiveStoryLifecycleAuthorities {
 
 function blockKey(storyId: string, blockId: string): string {
     return `${storyId}\0${blockId}`
+}
+
+function unmergedReleaseError(reason: string): string {
+    if (reason === "quality_failed") return "the work was not accepted (acceptance gate failed)"
+    if (reason === "quality_inconclusive") {
+        return "the work was neither accepted nor rejected (acceptance could not decide)"
+    }
+    return `the story ended without a merge (${reason})`
 }
 
 function integrationKey(
