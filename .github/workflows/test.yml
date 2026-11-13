@@ -23,7 +23,7 @@ jobs:
       - run: npm ci
       # The orchestrator resolves @baro/memory through its built dist.
       - run: npm run build -w @baro/memory
-      - run: npm run typecheck -w @baro/orchestrator
+      - run: npm run typecheck -w @baro/orchestrator -w baro-dsh -w @baro/memory
       - run: npm run test:fast -w @baro/orchestrator
       - run: npm test -w baro-dsh
       - run: npm test -w @baro/memory

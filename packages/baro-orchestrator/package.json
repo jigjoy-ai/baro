@@ -10,7 +10,7 @@
     "dev": "tsc -p tsconfig.json --watch",
     "cli": "tsx scripts/cli.ts",
     "test:billing-e2e": "tsx scripts/test-authoritative-billing-e2e.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.test.json",
     "test": "npm run test:fast && npm run test:slow",
     "test:fast": "rstest run --project unit",
     "test:slow": "rstest run --project process --pool.maxWorkers 2",

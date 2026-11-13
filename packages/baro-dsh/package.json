@@ -62,7 +62,7 @@
     "build:host": "tsc -p tsconfig.json",
     "build:client": "tsup",
     "test": "rstest run",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json",
+    "typecheck": "tsc -p tsconfig.test.json && tsc -p tsconfig.client.json",
     "prepublishOnly": "npm run typecheck && npm test && npm run build"
   },
   "peerDependencies": {

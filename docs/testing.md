@@ -41,6 +41,10 @@ per-test timings.
   on a sleep sized for an idle machine.
 - `test/env.ts` is the setup file: it keeps tests away from the real
   `~/.baro` and from run-start cleanup of real worktree dirs.
+- Tests are type-checked: `npm run typecheck` covers `src`, `test` and
+  `scripts` through `tsconfig.test.json` (rstest itself strips types and would
+  run a test that no longer matches the source). No `any` or `@ts-expect-error`
+  to get past it; a deliberately invalid value gets one cast where it is built.
 
 ## Other packages
 
@@ -54,6 +58,6 @@ the ONNX embedding model on first run).
 
 ## CI
 
-`.github/workflows/test.yml` runs on every pull request: typecheck and the
-`unit` project on Linux, the `process` project in four shards on macOS, and
+`.github/workflows/test.yml` runs on every pull request: typecheck (sources
+and tests of all three packages) and the `unit` project on Linux, the `process` project in four shards on macOS, and
 the Rust tests.

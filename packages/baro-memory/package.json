@@ -10,7 +10,7 @@
         "dev": "tsc -p tsconfig.json --watch",
         "test": "rstest run",
         "test:watch": "rstest watch",
-        "typecheck": "tsc -p tsconfig.json --noEmit"
+        "typecheck": "tsc -p tsconfig.test.json"
     },
     "dependencies": {
         "@xenova/transformers": "^2.17.0",
