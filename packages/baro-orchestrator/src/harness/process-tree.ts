@@ -28,6 +28,7 @@ let observationScansCompleted = 0
 let observationActiveScans = 0
 let observationMaxConcurrentScans = 0
 let terminalProcessTableCache: { table: ProcessTable | null } | null = null
+let terminalTableReads = 0
 
 type LinuxProcessTableBackend = "proc" | "ps"
 
@@ -147,6 +148,8 @@ export interface ProcessTreeObserverStats {
     /** `scansStarted` ordinal of the latest scan that read a table; a timed
      * out `ps` still counts as completed but observed nothing. */
     lastObservedScan: number
+    /** Synchronous full-table reads taken at a root's terminal boundary. */
+    terminalTableReads: number
 }
 
 /** @internal Deterministic ownership-publication failure seam. The active-tree
@@ -182,6 +185,7 @@ export function processTreeObserverStats(): ProcessTreeObserverStats {
         activeScans: observationActiveScans,
         maxConcurrentScans: observationMaxConcurrentScans,
         lastObservedScan: observationLastObservedScan,
+        terminalTableReads,
     }
 }
 
@@ -236,9 +240,11 @@ export class ManagedProcessTree {
 
     readonly done: Promise<void>
     /**
-     * Resolves true only after an authoritative process-table snapshot finds
-     * no live member of this tree's owned POSIX process group and no live
-     * identity-captured descendant which escaped that group. Legacy trees,
+     * Resolves true only after an authoritative observation finds no live
+     * member of this tree's owned POSIX process group and no live
+     * identity-captured descendant which escaped that group: a process-table
+     * snapshot, or the kernel's empty-group answer when the reaped root is
+     * the only identity ever captured. Legacy trees,
      * Windows trees, and unsupported platforms resolve false when they settle.
      * An unobserved daemon remains outside this cooperative POSIX assurance;
      * only an OS containment primitive can rule that case out completely.
@@ -429,6 +435,11 @@ export class ManagedProcessTree {
      */
     markRootClosed(): void {
         if (this.settled || this.rootClosed) return
+        if (this.ownedGroupIsProvablyEmpty()) {
+            this.rootClosed = true
+            this.settle(true)
+            return
+        }
         // Capture a same-turn full snapshot before yielding. A short-lived
         // executable shim may already be gone while its real provider remains
         // in the owned group; waiting for the async observer would leave only
@@ -781,6 +792,34 @@ export class ManagedProcessTree {
             }
         }
         return false
+    }
+
+    /**
+     * The kernel's own answer for the ordinary one-shot exit, without a
+     * process-table read: the reaped root is the only identity this tree ever
+     * captured and its group has no member left. An emptied group cannot be
+     * rejoined, and a table could add nothing: discovery walks down from a
+     * live captured identity and there is none. Anything else (a captured
+     * descendant, a group that still answers, a restricted probe) takes the
+     * snapshot path.
+     */
+    private ownedGroupIsProvablyEmpty(): boolean {
+        if (
+            this.ownedProcessGroupId === null ||
+            this.processGroupObservation !== observedProcessGroupIsAlive ||
+            (this.child.exitCode === null && this.child.signalCode === null)
+        ) {
+            return false
+        }
+        for (const pid of this.identities.keys()) {
+            if (pid !== this.rootPid) return false
+        }
+        try {
+            process.kill(-this.ownedProcessGroupId, 0)
+            return false
+        } catch (error) {
+            return (error as NodeJS.ErrnoException).code === "ESRCH"
+        }
     }
 
     private hasTrackedProcessAlive(table: ProcessTable | null): boolean {
@@ -1462,6 +1501,7 @@ function readTerminalProcessTableSync(): ProcessTable | null {
     if (terminalProcessTableCache !== null) {
         return terminalProcessTableCache.table
     }
+    terminalTableReads += 1
     terminalProcessTableCache = { table: readProcessTableSync() }
     const clear = setImmediate(() => {
         terminalProcessTableCache = null
