@@ -97,7 +97,7 @@ function runPostinstall(
     extraEnv: Record<string, string> = {},
 ): { stdout: string; status: number | null } {
     const env: NodeJS.ProcessEnv = { ...process.env }
-    for (const key of ["SUDO_USER", "SUDO_UID", "SUDO_GID", "BARO_SKIP_POSTINSTALL", "BARO_ALLOW_DOWNGRADE"]) {
+    for (const key of ["SUDO_USER", "SUDO_UID", "SUDO_GID", "BARO_SKIP_POSTINSTALL", "BARO_ALLOW_DOWNGRADE", "BARO_INSTALL_FROM_CHECKOUT"]) {
         delete env[key]
     }
     const result = spawnSync(
@@ -147,6 +147,20 @@ describe("baro-ai postinstall and the installed baro", () => {
             assert.match(lines[0], /source checkout.*cargo build --release -p baro-tui/)
             assert.deepEqual(fixture.downloads(), [])
             assert.deepEqual(snapshot(fixture.baroBin), before)
+        })
+    })
+
+    it("stages a source checkout when BARO_INSTALL_FROM_CHECKOUT=1 asks for it", unix, async () => {
+        await withTempDir("baro-postinstall-", (root) => {
+            const fixture = stage(root, "checkout", "0.133.0", "0.132.0")
+
+            const { stdout, status } = runPostinstall(fixture, fakeBinary("0.133.0"), {
+                BARO_INSTALL_FROM_CHECKOUT: "1",
+            })
+
+            assert.equal(status, 0, stdout)
+            assert.equal(fixture.downloads().length, 1)
+            assert.equal(installedVersion(fixture), "baro 0.133.0")
         })
     })
 
