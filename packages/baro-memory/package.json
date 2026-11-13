@@ -8,8 +8,8 @@
     "scripts": {
         "build": "tsc -p tsconfig.json",
         "dev": "tsc -p tsconfig.json --watch",
-        "test": "vitest run",
-        "test:watch": "vitest",
+        "test": "rstest run",
+        "test:watch": "rstest watch",
         "typecheck": "tsc -p tsconfig.json --noEmit"
     },
     "dependencies": {
@@ -17,9 +17,9 @@
         "vectra": "^0.9.0"
     },
     "devDependencies": {
+        "@rstest/core": "^0.12.6",
         "@types/node": "^22.0.0",
-        "typescript": "^5.3.3",
-        "vitest": "^1.0.0"
+        "typescript": "^5.3.3"
     },
     "keywords": [
         "baro",

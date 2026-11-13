@@ -8,7 +8,7 @@ import {
     writeFileSync,
 } from "node:fs"
 import { join } from "node:path"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import { CriticCodex } from "../../src/harness/codex/critic.js"
 import type { CriticEvidenceSource } from "../../src/acceptance/critic-evidence.js"

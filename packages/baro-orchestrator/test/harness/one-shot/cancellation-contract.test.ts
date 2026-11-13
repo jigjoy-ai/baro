@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import { runCodexOneShot } from "../../../src/harness/codex/one-shot.js"
 import { runOpenCodeOneShot } from "../../../src/harness/opencode/one-shot.js"

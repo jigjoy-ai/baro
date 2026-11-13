@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { chmodSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import {
     execFileCli,

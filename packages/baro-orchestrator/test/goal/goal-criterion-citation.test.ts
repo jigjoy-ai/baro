@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 import { normalizeText, resolveCitedCriteria } from "../../src/goal/goal-criterion-citation.js"
 
 const ids = ["G-A1", "G-A2", "G-C4"]

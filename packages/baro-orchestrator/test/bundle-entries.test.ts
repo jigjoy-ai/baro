@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const tsupConfigPath = join(packageRoot, "..", "baro-app", "tsup.config.ts")

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { tmpdir } from "node:os"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import { ContinuousGateRunner } from "../../src/verification/continuous-gate-runner.js"
 import type { GateCommandOutcome } from "../../src/verification/continuous-gate.js"

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { describe, it } from "node:test"
+import { describe, it, onTestFinished, rs } from "@rstest/core"
 
 import { LeaseBroker } from "../../src/market/lease-broker.js"
 import {
@@ -139,8 +139,9 @@ describe("LeaseBroker", () => {
         assert.equal(released?.payload.reason, "expired")
     })
 
-    it("keeps the legacy integration timeout after a successful result", async (t) => {
-        t.mock.timers.enable({ apis: ["setTimeout"] })
+    it("keeps the legacy integration timeout after a successful result", async () => {
+        rs.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+        onTestFinished(() => { rs.useRealTimers() })
         const runId = "run-legacy-integration-timeout"
         const broker = new LeaseBroker({
             runId,
@@ -160,10 +161,10 @@ describe("LeaseBroker", () => {
         )
         await flush()
 
-        t.mock.timers.tick(9)
+        rs.advanceTimersByTime(9)
         await flush()
         assert.equal(env.events.filter(WorkLeaseReleased.is).length, 0)
-        t.mock.timers.tick(1)
+        rs.advanceTimersByTime(1)
         await flush()
         assert.equal(env.events.filter(WorkLeaseExpired.is).length, 1)
         assert.equal(
@@ -172,8 +173,9 @@ describe("LeaseBroker", () => {
         )
     })
 
-    it("does not make an unreviewed story wait merely because a quality authority is globally bound", async (t) => {
-        t.mock.timers.enable({ apis: ["setTimeout"] })
+    it("does not make an unreviewed story wait merely because a quality authority is globally bound", async () => {
+        rs.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+        onTestFinished(() => { rs.useRealTimers() })
         const runId = "run-unreviewed-with-gate"
         const broker = new LeaseBroker({
             runId,
@@ -194,7 +196,7 @@ describe("LeaseBroker", () => {
         )
         await flush()
 
-        t.mock.timers.tick(10)
+        rs.advanceTimersByTime(10)
         await flush()
         assert.equal(env.events.filter(WorkLeaseExpired.is).length, 1)
         assert.equal(
@@ -291,8 +293,9 @@ describe("LeaseBroker", () => {
         )
     })
 
-    it("keeps a successful lease alive through Gate rechecks and starts integration timeout only after exact pass", async (t) => {
-        t.mock.timers.enable({ apis: ["setTimeout"] })
+    it("keeps a successful lease alive through Gate rechecks and starts integration timeout only after exact pass", async () => {
+        rs.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+        onTestFinished(() => { rs.useRealTimers() })
         const runId = "run-quality-wait-timeout"
         const qualityGate = source("quality-gate")
         const broker = new LeaseBroker({
@@ -316,7 +319,7 @@ describe("LeaseBroker", () => {
         // Both the old execution deadline and the configured integration
         // deadline may pass while the Gate performs bounded same-candidate
         // rechecks. Neither owns the Gate's quality wait.
-        t.mock.timers.tick(30)
+        rs.advanceTimersByTime(30)
         await flush()
         assert.equal(env.events.filter(WorkLeaseExpired.is).length, 0)
         assert.equal(env.events.filter(WorkLeaseReleased.is).length, 0)
@@ -331,17 +334,17 @@ describe("LeaseBroker", () => {
             }),
         )
         await flush()
-        t.mock.timers.tick(30)
+        rs.advanceTimersByTime(30)
         await flush()
         assert.equal(env.events.filter(WorkLeaseExpired.is).length, 0)
         assert.equal(env.events.filter(WorkLeaseReleased.is).length, 0)
 
         env.publish(qualityGate, pass)
         await flush()
-        t.mock.timers.tick(9)
+        rs.advanceTimersByTime(9)
         await flush()
         assert.equal(env.events.filter(WorkLeaseReleased.is).length, 0)
-        t.mock.timers.tick(1)
+        rs.advanceTimersByTime(1)
         await flush()
         assert.equal(env.events.filter(WorkLeaseExpired.is).length, 1)
         assert.equal(env.events.filter(WorkLeaseReleased.is).length, 1)
@@ -352,14 +355,15 @@ describe("LeaseBroker", () => {
 
         // A late/replayed Gate pass cannot resurrect an expired correlation.
         env.publish(qualityGate, pass)
-        t.mock.timers.tick(30)
+        rs.advanceTimersByTime(30)
         await flush()
         assert.equal(env.events.filter(WorkLeaseExpired.is).length, 1)
         assert.equal(env.events.filter(WorkLeaseReleased.is).length, 1)
     })
 
-    it("preserves the integration timer when an early quality pass precedes StoryResult", async (t) => {
-        t.mock.timers.enable({ apis: ["setTimeout"] })
+    it("preserves the integration timer when an early quality pass precedes StoryResult", async () => {
+        rs.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+        onTestFinished(() => { rs.useRealTimers() })
         const runId = "run-quality-pass-first"
         const qualityGate = source("quality-gate")
         const broker = new LeaseBroker({
@@ -381,19 +385,19 @@ describe("LeaseBroker", () => {
 
         env.publish(qualityGate, pass)
         await flush()
-        t.mock.timers.tick(9)
+        rs.advanceTimersByTime(9)
         await flush()
         assert.equal(env.events.filter(WorkLeaseReleased.is).length, 0)
 
         env.publish(source("S1-agent"), result)
         await flush()
-        t.mock.timers.tick(9)
+        rs.advanceTimersByTime(9)
         await flush()
         // A duplicate success after the early pass must not clear or re-arm
         // the already-running integration deadline.
         env.publish(source("S1-agent"), result)
         await flush()
-        t.mock.timers.tick(1)
+        rs.advanceTimersByTime(1)
         await flush()
 
         assert.equal(env.events.filter(WorkLeaseExpired.is).length, 1)

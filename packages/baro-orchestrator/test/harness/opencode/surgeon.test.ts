@@ -1,9 +1,13 @@
 import assert from "node:assert/strict"
-import childProcess, { type ChildProcess } from "node:child_process"
+import { spawn, type ChildProcess } from "node:child_process"
 import { EventEmitter } from "node:events"
-import { syncBuiltinESMExports } from "node:module"
 import { PassThrough } from "node:stream"
-import { describe, it } from "node:test"
+import { describe, it, rs } from "@rstest/core"
+
+// Source modules are bundled per test file, so a builtin is replaced through
+// the module registry: spy mode keeps every real export and lets one test
+// swap `spawn` for a scripted child.
+rs.mock("node:child_process", { spy: true })
 
 import {
     ModelInvocationMeasured,
@@ -51,8 +55,7 @@ async function withSpawnOutput(
     exitCode: number,
     fn: () => Promise<void>,
 ): Promise<void> {
-    const originalSpawn = childProcess.spawn
-    childProcess.spawn = (() => {
+    rs.mocked(spawn).mockImplementation((() => {
         const proc = new EventEmitter() as ChildProcess
         const stdin = new PassThrough()
         stdin.resume()
@@ -85,13 +88,11 @@ async function withSpawnOutput(
             emitTerminal(exitCode, null)
         })
         return proc
-    }) as typeof childProcess.spawn
-    syncBuiltinESMExports()
+    }) as typeof spawn)
     try {
         await fn()
     } finally {
-        childProcess.spawn = originalSpawn
-        syncBuiltinESMExports()
+        rs.mocked(spawn).mockReset()
     }
 }
 

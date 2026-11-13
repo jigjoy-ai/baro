@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import { PLANNER_SYSTEM_PROMPT } from "../../../src/planning/domain/planner-prompts.js"
 import { widestDagLevel } from "../../../src/planning/domain/mode-enforcement.js"

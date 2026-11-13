@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { describe, it } from 'node:test'
+import { describe, it } from '@rstest/core'
 import { isMilestone, parseLine } from '../src/domain/protocol.ts'
 import { RunTracker, classifyDone, renderOutcome, renderProgress, resolveTerminal } from '../src/domain/run.ts'
 

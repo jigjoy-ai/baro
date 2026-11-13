@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import type { BusMember } from "../../../src/runtime/coordination.js"
 
@@ -85,12 +85,8 @@ process.exit(0)
         })
     })
 
-    it(
-        "repairs a rejected candidate with a fresh Pi process in the same worktree",
-        {
-            skip: !PROCESS_TREE_CAPABILITIES
-                .cooperativeQuiescenceObservation,
-        },
+    it.skipIf(!PROCESS_TREE_CAPABILITIES
+                .cooperativeQuiescenceObservation,)("repairs a rejected candidate with a fresh Pi process in the same worktree",
         async () => {
             await withTempDir("pi-story-agent-surgical-", async (dir) => {
                 const binDir = join(dir, "bin")

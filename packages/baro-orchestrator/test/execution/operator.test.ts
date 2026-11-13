@@ -1,4 +1,4 @@
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 import assert from "node:assert/strict"
 
 import { Operator } from "../../src/execution/operator.js"

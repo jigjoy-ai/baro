@@ -3,12 +3,12 @@ import { execFileSync } from "node:child_process"
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { after, describe, it } from "node:test"
+import { afterAll, describe, it } from "@rstest/core"
 
 import { materializeStoryHooks } from "../../src/harness/claude/hook-bridge.js"
 
 const dir = mkdtempSync(join(tmpdir(), "baro-hook-test-"))
-after(() => rmSync(dir, { recursive: true, force: true }))
+afterAll(() => rmSync(dir, { recursive: true, force: true }))
 
 function runHook(mode: string, input: unknown): string {
     return execFileSync("node", [join(dir, "hook.mjs"), mode], {

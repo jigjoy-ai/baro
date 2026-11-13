@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import { buildEvalPrompt } from "../../src/acceptance/critic-evidence.js"
 import { CriterionLedger, honorEstablished } from "../../src/acceptance/criterion-ledger.js"

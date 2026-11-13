@@ -3,13 +3,13 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } 
 import { execFileSync } from "node:child_process"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import { runRepositoryCommand } from "../../src/integration/repository-command.js"
 
 // A story can commit a hooks directory or point the shared config at one; the
 // orchestrator then merges and commits with the user's account.
-describe("the orchestrator's git ignores repository hooks", { skip: process.platform === "win32" }, () => {
+describe.skipIf(process.platform === "win32")("the orchestrator's git ignores repository hooks", () => {
     it("runs no planted hook, where plain git would", async () => {
         const repo = mkdtempSync(join(tmpdir(), "baro-git-hooks-"))
         try {

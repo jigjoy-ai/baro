@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { createServer, type Server } from "node:http"
 import { once } from "node:events"
-import { after, before, describe, it } from "node:test"
+import { afterAll, beforeAll, describe, it } from "@rstest/core"
 
 import {
     InputTokenDetails,
@@ -61,7 +61,7 @@ const originalApiKey = process.env.OPENAI_API_KEY
 const originalBaseUrl = process.env.OPENAI_BASE_URL
 
 describe("SurgeonOpenAI", () => {
-    before(async () => {
+    beforeAll(async () => {
         server = createServer((req, res) => {
             let body = ""
             req.on("data", (chunk: Buffer) => {
@@ -116,7 +116,7 @@ describe("SurgeonOpenAI", () => {
         process.env.OPENAI_BASE_URL = baseUrl
     })
 
-    after(async () => {
+    afterAll(async () => {
         if (originalApiKey === undefined) {
             delete process.env.OPENAI_API_KEY
         } else {

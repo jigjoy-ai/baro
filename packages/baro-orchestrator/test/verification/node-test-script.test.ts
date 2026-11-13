@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import { createVerifyPlan } from "../../src/verification/verify.js"
 import { coalesceNodeTestScripts } from "../../src/verification/node-test-script.js"

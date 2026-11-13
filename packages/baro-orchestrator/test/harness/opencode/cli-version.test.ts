@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { chmodSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { afterEach, beforeEach, describe, it } from "node:test"
+import { afterEach, beforeEach, describe, it } from "@rstest/core"
 
 import {
     __resetOpenCodeMajorCache,
@@ -17,7 +17,7 @@ function fakeOpenCode(dir: string, version: string): string {
     return bin
 }
 
-describe("opencode flags by major version", { skip: process.platform === "win32" }, () => {
+describe.skipIf(process.platform === "win32")("opencode flags by major version", () => {
     let pinned: string | undefined
     beforeEach(() => {
         pinned = process.env.BARO_OPENCODE_MAJOR

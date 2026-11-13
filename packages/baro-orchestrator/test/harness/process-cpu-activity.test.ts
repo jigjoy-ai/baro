@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import {
     CPU_ACTIVE_MIN_FRACTION,
@@ -107,9 +107,7 @@ describe("process CPU activity sampling", () => {
         )
     })
 
-    it(
-        "reads and parses real ps output for this very process",
-        { skip: process.platform === "win32" },
+    it.skipIf(process.platform === "win32")("reads and parses real ps output for this very process",
         async () => {
             const sample = await sampleProcessTreeCpu(process.pid)
 

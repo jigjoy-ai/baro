@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process"
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { after, afterEach, before, describe, it } from "node:test"
+import { afterAll, afterEach, beforeAll, describe, it } from "@rstest/core"
 
 import { GitGate } from "../../src/integration/git.js"
 import { IntegrationWorktree } from "../../src/integration/integration-worktree.js"
@@ -37,7 +37,7 @@ let fakeBaro: string
 let savedBaroBin: string | undefined
 const cleanups: Array<() => Promise<void> | void> = []
 
-before(() => {
+beforeAll(() => {
     dir = mkdtempSync(join(tmpdir(), "baro-operator-base-"))
     fakeBaro = join(dir, "fake-baro.js")
     writeFileSync(
@@ -58,7 +58,7 @@ setTimeout(() => {
     process.env.BARO_BIN = fakeBaro
 })
 
-after(() => {
+afterAll(() => {
     if (savedBaroBin === undefined) delete process.env.BARO_BIN
     else process.env.BARO_BIN = savedBaroBin
     rmSync(dir, { recursive: true, force: true })

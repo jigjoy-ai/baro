@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { existsSync } from "node:fs"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import { runDevinOneShot } from "../../../src/harness/devin/one-shot.js"
 import { DevinCliParticipant } from "../../../src/harness/devin/cli-participant.js"

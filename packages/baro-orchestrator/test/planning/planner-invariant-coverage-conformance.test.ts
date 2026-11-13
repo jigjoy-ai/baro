@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { afterEach, beforeEach, describe, it } from "node:test"
+import { afterEach, beforeEach, describe, it } from "@rstest/core"
 
 import { createPlannerHarnessProgressiveSupport } from "../../src/planning/adapters/planner-harness-progressive.js"
 import type { PlannerOpenAIPlanFragmentEvent } from "../../src/planning/adapters/planner-openai-progressive.js"

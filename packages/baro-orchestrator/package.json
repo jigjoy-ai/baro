@@ -11,9 +11,12 @@
     "cli": "tsx scripts/cli.ts",
     "test:billing-e2e": "tsx scripts/test-authoritative-billing-e2e.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx --import ./test/env.ts --test --test-concurrency=2 \"test/**/*.test.ts\"",
-    "test:fast": "node scripts/test-lanes.mjs fast",
-    "test:slow": "node scripts/test-lanes.mjs slow"
+    "test": "npm run test:fast && npm run test:slow",
+    "test:fast": "rstest run --project unit",
+    "test:slow": "rstest run --project process --pool.maxWorkers 2",
+    "test:changed": "rstest run --changed origin/main",
+    "test:related": "rstest run --related",
+    "test:watch": "rstest watch --project unit"
   },
   "dependencies": {
     "@baro/memory": "*",
@@ -23,9 +26,10 @@
     "ws": "^8.21.0"
   },
   "devDependencies": {
+    "@rstest/core": "^0.12.6",
     "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.0",
     "tsx": "^4.21.0",
-    "typescript": "^5.3.3",
-    "@types/ws": "^8.5.0"
+    "typescript": "^5.3.3"
   }
 }

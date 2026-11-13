@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process"
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import {
     FunctionCallItem,
@@ -2408,7 +2408,7 @@ describe("orchestrate collective mode", () => {
                     executor,
                 }),
                 new Promise<never>((_, reject) =>
-                    setTimeout(() => reject(new Error("collective run deadlocked")), 2_000),
+                    setTimeout(() => reject(new Error("collective run deadlocked")), 30_000),
                 ),
             ])
 

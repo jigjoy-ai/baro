@@ -11,7 +11,7 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, beforeEach, describe, it } from "node:test"
+import { afterEach, beforeEach, describe, it } from "@rstest/core"
 
 import { GitGate } from "../../src/integration/git.js"
 import { WorktreeManager } from "../../src/integration/worktree.js"

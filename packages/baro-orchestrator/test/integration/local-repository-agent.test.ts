@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import { LocalRepositoryAgent } from "../../src/integration/local-repository-agent.js"
 import {

@@ -61,7 +61,7 @@
     "build": "npm run build:host && npm run build:client",
     "build:host": "tsc -p tsconfig.json",
     "build:client": "tsup",
-    "test": "node --test --import tsx test/*.test.ts",
+    "test": "rstest run",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json",
     "prepublishOnly": "npm run typecheck && npm test && npm run build"
   },
@@ -93,6 +93,7 @@
     "@deepseek-ai/dsh-subprocess": "0.1.2-rc.1",
     "@deepseek-ai/dsh-system-prompt": "0.1.2-rc.1",
     "@deepseek-ai/schemastery": "^3.18.2",
+    "@rstest/core": "^0.12.6",
     "@types/node": "^22.0.0",
     "@types/react": "~18.3.1",
     "react": "^18.3.1",

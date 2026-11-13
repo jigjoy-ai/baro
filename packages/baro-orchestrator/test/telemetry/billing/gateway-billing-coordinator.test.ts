@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { createServer, type Server } from "node:http"
-import { afterEach, describe, it } from "node:test"
+import { afterEach, describe, it } from "@rstest/core"
 
 import {
     ModelContext,

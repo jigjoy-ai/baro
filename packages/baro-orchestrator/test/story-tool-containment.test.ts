@@ -12,7 +12,7 @@ import {
 import { tmpdir } from "node:os"
 import { basename, join } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 import assert from "node:assert/strict"
 
 import { type Tool } from "../src/runtime/mozaik.js"
@@ -205,9 +205,7 @@ describe("Story tool project containment", () => {
         })
     })
 
-    it(
-        "drains an inherited-stdio process tree and removes its sandbox before abort settles",
-        { skip: process.platform === "win32" },
+    it.skipIf(process.platform === "win32")("drains an inherited-stdio process tree and removes its sandbox before abort settles",
         async () => {
             await withProjectAndSibling(async (project) => {
                 const started = join(project, "bash-descendant-started")
@@ -396,9 +394,7 @@ setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_0
         })
     })
 
-    it(
-        "uses the macOS process sandbox to block an indirect Node write to a sibling",
-        { skip: process.platform !== "darwin" || !existsSync("/usr/bin/sandbox-exec") },
+    it.skipIf(process.platform !== "darwin" || !existsSync("/usr/bin/sandbox-exec"))("uses the macOS process sandbox to block an indirect Node write to a sibling",
         async () => {
             await withProjectAndSibling(async (project, sibling) => {
                 const escapedWrite = join(sibling, "indirect-node-write.txt")
@@ -694,9 +690,7 @@ setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_0
         })
     })
 
-    it("treats node inline code as data while Seatbelt still blocks external writes", {
-        skip: process.platform !== "darwin" || !existsSync("/usr/bin/sandbox-exec"),
-    }, async () => {
+    it.skipIf(process.platform !== "darwin" || !existsSync("/usr/bin/sandbox-exec"),)("treats node inline code as data while Seatbelt still blocks external writes", async () => {
         await withProjectAndSibling(async (project, sibling) => {
             const escapedWrite = join(sibling, "node-e-escape.txt")
             const bash = namedTool(createStoryTools(project), "bash")

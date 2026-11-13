@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import { plannerTurnMeasurement } from "../../src/planning/adapters/planner-bus-session.js"
 import type { AgentResultData } from "../../src/semantic-events.js"

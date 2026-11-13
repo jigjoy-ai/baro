@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { createConnection } from "node:net"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import { HostToolsRelay, OPERATOR_MCP_MODE } from "../../src/operator/host-tools-relay.js"
 

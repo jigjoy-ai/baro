@@ -7,7 +7,7 @@ import {
 } from "node:fs"
 import { join } from "node:path"
 import { request as httpRequest } from "node:http"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import { inboxFilenameForAgentId } from "../../scripts/collaboration-inbox-path.mjs"
 import { CollaborationBridge } from "../../src/execution/collaboration-bridge.js"

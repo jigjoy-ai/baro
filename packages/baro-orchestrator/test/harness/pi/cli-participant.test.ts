@@ -1,6 +1,6 @@
 import { chmodSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 import assert from "node:assert/strict"
 
 import { PiCliParticipant } from "../../../src/harness/pi/cli-participant.js"

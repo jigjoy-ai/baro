@@ -1,4 +1,4 @@
-import { afterEach, describe, it } from "node:test"
+import { afterEach, describe, it } from "@rstest/core"
 import assert from "node:assert/strict"
 
 import {

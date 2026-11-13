@@ -2,7 +2,7 @@
  * Tests for @baro/memory - Vectra-backed semantic memory for baro agents.
  */
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll } from '@rstest/core'
 import { createMemoryStore, MemoryStore, Finding } from '../index.js'
 import { join } from 'path'
 import { mkdtempSync, rmSync, writeFileSync } from 'fs'

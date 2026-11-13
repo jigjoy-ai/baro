@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { existsSync } from "node:fs"
 import { createServer, type Server } from "node:http"
 import { join } from "node:path"
-import { after, describe, it } from "node:test"
+import { afterAll, describe, it } from "@rstest/core"
 
 import OpenAI from "openai"
 
@@ -266,7 +266,7 @@ function sseEndpoint(frames: unknown[]): Promise<{ url: string; close: () => voi
 }
 
 const listening: Array<() => void> = []
-after(() => {
+afterAll(() => {
     for (const close of listening) close()
 })
 

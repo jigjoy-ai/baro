@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { readFileSync, readdirSync, statSync } from "node:fs"
 import path from "node:path"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 import { fileURLToPath } from "node:url"
 
 import { MILESTONE_TYPES } from "../../src/operator/protocol.js"

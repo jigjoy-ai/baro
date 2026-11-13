@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { it } from "node:test"
+import { it } from "@rstest/core"
 
 import { DialogueForwarder } from "../../../src/execution/forwarders/dialogue.js"
 import {

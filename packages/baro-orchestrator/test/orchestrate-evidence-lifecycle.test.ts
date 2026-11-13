@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { setImmediate as setImmediatePromise } from "node:timers/promises"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import {
     resolveCriticRepositoryTarget,

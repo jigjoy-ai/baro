@@ -1,6 +1,6 @@
 import { chmodSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 import assert from "node:assert/strict"
 
 import { ClaudeCliParticipant } from "../../../src/harness/claude/cli-participant.js"

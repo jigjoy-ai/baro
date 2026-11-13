@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import { readAuthoritativeVerifyPlanOptions } from "../../src/verification/prd-declared-tests.js"
 

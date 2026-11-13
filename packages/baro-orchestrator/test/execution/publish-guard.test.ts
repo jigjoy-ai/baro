@@ -11,7 +11,7 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import {
     FunctionCallItem,
@@ -207,7 +207,7 @@ process.stdin.resume()
     })
 })
 
-describe("one-shot lane guard bin", { skip: process.platform === "win32" }, () => {
+describe.skipIf(process.platform === "win32")("one-shot lane guard bin", () => {
     it("refuses gh and git push, forwards other git commands, and records refusals", async () => {
         await withTempDir("publish-guard-bin-", async (dir) => {
             const guard = join(dir, "guard")
@@ -450,7 +450,7 @@ describe("story git policy: publishing and the repository's shared state", () =>
             assert.equal(publishCommandRefusal(command), null, `${command} must be allowed`)
         }
     })
-    it("applies the same policy in the CLI lanes' git wrapper", { skip: process.platform === "win32" }, () => {
+    it.skipIf(process.platform === "win32")("applies the same policy in the CLI lanes' git wrapper", () => {
         const dir = mkdtempSync(join(tmpdir(), "baro-git-wrapper-"))
         try {
             materializePublishGuardBin(join(dir, "bin"))

@@ -8,7 +8,7 @@ import {
 } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { join } from "node:path"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import { withTempDir } from "./execution/helpers.js"
 import {

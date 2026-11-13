@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import { withTempDir } from "../execution/helpers.js"
 
@@ -81,7 +81,7 @@ describe("baro launcher self-update", () => {
         })
     }
 
-    it("installs the newer version before the run starts", { skip: process.platform === "win32" }, async () => {
+    it.skipIf(process.platform === "win32")("installs the newer version before the run starts", async () => {
         await withStagedHome(async (root) => {
             const result = await selfUpdate({ packageVersion: "1.0.0", argv: ["goal"], env: {}, isTTY: true })
             assert.deepEqual(result, { updated: true, reason: null })
@@ -92,18 +92,18 @@ describe("baro launcher self-update", () => {
         })
     })
 
-    it("leaves the install alone while another baro run is active", { skip: process.platform === "win32" }, async () => {
+    it.skipIf(process.platform === "win32")("leaves the install alone while another baro run is active", async () => {
         await withStagedHome(async (root) => {
             const live = join(root, "home", ".baro", "live")
             mkdirSync(live)
-            writeFileSync(join(live, "run-1.json"), JSON.stringify({ id: "run-1", pid: process.pid }))
+            writeFileSync(join(live, "run-1.json"), JSON.stringify({ id: "run-1", pid: process.ppid }))
             const result = await selfUpdate({ packageVersion: "1.0.0", argv: ["goal"], env: {}, isTTY: true })
             assert.equal(result.updated, false)
             assert.equal(result.reason, "another baro run is active")
         })
     })
 
-    it("does nothing for automation", { skip: process.platform === "win32" }, async () => {
+    it.skipIf(process.platform === "win32")("does nothing for automation", async () => {
         await withStagedHome(async () => {
             const result = await selfUpdate({ packageVersion: "1.0.0", argv: ["--headless", "goal"], env: {}, isTTY: true })
             assert.deepEqual(result, { updated: false, reason: "headless" })

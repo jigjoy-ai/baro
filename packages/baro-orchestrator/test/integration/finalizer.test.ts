@@ -2,7 +2,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "n
 import { execFileSync } from "node:child_process"
 import { join } from "node:path"
 import assert from "node:assert/strict"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import { Finalizer } from "../../src/integration/finalizer.js"
 import type { PrdFile } from "../../src/prd.js"

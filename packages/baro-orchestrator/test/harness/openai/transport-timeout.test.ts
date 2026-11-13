@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { createServer, type Server } from "node:http"
 import { createRequire } from "node:module"
-import { after, describe, it } from "node:test"
+import { afterAll, describe, it } from "@rstest/core"
 
 import OpenAI from "openai"
 
@@ -46,7 +46,7 @@ function slowEndpoint(delayMs: number): Promise<{ url: string; close: () => void
 }
 
 const started: Array<() => void> = []
-after(() => {
+afterAll(() => {
     for (const close of started) close()
 })
 

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { createHash } from "node:crypto"
 import { readFileSync } from "node:fs"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import type { SemanticEvent } from "../../src/runtime/mozaik.js"
 

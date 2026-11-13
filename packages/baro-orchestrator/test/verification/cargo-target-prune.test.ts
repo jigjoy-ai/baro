@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, it } from "node:test"
+import { afterEach, beforeEach, describe, it } from "@rstest/core"
 import assert from "node:assert/strict"
 import { execFileSync, spawnSync } from "node:child_process"
 import {
@@ -132,7 +132,7 @@ describe("pruneCargoTargetCaches", () => {
 
 const cargoAvailable = spawnSync("cargo", ["--version"]).status === 0
 
-describe("pruneCargoTargetCaches with real cargo", { skip: !cargoAvailable && "cargo not installed" }, () => {
+describe.skipIf(!cargoAvailable && "cargo not installed")("pruneCargoTargetCaches with real cargo", () => {
     it("keeps a story worktree's build fresh after pruning what an earlier build left", () => {
         const cacheRoot = join(scratch, "cache", "cargo-target")
         const target = join(cacheRoot, "demo-key")

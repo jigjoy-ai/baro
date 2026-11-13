@@ -7,7 +7,7 @@ import {
 } from "node:fs"
 import { join } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 import assert from "node:assert/strict"
 
 import { execFileCli, execFileCliBuffer } from "../../src/harness/exec-file-cli.js"
@@ -215,9 +215,7 @@ const timer = setInterval(() => {
         })
     })
 
-    it(
-        "cleans an inherited-stdio descendant after a natural root exit",
-        { skip: process.platform === "win32" },
+    it.skipIf(process.platform === "win32")("cleans an inherited-stdio descendant after a natural root exit",
         async () => {
             await withTempDir("baro-exec-natural-tree-", async (dir) => {
                 const escaped = join(dir, "descendant-escaped")

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import { recoveryInput } from "../../src/execution/recovery-input.js"
 import { StoryQualityCompleted, StoryResult } from "../../src/semantic-events.js"

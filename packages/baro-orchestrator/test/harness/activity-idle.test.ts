@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import { StoryResult } from "../../src/semantic-events.js"
 import { StoryAgent } from "../../src/harness/claude/story-agent.js"
@@ -28,9 +28,10 @@ import {
 import { captureEnv, withTempDir } from "../execution/helpers.js"
 
 const IDLE_MS = 200
-// A spawned node child can take most of a second just to boot under load, so
-// real-subprocess cases scale the same scenario up instead of racing startup.
+// A spawned node child can take seconds just to boot under load, so the case
+// that must survive gets a window a stalled boot cannot fill.
 const PROCESS_IDLE_MS = 1_000
+const BUSY_PROCESS_IDLE_MS = 3_000
 
 async function withEnv<T>(
     vars: Record<string, string>,
@@ -51,7 +52,7 @@ async function withEnv<T>(
 }
 
 /** Silent on stdout after init; only its file writes (or nothing) show life. */
-function writeClaudeFixture(dir: string, writesFiles: boolean): string {
+function writeClaudeFixture(dir: string, writesFiles: boolean, idleMs: number): string {
     const bin = join(dir, "claude")
     writeFileSync(
         bin,
@@ -63,7 +64,7 @@ let n = 0;
 const timer = setInterval(() => {
   n += 1;
   if (${writesFiles}) writeFileSync(join(process.cwd(), "work-" + n + ".txt"), String(n));
-  if (n * 50 >= ${PROCESS_IDLE_MS * 2}) {
+  if (n * 50 >= ${idleMs * 2}) {
     clearInterval(timer);
     console.log(JSON.stringify({ type: "result", subtype: "success", session_id: "s", is_error: false, result: "done" }));
     setTimeout(() => process.exit(0), 20);
@@ -77,19 +78,20 @@ process.stdin.resume();
 }
 
 async function runClaudeStory(dir: string, writesFiles: boolean) {
+    const idleMs = writesFiles ? BUSY_PROCESS_IDLE_MS : PROCESS_IDLE_MS
     const cwd = join(dir, "cwd")
     mkdirSync(cwd)
     const agent = new StoryAgent({
         id: writesFiles ? "busy-story" : "silent-story",
         prompt: "work",
         cwd,
-        claudeBin: writeClaudeFixture(dir, writesFiles),
+        claudeBin: writeClaudeFixture(dir, writesFiles, idleMs),
         retries: 0,
         quietTimeoutMs: 5,
     })
     const env = captureEnv()
     const outcome = await withEnv(
-        { BARO_ACTIVITY_IDLE_TIMEOUT_SECS: String(PROCESS_IDLE_MS / 1000) },
+        { BARO_ACTIVITY_IDLE_TIMEOUT_SECS: String(idleMs / 1000) },
         () => agent.run(env),
     )
     return { outcome, event: env.events.find(StoryResult.is) }

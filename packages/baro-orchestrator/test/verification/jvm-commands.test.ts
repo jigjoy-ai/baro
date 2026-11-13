@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { describe, it } from "node:test"
+import { describe, it } from "@rstest/core"
 
 import { detectJvmCommands, jvmToolchainGap } from "../../src/verification/jvm-commands.js"
 import { translateDeclaredTests } from "../../src/verification/declared-verification.js"
