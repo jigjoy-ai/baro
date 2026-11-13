@@ -606,7 +606,7 @@ export function staleDependencyReasons(cwd: string): string[] {
         return reasons
     }
     // A node_modules linked out of the tree belongs to whoever installed it
-    // (the host checkout), so its markers date that install, not this one.
+    // (the run's shared copy), so its markers date that install, not this one.
     if (linkedOutOfTree(nodeModules, cwd)) return []
     for (const dir of workspaceDirs) {
         const name = readPackageManifest(join(dir, "package.json"))?.name

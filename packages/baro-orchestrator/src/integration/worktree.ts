@@ -22,6 +22,7 @@ import { tmpdir } from "os"
 import { dirname, join, resolve } from "path"
 
 import { SHELL_SCRATCH_DIRNAME } from "../execution/gate-registry.js"
+import { copyDependencyDir } from "./dependency-copy.js"
 import { GitGate } from "./git.js"
 import { INTEGRATION_WORKTREE_DIRNAME, worktreeLeafName } from "./integration-worktree.js"
 import {
@@ -51,7 +52,7 @@ const SCAN_SKIP = new Set(["node_modules", ".git", ".venv", "vendor", "dist", "b
 const SCAN_DEPTH = 3
 
 export interface WorktreeManagerOptions {
-    /** Symlink dependency dirs (node_modules, …) into each worktree. Default true. */
+    /** Share dependency dirs (node_modules, …) into each worktree. Default true. */
     linkDepDirs?: boolean
     /** Diagnostic logger (defaults to stderr). */
     onLog?: (line: string) => void
@@ -131,6 +132,8 @@ export class WorktreeManager {
     private recoverySequence = 0
     private readonly baseDir: string
     private readonly linkDepDirs: boolean
+    private readonly seededDepDirs = new Map<string, Promise<void>>()
+    private readonly runCreatedDepDirs = new Set<string>()
     private readonly integrationRoot: string
     private readonly log: (line: string) => void
     private readonly excludedPatterns = new Set<string>()
@@ -342,7 +345,7 @@ export class WorktreeManager {
             ) ?? baseSha
             if (this.linkDepDirs) this.depLocations(path)
             await this.ensureWorktreeExcludes()
-            if (this.linkDepDirs) this.symlinkDepDirs(path)
+            if (this.linkDepDirs) await this.shareDepDirs(path)
             this.paths.set(storyId, path)
             this.baseShas.set(storyId, startSha)
             this.createdWorktree = true
@@ -520,7 +523,7 @@ export class WorktreeManager {
             )
             if (this.linkDepDirs) this.depLocations(path)
             await this.ensureWorktreeExcludes()
-            if (this.linkDepDirs) this.symlinkDepDirs(path)
+            if (this.linkDepDirs) await this.shareDepDirs(path)
             if (restoreSha) {
                 await this.replayPreservedWork(
                     storyId,
@@ -1372,25 +1375,57 @@ export class WorktreeManager {
         for (const pattern of patterns) this.excludedPatterns.add(pattern)
     }
 
-    private symlinkDepDirs(worktreePath: string): void {
+    /**
+     * Dependency dirs for a story worktree, without ever linking to a
+     * directory the host checkout already had: a story's `npm ci` deletes
+     * through such a link (#284).
+     *
+     * With an integration worktree, every story links to that worktree's dep
+     * dir (seeded from the host's), so stories and the final gate see what an
+     * earlier story installed. Integrating in place, a dep dir the host had
+     * is copied into the story; one the host lacked is created empty and
+     * linked, since nothing of the user's is in it.
+     */
+    private async shareDepDirs(worktreePath: string): Promise<void> {
+        const inPlace = this.integrationRoot === this.repoRoot
         for (const { rel, dir } of this.depLocations()) {
-            // ONE shared, run-persistent target per dep dir. Pre-create it
-            // empty so the first `npm install` writes through the symlink
-            // and every other story sees the result.
-            const shared = join(this.repoRoot, rel, dir)
             const dest = join(worktreePath, rel, dir)
             if (existsSync(dest)) continue
+            const hostDir = join(this.repoRoot, rel, dir)
             try {
-                if (!existsSync(shared)) mkdirSync(shared, { recursive: true })
                 mkdirSync(join(worktreePath, rel), { recursive: true })
+                if (inPlace && existsSync(hostDir) && !this.runCreatedDepDirs.has(hostDir)) {
+                    await copyDependencyDir(hostDir, dest)
+                    continue
+                }
+                const shared = inPlace ? hostDir : join(this.integrationRoot, rel, dir)
+                await this.seedSharedDepDir(shared, hostDir)
                 // "junction" (not "dir"): a dir symlink needs admin/Developer
                 // Mode on Windows; a junction doesn't. Ignored off Windows, so
                 // this stays a normal symlink on macOS/Linux.
                 symlinkSync(shared, dest, "junction")
             } catch (e) {
-                this.log(`could not symlink ${join(rel, dir)} into worktree (${errMsg(e)})`)
+                this.log(`could not share ${join(rel, dir)} into worktree (${errMsg(e)})`)
             }
         }
+    }
+
+    /** One seeding per shared dir, however many stories start at once. */
+    private seedSharedDepDir(shared: string, hostDir: string): Promise<void> {
+        let seeding = this.seededDepDirs.get(shared)
+        if (!seeding) {
+            seeding = (async () => {
+                if (existsSync(shared)) return
+                if (shared !== hostDir && existsSync(hostDir)) {
+                    await copyDependencyDir(hostDir, shared)
+                    return
+                }
+                mkdirSync(shared, { recursive: true })
+                this.runCreatedDepDirs.add(shared)
+            })()
+            this.seededDepDirs.set(shared, seeding)
+        }
+        return seeding
     }
 
     /**

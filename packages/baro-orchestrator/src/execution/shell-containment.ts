@@ -215,6 +215,15 @@ function dependencySymlinkTargets(cwd: string, commonRoot: string | null): strin
     const allowedNames = new Set(["node_modules", ".venv", "vendor"])
     const skipped = new Set([".git", "target", "dist", "build", ".next", "coverage"])
     const targets = new Set<string>()
+    const worktree = path.resolve(cwd)
+    // WorktreeManager links a story's dep dirs to the run's integration
+    // worktree, `<run>/__run/<leaf>` beside this `<run>/<story>/<leaf>`, or
+    // to a dir it created in the checkout when the run integrates in place.
+    // The name is inlined: this runs serialized into the hook source.
+    const managerRoots = [
+        path.join(path.dirname(path.dirname(worktree)), "__run", path.basename(worktree)),
+        commonRoot,
+    ]
 
     const walk = (directory: string, depth: number): void => {
         if (depth < 0) return
@@ -227,26 +236,31 @@ function dependencySymlinkTargets(cwd: string, commonRoot: string | null): strin
         for (const entry of entries) {
             const candidate = path.join(directory, entry.name)
             if (entry.isSymbolicLink() && allowedNames.has(entry.name)) {
-                try {
-                    const real = fs.realpathSync.native(candidate)
-                    const relative = path.relative(path.resolve(cwd), candidate)
-                    const managerTarget = fs.realpathSync.native(
-                        path.join(commonRoot, relative),
-                    )
-                    if (
-                        pathIsWithin(commonRoot, real) &&
-                        real === managerTarget
-                    ) targets.add(real)
-                } catch {
-                    // Dangling links and same-named links that do not point to
-                    // WorktreeManager's corresponding common-root path stay denied.
+                // Dangling links and same-named links that do not point to
+                // WorktreeManager's corresponding path under one of its roots
+                // stay denied.
+                for (const root of managerRoots) {
+                    try {
+                        const real = fs.realpathSync.native(candidate)
+                        const relative = path.relative(worktree, candidate)
+                        const realRoot = fs.realpathSync.native(root)
+                        const managerTarget = fs.realpathSync.native(
+                            path.join(realRoot, relative),
+                        )
+                        if (pathIsWithin(realRoot, real) && real === managerTarget) {
+                            targets.add(real)
+                            break
+                        }
+                    } catch {
+                        // try the next root
+                    }
                 }
             } else if (entry.isDirectory() && !skipped.has(entry.name)) {
                 walk(candidate, depth - 1)
             }
         }
     }
-    walk(path.resolve(cwd), 4)
+    walk(worktree, 4)
     return [...targets]
 }
 

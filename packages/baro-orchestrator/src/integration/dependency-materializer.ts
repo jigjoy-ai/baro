@@ -1,25 +1,25 @@
 /**
  * Dependency reuse for the integration worktree: a workspace whose lockfile is
- * byte-identical to the host checkout's gets the host's `node_modules`
- * symlinked in rather than installed.
+ * byte-identical to the host checkout's, and whose host install is current,
+ * gets its own copy of the host's `node_modules` rather than an install.
  *
- * The link writes straight into the host's `node_modules` (`.bin`, caches)
- * whenever the gate runs in the worktree, and nothing here prunes or copies.
- * Teardown must therefore stay `git worktree remove`; an `rm -rf` would
- * follow the link into the host checkout.
+ * A copy, never a link: whatever runs in the worktree afterwards (a gate, a
+ * remedy install, an agent's `npm ci`) cannot reach the host checkout (#284).
  */
 
 import { createHash } from "node:crypto"
-import { existsSync, readdirSync, readFileSync, symlinkSync, type Dirent } from "node:fs"
+import { existsSync, lstatSync, readdirSync, readFileSync, unlinkSync, type Dirent } from "node:fs"
 import { homedir } from "node:os"
 import { join, relative, resolve } from "node:path"
 
 import {
     dependencyInstallEnv,
     pnpmWorkspacePatterns,
+    staleDependencyReasons,
     workspacePackageDirs,
     workspacePatterns,
 } from "../verification/verify.js"
+import { copyDependencyDir } from "./dependency-copy.js"
 import { canonicalPath } from "./integration-worktree.js"
 import { runRepositoryCommand } from "./repository-command.js"
 
@@ -32,7 +32,7 @@ export interface MaterializeDependenciesOptions {
 
 export interface MaterializedWorkspace {
     dir: string
-    action: "linked" | "installed" | "skipped"
+    action: "copied" | "installed" | "skipped"
     reason: string
 }
 
@@ -66,13 +66,23 @@ export async function materializeDependencies(
         options.runInstall ?? ((workspaceDir: string) => npmCi(workspaceDir, options.signal))
     const root = resolve(integrationRoot)
     const workspaces: MaterializedWorkspace[] = []
+    // A host install older than its manifests would be copied with the gap in it.
+    const hostCurrent = staleDependencyReasons(hostRoot).length === 0
     let rootMatch = false
     for (const dir of [root, ...workspaceDirs(root)]) {
         const hostDir = join(hostRoot, relative(root, dir))
         const match = lockfileMatch(dir, hostDir)
-        if (dir === root) rootMatch = match === true
-        // A workspace carrying no lockfile of its own inherits the root's verdict.
-        workspaces.push(await materializeWorkspace(dir, hostDir, match ?? rootMatch, runInstall))
+        if (dir === root) rootMatch = match === true && hostCurrent
+        workspaces.push(
+            await materializeWorkspace(dir, hostDir, runInstall, {
+                // A workspace carrying no lockfile of its own inherits the root's verdict.
+                reuseHost: match === null ? rootMatch : match && hostCurrent,
+                // A member without a lockfile is installed by its root: npm run
+                // inside it resolves that root and reinstalls the whole tree.
+                ownsInstall: dir === root || match !== null,
+                hostCurrent,
+            }),
+        )
     }
     return { workspaces }
 }
@@ -80,8 +90,8 @@ export async function materializeDependencies(
 async function materializeWorkspace(
     dir: string,
     hostDir: string,
-    match: boolean,
     runInstall: (workspaceDir: string) => Promise<void>,
+    plan: { reuseHost: boolean; ownsInstall: boolean; hostCurrent: boolean },
 ): Promise<MaterializedWorkspace> {
     // Not a Node package: `npm ci` here only fails with a usage dump (#210).
     if (!existsSync(join(dir, "package.json"))) {
@@ -89,38 +99,37 @@ async function materializeWorkspace(
     }
     const nodeModules = join(dir, "node_modules")
     const hostNodeModules = join(hostDir, "node_modules")
-    if (match && existsSync(hostNodeModules) && !existsSync(nodeModules)) {
-        const linked = linkNodeModules(hostNodeModules, nodeModules)
-        if (linked === "linked") return { dir, action: "linked", reason: "lockfile matches host" }
-        if (linked === "exists") return alreadyPresent(dir)
-        return install(dir, runInstall, "symlink unsupported")
-    }
+    dropDependencyLink(nodeModules)
     if (existsSync(nodeModules)) return alreadyPresent(dir)
-    return install(dir, runInstall, match ? "host has no node_modules" : "lockfile differs from host")
+    if (plan.reuseHost && existsSync(hostNodeModules)) {
+        const mode = await copyDependencyDir(hostNodeModules, nodeModules)
+        return { dir, action: "copied", reason: `lockfile matches host (${mode})` }
+    }
+    if (!plan.ownsInstall) {
+        return { dir, action: "skipped", reason: "installed by its workspace root" }
+    }
+    return install(
+        dir,
+        runInstall,
+        !existsSync(hostNodeModules)
+            ? "host has no node_modules"
+            : !plan.hostCurrent
+              ? "host install is older than its manifests"
+              : "lockfile differs from host",
+    )
+}
+
+/** A link left by an older baro or an agent: an install would delete through it. */
+function dropDependencyLink(nodeModules: string): void {
+    try {
+        if (lstatSync(nodeModules).isSymbolicLink()) unlinkSync(nodeModules)
+    } catch {
+        // absent
+    }
 }
 
 function alreadyPresent(dir: string): MaterializedWorkspace {
     return { dir, action: "skipped", reason: "node_modules already present" }
-}
-
-function linkNodeModules(
-    hostNodeModules: string,
-    nodeModules: string,
-): "linked" | "exists" | "unsupported" {
-    try {
-        symlinkSync(
-            hostNodeModules,
-            nodeModules,
-            process.platform === "win32" ? "junction" : "dir",
-        )
-        return "linked"
-    } catch (error) {
-        const code = (error as NodeJS.ErrnoException).code
-        if (code === "EEXIST") return "exists"
-        // Windows without symlink rights: install rather than fail the run.
-        if (code === "EPERM" || code === "ENOSYS") return "unsupported"
-        throw error
-    }
 }
 
 async function install(

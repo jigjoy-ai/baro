@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process"
 import {
     existsSync,
     lstatSync,
@@ -5,6 +6,8 @@ import {
     readdirSync,
     readFileSync,
     realpathSync,
+    symlinkSync,
+    utimesSync,
     writeFileSync,
 } from "node:fs"
 import { isAbsolute, join, relative } from "node:path"
@@ -28,6 +31,28 @@ function writeWorkspace(
     mkdirSync(dir, { recursive: true })
     writeFileSync(join(dir, "package.json"), JSON.stringify(manifest))
     if (lockfile !== undefined) writeFileSync(join(dir, "package-lock.json"), lockfile)
+}
+
+/** A host install that has its workspace members linked, as npm leaves it. */
+function linkWorkspace(host: string, name: string): void {
+    mkdirSync(join(host, "node_modules", name), { recursive: true })
+}
+
+function npm(cwd: string, args: string[]): void {
+    execFileSync("npm", args, { cwd, stdio: "pipe", env: { ...process.env, BARO_SKIP_POSTINSTALL: "1" } })
+}
+
+function listTree(dir: string): string[] {
+    const out: string[] = []
+    const walk = (rel: string): void => {
+        for (const entry of readdirSync(join(dir, rel), { withFileTypes: true })) {
+            const path = rel ? `${rel}/${entry.name}` : entry.name
+            if (entry.isDirectory()) walk(path)
+            else out.push(path)
+        }
+    }
+    walk("")
+    return out.sort()
 }
 
 function recordingInstall(): { calls: string[]; runInstall: (dir: string) => Promise<void> } {
@@ -60,13 +85,14 @@ describe("materializeDependencies", () => {
         })
     })
 
-    it("links the host node_modules when the root lockfile matches", async () => {
+    it("copies the host node_modules when the root lockfile matches", async () => {
         await withTempDir("baro-dep-mat-", async (root) => {
             const host = join(root, "host")
             const run = join(root, "run")
             writeWorkspace(host, { name: "root", private: true }, '{"lockfileVersion":3}')
             writeWorkspace(run, { name: "root", private: true }, '{"lockfileVersion":3}')
-            mkdirSync(join(host, "node_modules"))
+            mkdirSync(join(host, "node_modules", "dep"), { recursive: true })
+            writeFileSync(join(host, "node_modules", "dep", "index.js"), "module.exports = 1\n")
             const { calls, runInstall } = recordingInstall()
 
             const result = await materializeDependencies({
@@ -75,19 +101,19 @@ describe("materializeDependencies", () => {
                 runInstall,
             })
 
-            assert.deepEqual(result.workspaces, [
-                { dir: run, action: "linked", reason: "lockfile matches host" },
-            ])
-            assert.equal(lstatSync(join(run, "node_modules")).isSymbolicLink(), true)
+            assert.equal(result.workspaces.length, 1)
+            assert.equal(result.workspaces[0]!.action, "copied")
+            assert.match(result.workspaces[0]!.reason, /^lockfile matches host \((cloned|hardlinked|copied)\)$/)
+            assert.equal(lstatSync(join(run, "node_modules")).isSymbolicLink(), false, "a copy, never a link (#284)")
             assert.equal(
-                realpathSync(join(run, "node_modules")),
-                realpathSync(join(host, "node_modules")),
+                readFileSync(join(run, "node_modules", "dep", "index.js"), "utf8"),
+                "module.exports = 1\n",
             )
             assert.deepEqual(calls, [], "a matching lockfile must not install")
         })
     })
 
-    it("links every workspace whose lockfile content matches the host", async () => {
+    it("copies every workspace whose lockfile content matches the host", async () => {
         await withTempDir("baro-dep-mat-", async (root) => {
             const host = join(root, "host")
             const run = join(root, "run")
@@ -99,7 +125,7 @@ describe("materializeDependencies", () => {
                 )
                 writeWorkspace(join(base, "packages", "a"), { name: "@t/a" }, '{"name":"@t/a"}')
             }
-            mkdirSync(join(host, "node_modules"))
+            linkWorkspace(host, "@t/a")
             mkdirSync(join(host, "packages", "a", "node_modules"))
             const { calls, runInstall } = recordingInstall()
 
@@ -109,21 +135,124 @@ describe("materializeDependencies", () => {
                 runInstall,
             })
 
-            assert.deepEqual(result.workspaces, [
-                { dir: run, action: "linked", reason: "lockfile matches host" },
-                {
-                    dir: join(run, "packages", "a"),
-                    action: "linked",
-                    reason: "lockfile matches host",
-                },
-            ])
+            assert.deepEqual(
+                result.workspaces.map(({ dir, action }) => ({ dir, action })),
+                [
+                    { dir: run, action: "copied" },
+                    { dir: join(run, "packages", "a"), action: "copied" },
+                ],
+            )
             for (const { dir } of result.workspaces) {
                 assert.equal(isAbsolute(dir), true)
                 const fromRoot = relative(run, dir)
                 assert.equal(fromRoot.startsWith(".."), false)
-                assert.equal(lstatSync(join(dir, "node_modules")).isSymbolicLink(), true)
+                assert.equal(lstatSync(join(dir, "node_modules")).isSymbolicLink(), false)
             }
             assert.deepEqual(calls, [])
+        })
+    })
+
+    // #284: with hoisting, a member has no node_modules of its own. `npm ci`
+    // inside it resolves the root and reinstalls the whole tree.
+    it("never installs in a workspace member that has no lockfile of its own", async () => {
+        await withTempDir("baro-dep-mat-", async (root) => {
+            const host = join(root, "host")
+            const run = join(root, "run")
+            for (const base of [host, run]) {
+                writeWorkspace(
+                    base,
+                    { name: "root", private: true, workspaces: ["packages/*"] },
+                    '{"lockfileVersion":3}',
+                )
+                writeWorkspace(join(base, "packages", "a"), { name: "@t/a" })
+            }
+            linkWorkspace(host, "@t/a")
+            const { calls, runInstall } = recordingInstall()
+
+            const result = await materializeDependencies({
+                hostRoot: host,
+                integrationRoot: run,
+                runInstall,
+            })
+
+            assert.deepEqual(result.workspaces.map(({ action, reason }) => ({ action, reason: reason.replace(/ \(.*\)$/, "") })), [
+                { action: "copied", reason: "lockfile matches host" },
+                { action: "skipped", reason: "installed by its workspace root" },
+            ])
+            assert.deepEqual(calls, [])
+        })
+    })
+
+    it("installs when the host's install is older than its manifests", async () => {
+        await withTempDir("baro-dep-mat-", async (root) => {
+            const host = join(root, "host")
+            const run = join(root, "run")
+            writeWorkspace(host, { name: "root", private: true }, '{"lockfileVersion":3}')
+            writeWorkspace(run, { name: "root", private: true }, '{"lockfileVersion":3}')
+            mkdirSync(join(host, "node_modules"))
+            const marker = join(host, "node_modules", ".package-lock.json")
+            writeFileSync(marker, "{}")
+            const installedAt = new Date(Date.now() - 60_000)
+            utimesSync(marker, installedAt, installedAt)
+            const { calls, runInstall } = recordingInstall()
+
+            const result = await materializeDependencies({
+                hostRoot: host,
+                integrationRoot: run,
+                runInstall,
+            })
+
+            assert.deepEqual(result.workspaces, [
+                { dir: run, action: "installed", reason: "host install is older than its manifests" },
+            ])
+            assert.deepEqual(calls, [run])
+        })
+    })
+
+    it("replaces a dependency link left in the worktree, without touching what it points at", async () => {
+        await withTempDir("baro-dep-mat-", async (root) => {
+            const host = join(root, "host")
+            const run = join(root, "run")
+            writeWorkspace(host, { name: "root", private: true }, '{"lockfileVersion":3}')
+            writeWorkspace(run, { name: "root", private: true }, '{"lockfileVersion":3}')
+            mkdirSync(join(host, "node_modules", "dep"), { recursive: true })
+            symlinkSync(join(host, "node_modules"), join(run, "node_modules"), "dir")
+            const { runInstall } = recordingInstall()
+
+            await materializeDependencies({ hostRoot: host, integrationRoot: run, runInstall })
+
+            assert.equal(lstatSync(join(run, "node_modules")).isSymbolicLink(), false)
+            assert.equal(existsSync(join(run, "node_modules", "dep")), true)
+            assert.equal(existsSync(join(host, "node_modules", "dep")), true)
+        })
+    })
+
+    // #284, with the real npm: `npm ci` empties node_modules entry by entry
+    // before it installs, and it does so through a link.
+    it("lets an npm ci in the worktree run without emptying the host's node_modules", async () => {
+        await withTempDir("baro-dep-mat-", async (root) => {
+            const host = join(root, "host")
+            const run = join(root, "run")
+            const manifests = (base: string): void => {
+                writeWorkspace(base, { name: "root", private: true, version: "1.0.0", workspaces: ["packages/*"] })
+                writeWorkspace(join(base, "packages", "a"), {
+                    name: "@t/a",
+                    version: "1.0.0",
+                    dependencies: { "@t/b": "1.0.0" },
+                })
+                writeWorkspace(join(base, "packages", "b"), { name: "@t/b", version: "1.0.0" })
+            }
+            manifests(host)
+            npm(host, ["install", "--no-audit", "--no-fund", "--ignore-scripts", "--offline"])
+            manifests(run)
+            writeFileSync(join(run, "package-lock.json"), readFileSync(join(host, "package-lock.json")))
+            const before = listTree(join(host, "node_modules"))
+            assert.ok(before.includes("@t/a") && before.includes("@t/b"), before.join(", "))
+
+            await materializeDependencies({ hostRoot: host, integrationRoot: run })
+            npm(join(run, "packages", "a"), ["ci", "--no-audit", "--no-fund", "--ignore-scripts", "--offline"])
+
+            assert.deepEqual(listTree(join(host, "node_modules")), before)
         })
     })
 
@@ -137,7 +266,7 @@ describe("materializeDependencies", () => {
                 '{"lockfileVersion":3}',
             )
             writeWorkspace(join(host, "packages", "a"), { name: "@t/a" }, '{"name":"@t/a"}')
-            mkdirSync(join(host, "node_modules"))
+            linkWorkspace(host, "@t/a")
             mkdirSync(join(host, "packages", "a", "node_modules"))
             writeWorkspace(
                 run,
@@ -158,12 +287,14 @@ describe("materializeDependencies", () => {
             })
 
             const workspace = join(run, "packages", "a")
-            assert.deepEqual(result.workspaces, [
-                { dir: run, action: "linked", reason: "lockfile matches host" },
-                { dir: workspace, action: "installed", reason: "lockfile differs from host" },
-            ])
+            assert.equal(result.workspaces[0]!.action, "copied")
+            assert.deepEqual(result.workspaces[1], {
+                dir: workspace,
+                action: "installed",
+                reason: "lockfile differs from host",
+            })
             assert.deepEqual(calls, [workspace], "only the diverged workspace installs")
-            assert.equal(existsSync(join(workspace, "node_modules")), false, "no symlink")
+            assert.equal(existsSync(join(workspace, "node_modules")), false, "nothing copied in")
         })
     })
 
