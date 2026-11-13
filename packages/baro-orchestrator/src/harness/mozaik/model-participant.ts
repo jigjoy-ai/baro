@@ -22,7 +22,7 @@ import {
     type ContextItem,
     type SemanticEvent,
     type Tool,
-    type TokenUsage, toWire } from "../../runtime/mozaik.js"
+    type TokenUsage } from "../../runtime/mozaik.js"
 import type { InferenceModel } from "../openai/runtime.js"
 import { BusMember, type CoordinationBus } from "../../runtime/coordination.js"
 import {
@@ -567,8 +567,7 @@ export class MozaikModelParticipant
 }
 
 function textOf(item: ModelMessageItem): string {
-    const json = toWire(item) as { content?: Array<{ text?: string }> }
-    return json.content?.[0]?.text ?? ""
+    return item instanceof ModelMessageItem ? item.content.text ?? "" : ""
 }
 
 function messageOf(error: unknown): string {

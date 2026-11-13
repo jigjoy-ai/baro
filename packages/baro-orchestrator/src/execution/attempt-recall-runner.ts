@@ -9,10 +9,9 @@
 import type {
     FunctionCallItem,
     FunctionCallOutputItem,
-    ModelMessageItem,
     SemanticEvent,
 } from "../runtime/mozaik.js"
-import { toWire } from "../runtime/mozaik.js"
+import { ModelMessageItem } from "../runtime/mozaik.js"
 import { AgentTargetedMessage } from "../events/collaboration.js"
 import { BusMember } from "../runtime/coordination.js"
 import { StoryResult, WorkLeaseGranted } from "../semantic-events.js"
@@ -56,11 +55,9 @@ export class AttemptRecallRunner extends BusMember {
         this.guard(() => {
             const agentId = participantAgentId(source)
             if (!agentId) return
-            const json = toWire(item) as { content?: Array<{ text?: string }> }
-            const text = (json.content ?? [])
-                .map((part) => part.text ?? "")
-                .filter(Boolean)
-                .join(" ")
+            const text = item instanceof ModelMessageItem
+                ? [item.content.text ?? ""].filter(Boolean).join(" ")
+                : ""
             if (!text.trim()) return
             this.live.set(agentId, withStatement(this.recordFor(agentId), text))
         })

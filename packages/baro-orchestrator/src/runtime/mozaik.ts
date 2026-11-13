@@ -49,13 +49,40 @@ import {
 
 const text = (content: { type: string; text: string }) => [{ type: content.type, text: content.text }]
 
+export type WireText = Array<{ type: string; text: string }>
+export interface WireMessage { type: string; role: string; content: WireText }
+export interface WireFunctionCall { type: string; call_id: string; name: string; arguments: string }
+export interface WireFunctionCallOutput { type: string; call_id: string; output: WireText }
+export interface WireReasoning {
+    type: string
+    content: WireText | undefined
+    encryptedContent: string | undefined
+    summary: WireText[]
+}
+export interface WireOtherItem { type: string }
+export type WireContextItem = WireMessage | WireFunctionCall | WireFunctionCallOutput | WireReasoning | WireOtherItem
+export interface WireSemanticEvent<TType extends string, TPayload> { type: TType; data: TPayload }
+export type WireValue = WireContextItem | WireContextItem[] | WireSemanticEvent<string, unknown>
+
 /**
  * The wire shape Mozaik 3's `toJSON` produced: Responses-API items (a context is its items), events as `{ type, data }`.
  * Audit logs and their readers (replay tooling, kaleidoskop) keep this shape.
  */
-export function toWire(item: MozaikContextItem | MozaikSemanticEvent<string, unknown> | MozaikModelContext): unknown {
+export function toWire<TType extends string, TPayload>(
+    item: MozaikSemanticEvent<TType, TPayload>,
+): WireSemanticEvent<TType, TPayload>
+export function toWire(item: MozaikModelContext): WireContextItem[]
+export function toWire(
+    item: MozaikUserMessageItem | MozaikSystemMessageItem | DeveloperMessageItem | MozaikModelMessageItem,
+): WireMessage
+export function toWire(item: MozaikFunctionCallItem): WireFunctionCall
+export function toWire(item: MozaikFunctionCallOutputItem): WireFunctionCallOutput
+export function toWire(item: MozaikReasoningItem): WireReasoning
+export function toWire(item: MozaikContextItem): WireContextItem
+export function toWire(item: MozaikContextItem | MozaikSemanticEvent<string, unknown> | MozaikModelContext): WireValue
+export function toWire(item: MozaikContextItem | MozaikSemanticEvent<string, unknown> | MozaikModelContext): WireValue {
     if (item instanceof MozaikSemanticEvent) return { type: item.type, data: item.payload }
-    if (item instanceof MozaikModelContext) return item.getItems().map(toWire)
+    if (item instanceof MozaikModelContext) return item.getItems().map((i) => toWire(i))
     if (
         item instanceof MozaikUserMessageItem ||
         item instanceof MozaikSystemMessageItem ||

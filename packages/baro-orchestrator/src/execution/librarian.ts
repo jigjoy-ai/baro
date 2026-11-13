@@ -10,7 +10,6 @@ import {
     FunctionCallItem,
     FunctionCallOutputItem,
     SemanticEvent,
-    toWire,
 } from "../runtime/mozaik.js"
 import { BusMember } from "../runtime/coordination.js"
 
@@ -287,11 +286,9 @@ export class Librarian extends BusMember {
         source: BusMember,
         item: FunctionCallOutputItem,
     ): void {
-        const json = toWire(item) as {
-            call_id: string
-            output: Array<{ text: string }>
-        }
-        const pending = this.pending.get(source)?.get(json.call_id)
+        if (!(item instanceof FunctionCallOutputItem)) return
+        const callId = item.callId
+        const pending = this.pending.get(source)?.get(callId)
         if (!pending) return
         if (
             pending.correlation &&
@@ -300,12 +297,12 @@ export class Librarian extends BusMember {
                 this.collectiveCorrelation(source, pending.agentId),
             )
         ) {
-            this.deletePending(source, json.call_id)
+            this.deletePending(source, callId)
             return
         }
-        this.deletePending(source, json.call_id)
+        this.deletePending(source, callId)
 
-        const fullOutput = json.output.map((b) => b.text).join("\n")
+        const fullOutput = item.output.text ?? ""
         const content =
             fullOutput.length > this.opts.maxContentChars
                 ? fullOutput.slice(0, this.opts.maxContentChars) +

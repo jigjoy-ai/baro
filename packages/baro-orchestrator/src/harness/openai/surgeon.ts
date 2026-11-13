@@ -19,10 +19,11 @@
 
 import {
     ModelContext,
+    ModelMessageItem,
     SemanticEvent,
     SystemMessageItem,
     UserMessageItem,
-    type TokenUsage, toWire } from "../../runtime/mozaik.js"
+    type TokenUsage } from "../../runtime/mozaik.js"
 import { pickInferenceModel as pickModel } from "../mozaik/pick-model.js"
 import type { InferenceModel } from "./runtime.js"
 import { BusMember } from "../../runtime/coordination.js"
@@ -342,8 +343,7 @@ export class SurgeonOpenAI extends BusMember {
             let assistantText = ""
             for (const item of round.items) {
                 if (item.type === "message") {
-                    const json = toWire(item) as { content: Array<{ text: string }> }
-                    assistantText += json.content?.[0]?.text ?? ""
+                    assistantText += item instanceof ModelMessageItem ? item.content.text ?? "" : ""
                 }
             }
             if (!assistantText.trim()) {

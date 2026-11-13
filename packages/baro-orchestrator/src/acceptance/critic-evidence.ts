@@ -9,7 +9,7 @@ import { CollaborationNote, PathsClaimed } from "../semantic-events.js"
 import {
     FunctionCallItem,
     FunctionCallOutputItem,
-    type SemanticEvent, toWire } from "../runtime/mozaik.js"
+    type SemanticEvent } from "../runtime/mozaik.js"
 import { BusMember } from "../runtime/coordination.js"
 
 import { participantAgentId } from "../runtime/participant-identity.js"
@@ -333,15 +333,11 @@ export class CriticCommandEvidenceCollector extends BusMember {
         const agentId = participantAgentId(source)
         if (!agentId) return
         if (!this.acceptsSource(source, agentId)) return
-        const json = toWire(item) as {
-            call_id?: string
-            output?: Array<{ text?: string }>
-        }
-        const callId = json.call_id ?? ""
+        const callId = item instanceof FunctionCallOutputItem ? item.callId ?? "" : ""
         const entry = this.pending.get(commandKey(agentId, callId))
         if (!entry) return
         entry.output = redactSensitiveText(
-            json.output?.map((part) => part.text ?? "").join("") ?? "",
+            item instanceof FunctionCallOutputItem ? item.output.text ?? "" : "",
         )
         this.pending.delete(commandKey(agentId, callId))
         this.captureCommandFingerprint(agentId, entry)

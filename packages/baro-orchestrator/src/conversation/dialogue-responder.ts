@@ -14,9 +14,10 @@ import { join } from "node:path"
 
 import {
     ModelContext,
+    ModelMessageItem,
     SystemMessageItem,
     UserMessageItem,
-    type TokenUsage, toWire } from "../runtime/mozaik.js"
+    type TokenUsage } from "../runtime/mozaik.js"
 
 import type { GatewayBillingCoordinator } from "../telemetry/billing/index.js"
 import { runCodexOneShot } from "../harness/codex/one-shot.js"
@@ -594,12 +595,7 @@ function createOpenAIResponder(
         let text = ""
         for (const item of round.items) {
             if (item.type !== "message") continue
-            const json = toWire(item) as {
-                content?: Array<{ text?: unknown }>
-            }
-            for (const content of json.content ?? []) {
-                if (typeof content.text === "string") text += content.text
-            }
+            if (item instanceof ModelMessageItem && typeof item.content.text === "string") text += item.content.text
         }
         if (!text.trim()) {
             throw new DialogueResponderInvocationError(

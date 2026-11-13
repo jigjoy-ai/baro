@@ -3,7 +3,6 @@ import {
     FunctionCallOutputItem,
     ModelMessageItem,
     SemanticEvent,
-    toWire,
 } from "../../runtime/mozaik.js"
 import { BusMember } from "../../runtime/coordination.js"
 
@@ -64,8 +63,7 @@ export class AgentStreamForwarder extends BusMember {
     override async onExternalModelMessage(source: BusMember, item: ModelMessageItem): Promise<void> {
         const agentId = this.authorizedAgentId(source)
         if (!agentId) return
-        const json = toWire(item) as { content?: Array<{ text?: string }> }
-        const text = json.content?.[0]?.text ?? ""
+        const text = item instanceof ModelMessageItem ? item.content.text ?? "" : ""
         const line = firstLine(text)
         if (!line) return
         emit({ type: "activity", id: agentId, kind: "agent_msg", text: truncate(line, 160) })
@@ -113,8 +111,7 @@ export class AgentStreamForwarder extends BusMember {
     ): Promise<void> {
         const agentId = this.authorizedAgentId(source)
         if (!agentId) return
-        const json = toWire(item) as { output?: Array<{ text?: string }> }
-        const out = json.output?.[0]?.text ?? ""
+        const out = item instanceof FunctionCallOutputItem ? item.output.text ?? "" : ""
         if (!out.trim()) return
 
         const verdict = testVerdict(out)

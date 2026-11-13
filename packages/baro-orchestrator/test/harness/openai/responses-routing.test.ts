@@ -11,7 +11,6 @@ import {
     ModelContext,
     ModelMessageItem,
     UserMessageItem,
-    toWire,
 } from "../../../src/runtime/mozaik.js"
 
 // A stand-in for the baro gateway: it serves both OpenAI surfaces and records
@@ -100,8 +99,7 @@ describe("OpenAI-native models use the Responses API on a custom endpoint", () =
         const context = ModelContext.create().addContextItem(UserMessageItem.create("hello"))
         const round = await runInferenceRound(context, model)
         const message = round.items.find((item) => item instanceof ModelMessageItem) as ModelMessageItem
-        const wire = toWire(message) as { content: { text: string }[] }
-        return wire.content[0].text
+        return message.content.text
     }
 
     it("sends gpt-* to /v1/responses with the connection's own key", async () => {

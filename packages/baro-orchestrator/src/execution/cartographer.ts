@@ -9,7 +9,6 @@ import {
     FunctionCallOutputItem,
     ModelMessageItem,
     SemanticEvent,
-    toWire,
 } from "../runtime/mozaik.js"
 import { BusMember } from "../runtime/coordination.js"
 
@@ -57,8 +56,7 @@ export class Cartographer extends BusMember {
         item: ModelMessageItem,
     ): Promise<void> {
         const agentId = this.extractAgentId(source, item)
-        const json = toWire(item) as { content: Array<{ text: string }> }
-        const text = json.content?.[0]?.text ?? ""
+        const text = item instanceof ModelMessageItem ? item.content.text ?? "" : ""
         this.sink({ kind: "model_message", agentId, text })
     }
 
@@ -81,9 +79,8 @@ export class Cartographer extends BusMember {
         item: FunctionCallOutputItem,
     ): Promise<void> {
         const agentId = this.extractAgentId(source, item)
-        const json = toWire(item) as { call_id: string; output: Array<{ text: string }> }
-        const output = json.output?.[0]?.text ?? ""
-        this.sink({ kind: "tool_result", agentId, callId: json.call_id, output })
+        const output = item instanceof FunctionCallOutputItem ? item.output.text ?? "" : ""
+        this.sink({ kind: "tool_result", agentId, callId: item.callId, output })
     }
 
     override async onExternalEvent(
