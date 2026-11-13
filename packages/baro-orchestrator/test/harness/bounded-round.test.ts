@@ -14,11 +14,13 @@ const tick = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 describe("a round's deadline measures silence, not duration", () => {
     it("lets a call run far past the deadline while it keeps delivering", async () => {
         const result = await runBoundedRound({
-            timeoutMs: 40,
+            // A 250 ms margin between reports and the deadline: a 20 ms one
+            // lost to a single scheduler stall on a shared runner.
+            timeoutMs: 300,
             round: async (_signal, progress) => {
-                // Six times the deadline, reporting throughout.
-                for (let step = 0; step < 12; step += 1) {
-                    await tick(20)
+                // Four times the deadline, reporting throughout.
+                for (let step = 0; step < 24; step += 1) {
+                    await tick(50)
                     progress()
                 }
                 return "finished"
