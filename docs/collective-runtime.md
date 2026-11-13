@@ -433,30 +433,14 @@ The focused control-plane checks are provider-free:
 ```bash
 cd packages/baro-orchestrator
 npm run typecheck
-node --import tsx --test \
-  test/planning/progressive-plan.test.ts \
-  test/planning/progressive-planner-protocol.test.ts \
-  test/participants/progressive-planning-board.test.ts \
-  test/participants/runtime-replan-board.test.ts \
-  test/participants/lease-broker.test.ts \
-  test/participants/collaboration-bridge.test.ts \
-  test/participants/librarian.test.ts \
-  test/participants/memory-librarian.test.ts \
-  test/participants/dialogue-agent.test.ts \
-  test/participants/goal-guardian.test.ts \
-  test/participants/goal-remediation-board.test.ts \
-  test/runtime/targeted-message-authority.test.ts \
-  test/declared-verification.test.ts \
-  test/collective-orchestrate.test.ts \
-  test/progressive-orchestrate.test.ts \
-  test/progressive-cli-smoke.test.ts \
-  test/stdin-commands.test.ts \
-  test/planner-openai.test.ts
+npm test
 
 cd ../..
 cargo test -p baro-tui progressive
 cargo test -p baro-tui planner_stream_bridge
 ```
+
+See [testing.md](testing.md) for the fast and slow lanes.
 
 ## Cost/quality routing
 
@@ -606,18 +590,6 @@ processes. They do not call paid providers:
 ```bash
 cd packages/baro-orchestrator
 npm run typecheck
-node --import tsx --test \
-  test/session/repository-brief.test.ts \
-  test/session/repository-scanner.test.ts \
-  test/session/autonomous-repository-scout.test.ts \
-  test/session/conversation-frontdoor.test.ts \
-  test/run-conversation-script.test.ts \
-  test/architect-outcome.test.ts \
-  test/run-architect-outcome.test.ts \
-  test/architect-openai.test.ts \
-  test/codex-one-shot.test.ts \
-  test/exec-file-cli.test.ts \
-  test/process-tree.test.ts
 npm test
 
 cd ../..
