@@ -1031,7 +1031,10 @@ async function waitFor<T>(
     events: readonly unknown[],
     guard: (event: unknown) => event is T,
 ): Promise<T> {
-    for (let attempt = 0; attempt < 100; attempt += 1) {
+    // Bounded by time, not event-loop turns: how many turns the board's file
+    // writes take differs by platform.
+    const deadline = Date.now() + 10_000
+    while (Date.now() < deadline) {
         const found = events.find(guard)
         if (found) return found
         await new Promise<void>((resolve) => setImmediate(resolve))

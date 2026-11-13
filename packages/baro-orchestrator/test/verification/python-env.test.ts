@@ -75,6 +75,8 @@ describe.skipIf(!posix)("resolvePytestRunner", () => {
     it("reports a missing environment instead of pretending the tests ran", async () => {
         const repo = join(dir, "repo")
         mkdirSync(repo)
+        // On Linux /bin is /usr/bin and holds the host's python3.
+        process.env.PATH = bin
 
         const runner = await resolvePytestRunner(repo)
 
