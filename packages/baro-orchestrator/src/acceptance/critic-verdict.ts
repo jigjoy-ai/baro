@@ -25,6 +25,16 @@ export interface ContractConflict {
     kind: "outside_write_surface" | "contradiction"
 }
 
+/**
+ * A criterion whose only missing proof is a command Baro marked as unable to
+ * start in the worktree: its tool is not installed there. The Critic reports
+ * it apart from violations; it never passes and never counts against the work.
+ */
+export interface UnavailableCheck {
+    criterion: string
+    reason: string
+}
+
 const MAX_CONTRACT_CONFLICTS = 32
 const MAX_CONFLICT_REASON_CHARS = 600
 
@@ -46,6 +56,37 @@ export function parseContractConflicts(value: unknown): ContractConflict[] {
         if (conflicts.length >= MAX_CONTRACT_CONFLICTS) break
     }
     return conflicts
+}
+
+/** Tolerant like the conflicts: a malformed entry stays an ordinary violation. */
+export function parseUnavailableChecks(value: unknown): UnavailableCheck[] {
+    if (!Array.isArray(value)) return []
+    const seen = new Set<string>()
+    const checks: UnavailableCheck[] = []
+    for (const entry of value) {
+        if (typeof entry !== "object" || entry === null) continue
+        const { criterion, reason, kind } = entry as Record<string, unknown>
+        if (kind !== "check_unavailable") continue
+        if (typeof criterion !== "string" || !criterion.trim() || seen.has(criterion)) continue
+        if (typeof reason !== "string" || !reason.trim()) continue
+        seen.add(criterion)
+        checks.push({ criterion, reason: reason.trim().slice(0, MAX_CONFLICT_REASON_CHARS) })
+        if (checks.length >= MAX_CONTRACT_CONFLICTS) break
+    }
+    return checks
+}
+
+/** What a verdict's "contract_conflicts" array contributes to an evaluation. */
+export function parsedConflictFields(value: unknown): {
+    contractConflicts?: ContractConflict[]
+    unavailableChecks?: UnavailableCheck[]
+} {
+    const conflicts = parseContractConflicts(value)
+    const unavailable = parseUnavailableChecks(value)
+    return {
+        ...(conflicts.length > 0 ? { contractConflicts: conflicts } : {}),
+        ...(unavailable.length > 0 ? { unavailableChecks: unavailable } : {}),
+    }
 }
 
 /**
@@ -99,9 +140,10 @@ export function verdictSystemPrompt(
         : ""
     const conflictsRule = options.contractConflicts
         ? `
-- "contract_conflicts" (optional, default []) lists criteria this story cannot satisfy as written, each as {"criterion":"exact criterion string","kind":"outside_write_surface" or "contradiction","reason":"…"}. Use "outside_write_surface" only when meeting the criterion requires changing files outside the "## Write surface" Baro lists for this story, and name those files. Use "contradiction" only when no change could meet it together with another of this story's criteria, and quote that other criterion.
+- "contract_conflicts" (optional, default []) lists criteria this story cannot satisfy as written, each as {"criterion":"exact criterion string","kind":"outside_write_surface", "contradiction" or "check_unavailable","reason":"…"}. Use "outside_write_surface" only when meeting the criterion requires changing files outside the "## Write surface" Baro lists for this story, and name those files. Use "contradiction" only when no change could meet it together with another of this story's criteria, and quote that other criterion.
 - A conflicted criterion is not this story's to meet: leave it out of "violated_criteria" and decide "verdict" on every other criterion. Baro moves an "outside_write_surface" criterion to a follow-up story that may change those files, and records a "contradiction" for the run-level reviews.
-- Never list a criterion the story could meet within its write surface but did not, or one that merely lacks evidence: those are violations. Without a "## Write surface" section, only the contradiction case applies.`
+- A command whose runtime status reads "could not start" did not run: its tool is not installed in this worktree. That is a fact about the environment, not about the work. When the only thing a criterion lacks is a passing run of such a command, use kind "check_unavailable" and name the command; leave the criterion out of "violated_criteria". Never use it for a command that ran and failed, or when no command is marked "could not start".
+- Never list a criterion the story could meet within its write surface but did not, or one that merely lacks evidence: those are violations. Without a "## Write surface" section, only the contradiction and check_unavailable cases apply.`
         : ""
     return `\
 You are a strict acceptance-criteria evaluator. You will receive:

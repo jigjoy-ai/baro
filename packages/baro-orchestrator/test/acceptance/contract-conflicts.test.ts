@@ -104,7 +104,7 @@ describe("Critic contract conflicts", () => {
     it("asks story critics for conflicts, and only story critics", () => {
         assert.match(VERDICT_SYSTEM_PROMPT, /"contract_conflicts"/)
         assert.match(VERDICT_SYSTEM_PROMPT, /merely lacks evidence: those are violations/)
-        assert.match(VERDICT_SYSTEM_PROMPT, /"outside_write_surface" or "contradiction"/)
+        assert.match(VERDICT_SYSTEM_PROMPT, /"outside_write_surface", "contradiction" or "check_unavailable"/)
         assert.doesNotMatch(verdictSystemPrompt({ remediationGroups: true }), /contract_conflicts/)
     })
 
