@@ -398,8 +398,11 @@ function execFileCliRaw(
                     // ran, so a signal came from outside. Naming it is the
                     // difference between "our git died" and an attributable
                     // fault; without it the report was `code null` and silence.
+                    const ownershipFailure = processTree.ownershipFailure
                     const err = new Error(
-                        `${command} ${signal ? `was killed by ${signal}` : `exited with code ${code}`}` +
+                        (ownershipFailure
+                            ? `${command} was killed by Baro before it finished: its process ownership could not be registered (${ownershipFailure})`
+                            : `${command} ${signal ? `was killed by ${signal}` : `exited with code ${code}`}`) +
                             `\n${stderr.toString("utf8")}`,
                     ) as Error & {
                         code: number | null
