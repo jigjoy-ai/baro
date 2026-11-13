@@ -27,6 +27,7 @@ import {
     type StoryResultData,
 } from "../../semantic-events.js"
 import { acceptsTargetedMessage } from "../../runtime/targeted-message-authority.js"
+import type { TerminalTurnSource } from "../terminal-source.js"
 import {
     classifyProviderFailure,
     classifyStoryFailure,
@@ -99,7 +100,7 @@ export class StoryAgent extends BusMember {
     private envRef: CoordinationBus | null = null
     /** Optional explicit bus identity for the terminal outcome. */
     private resultAuthority: BusMember | null = null
-    private terminalSourceRegistrar: ((source: BusMember) => void) | null = null
+    private terminalSourceRegistrar: ((source: TerminalTurnSource) => void) | null = null
     private currentClaude: ClaudeCliParticipant | null = null
     private currentPhase: AgentPhase = "idle"
     private startedAt: number | null = null
@@ -177,7 +178,7 @@ export class StoryAgent extends BusMember {
     }
 
     setTerminalSourceRegistrar(
-        register: (source: BusMember) => void,
+        register: (source: TerminalTurnSource) => void,
     ): void {
         if (this.terminalSourceRegistrar && this.terminalSourceRegistrar !== register) {
             throw new Error(`terminal source registrar already set for ${this.spec.id}`)
