@@ -146,7 +146,10 @@ function execFileCliRaw(
         const clock = options.awakeClock ?? sharedAwakeClock()
         const cpuActivityProbe =
             options.cpuActivityProbe ??
-            createDefaultCpuActivityProbe(child.pid, clock)
+            createDefaultCpuActivityProbe(child.pid, clock, undefined, {
+                stillRunning: () =>
+                    child.exitCode === null && child.signalCode === null,
+            })
         const processTree = new ManagedProcessTree(child, {
             terminationGraceMs,
             pollIntervalMs: 25,

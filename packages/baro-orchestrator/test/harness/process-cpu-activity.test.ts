@@ -1,4 +1,5 @@
 import assert from "node:assert/strict"
+import { setTimeout as delay } from "node:timers/promises"
 import { describe, it } from "@rstest/core"
 
 import {
@@ -11,6 +12,7 @@ import {
     type ProcessCpuRow,
 } from "../../src/harness/process-cpu-activity.js"
 import { createFakeAwakeClock } from "../../src/runtime/awake-clock.js"
+import { waitFor } from "../wait-for.js"
 
 const table = (...rows: ProcessCpuRow[]) => async () => rows
 
@@ -152,6 +154,45 @@ describe("process CPU activity sampling", () => {
         clock.advance(300_000)
         const after = await probe(100, slept.sample)
         assert.equal(after.active, false)
+    })
+
+    it("never reads the process table for a command that is gone before the baseline is due", async () => {
+        let reads = 0
+        createDefaultCpuActivityProbe(
+            100,
+            createFakeAwakeClock(),
+            async () => {
+                reads += 1
+                return []
+            },
+            { baselineDelayMs: 10, stillRunning: () => false },
+        )
+
+        await delay(60)
+        assert.equal(reads, 0)
+    })
+
+    it("measures the first window against the baseline read once the command outlived the delay", async () => {
+        const clock = createFakeAwakeClock()
+        let cpuMs = 1_000
+        let reads = 0
+        const probe = createDefaultCpuActivityProbe(
+            100,
+            clock,
+            async () => {
+                reads += 1
+                return [{ pid: 100, parentPid: 1, cpuMs }]
+            },
+            { baselineDelayMs: 10, stillRunning: () => true },
+        )
+        await waitFor(() => reads === 1)
+
+        cpuMs += 5_000
+        clock.advance(10_000)
+        const busy = await probe(100, null)
+
+        assert.equal(busy.active, true, "CPU burned since the baseline is activity")
+        assert.equal(reads, 2, "the baseline is not read again")
     })
 
     it("bounds the probe with the same window the watchdog races against", () => {
