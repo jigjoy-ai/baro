@@ -14,6 +14,8 @@ import {
     parseLinuxProcStat,
     PROCESS_TREE_CAPABILITIES,
     processTreeObserverStats,
+    setProcessTableUnreadableForTests,
+    setProcessTreeDefaultTimingsForTests,
     setProcessTreeOwnershipPublisherForTests,
     type ProcessTreeObserverStats,
 } from "../../src/harness/process-tree.js"
@@ -333,6 +335,88 @@ describe("process-tree discovery", () => {
             }
         },
     )
+
+    // #288: four subprocesses of one ordinary run were killed because `ps`
+    // was too slow for the grace, and nothing said which.
+    describe.skipIf(process.platform === "win32")("ownership registration under a slow process table", () => {
+        const idle = ["-e", "setInterval(() => {}, 1000)"]
+        async function withSlowTable(
+            graceMs: number,
+            unreadable: () => boolean,
+            run: (published: () => number, warnings: string[]) => Promise<void>,
+        ): Promise<void> {
+            let published = 0
+            const warnings: string[] = []
+            const onWarning = (warning: Error): void => {
+                warnings.push(warning.message)
+            }
+            setProcessTreeOwnershipPublisherForTests((groups) => {
+                if (groups.length > 0) published += 1
+                return { ok: true, generation: published + 1 }
+            })
+            setProcessTreeDefaultTimingsForTests({
+                terminationGraceMs: 50,
+                quiescenceTimeoutMs: 500,
+                ownershipRegistrationGraceMs: graceMs,
+            })
+            setProcessTableUnreadableForTests(unreadable)
+            process.on("warning", onWarning)
+            try {
+                await run(() => published, warnings)
+            } finally {
+                process.off("warning", onWarning)
+                setProcessTableUnreadableForTests(null)
+                setProcessTreeDefaultTimingsForTests(null)
+                await waitFor(() => activeProcessTreeCount() === 0)
+                setProcessTreeOwnershipPublisherForTests(null)
+            }
+        }
+
+        it("keeps a provider alive while no scan has read a table, and registers it once one does", async () => {
+            let unreadable = true
+            await withSlowTable(250, () => unreadable, async (published, warnings) => {
+                const before = processTreeObserverStats().ownershipGraceRenewals
+                const child = spawn(process.execPath, idle, { detached: true, stdio: "ignore" })
+                const tree = new ManagedProcessTree(child, { ownsProcessGroup: true, pollIntervalMs: 10 })
+                child.once("close", () => tree.markRootClosed())
+                try {
+                    await waitFor(() => processTreeObserverStats().ownershipGraceRenewals > before)
+                    assert.equal(isAlive(child.pid!), true, "a grace that ran out with no table read is renewed")
+                    assert.equal(tree.ownershipFailure, null)
+
+                    unreadable = false
+                    tree.refresh()
+                    await waitFor(() => published() >= 1)
+
+                    assert.equal(isAlive(child.pid!), true)
+                    assert.deepEqual(warnings, [])
+                } finally {
+                    tree.terminate("SIGKILL")
+                    await tree.done
+                }
+            })
+        })
+
+        it("kills a provider whose identity never becomes readable, names it, and keeps the reason for its caller", async () => {
+            await withSlowTable(30, () => true, async (_published, warnings) => {
+                const before = processTreeObserverStats().ownershipRegistrationKills
+                const child = spawn(process.execPath, idle, { detached: true, stdio: "ignore" })
+                const tree = new ManagedProcessTree(child, { ownsProcessGroup: true, pollIntervalMs: 10 })
+                child.once("close", () => tree.markRootClosed())
+
+                await tree.done
+
+                assert.equal(isAlive(child.pid!), false)
+                assert.match(tree.ownershipFailure ?? "", /no process-table scan succeeded in \d+s/u)
+                assert.equal(processTreeObserverStats().ownershipRegistrationKills, before + 1)
+                assert.equal(warnings.length, 1)
+                assert.match(
+                    warnings[0]!,
+                    /^Provider process group \d+ \(node -e setInterval\(\(\) => \{\}, 1000\), started \d+\.\ds ago\) was killed because Baro could not register its ownership: no process-table scan succeeded/u,
+                )
+            })
+        })
+    })
 
     it("returns false for a tree without OS-level group ownership", async () => {
         const child = spawn(

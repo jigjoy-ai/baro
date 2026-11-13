@@ -29,6 +29,8 @@ let observationActiveScans = 0
 let observationMaxConcurrentScans = 0
 let terminalProcessTableCache: { table: ProcessTable | null } | null = null
 let terminalTableReads = 0
+let ownershipRegistrationKills = 0
+let ownershipGraceRenewals = 0
 
 type LinuxProcessTableBackend = "proc" | "ps"
 
@@ -44,6 +46,8 @@ const TERMINATE_WITH_TABLE = Symbol("terminateWithProcessTable")
 const pendingEscalations = new Set<ManagedProcessTree>()
 let escalationFlush: ReturnType<typeof setImmediate> | null = null
 const OWNERSHIP_REGISTRATION_GRACE_MS = 3_000
+/** A grace is renewed while no scan has read a table, at most this many times. */
+const OWNERSHIP_REGISTRATION_MAX_GRACES = 5
 
 let deferOwnershipPublish = false
 let ownershipPublishPending = false
@@ -53,7 +57,9 @@ let ownershipPublisherForTests:
 let defaultTimingsForTests: {
     terminationGraceMs: number
     quiescenceTimeoutMs: number
+    ownershipRegistrationGraceMs?: number
 } | null = null
+let processTableUnreadableForTests: (() => boolean) | null = null
 let observationLastObservedScan = 0
 
 export type ProcessQuiescenceAssurance = "cooperative-observed" | "none"
@@ -150,6 +156,10 @@ export interface ProcessTreeObserverStats {
     lastObservedScan: number
     /** Synchronous full-table reads taken at a root's terminal boundary. */
     terminalTableReads: number
+    /** Process groups this process killed because it could not register them. */
+    ownershipRegistrationKills: number
+    /** Registration graces renewed because no scan had read a table yet. */
+    ownershipGraceRenewals: number
 }
 
 /** @internal Deterministic ownership-publication failure seam. The active-tree
@@ -172,9 +182,27 @@ export function setProcessTreeOwnershipPublisherForTests(
 /** @internal Default timings for trees built inside participants, so tests
  * can outlast slow `ps` scans on a loaded machine. Explicit options win. */
 export function setProcessTreeDefaultTimingsForTests(
-    timings: { terminationGraceMs: number; quiescenceTimeoutMs: number } | null,
+    timings: {
+        terminationGraceMs: number
+        quiescenceTimeoutMs: number
+        ownershipRegistrationGraceMs?: number
+    } | null,
 ): void {
     defaultTimingsForTests = timings
+}
+
+/** @internal Makes every process-table read come back empty while the
+ * predicate holds, as a `ps` that times out on a loaded machine does. */
+export function setProcessTableUnreadableForTests(unreadable: (() => boolean) | null): void {
+    processTableUnreadableForTests = unreadable
+}
+
+/** The command line of a child, bounded, for a diagnostic a person reads. */
+function describeChild(child: ChildProcess): string {
+    const words = child.spawnargs?.length ? child.spawnargs : [child.spawnfile ?? "unknown command"]
+    const [first = "", ...rest] = words
+    const text = [first.split(/[\\/]/u).pop() ?? first, ...rest].join(" ").replace(/\s+/gu, " ")
+    return text.length > 120 ? `${text.slice(0, 117)}…` : text
 }
 
 /** Read-only diagnostics used to verify that discovery never overlaps. */
@@ -186,6 +214,8 @@ export function processTreeObserverStats(): ProcessTreeObserverStats {
         maxConcurrentScans: observationMaxConcurrentScans,
         lastObservedScan: observationLastObservedScan,
         terminalTableReads,
+        ownershipRegistrationKills,
+        ownershipGraceRenewals,
     }
 }
 
@@ -222,6 +252,7 @@ export class ManagedProcessTree {
     private ownedGroupIdentitySource: ProviderIdentitySource | null = null
     private ownershipManifestRegistered = false
     private ownershipRegistrationFailed = false
+    private ownershipFailureReason: string | null = null
     /** Exact live membership represented by the last durable manifest
      * generation. A mismatch means crash recovery has not caught up yet. */
     private publishedOwnershipFingerprint: string | null = null
@@ -335,22 +366,13 @@ export class ManagedProcessTree {
                 if (publication !== null && !publication.ok) {
                     this.failClosedOwnershipRegistration(publication.error, rootTable)
                 } else {
-                    // The synchronous `ps` misses under load (250ms timeout
-                    // races a busy box) and every provider spawned in such a
-                    // moment used to die on the spot — the serial kills of
-                    // runs 16-17. Identity that is merely late gets a bounded
-                    // grace: the shared observer registers the tree on a
-                    // later turn, and only an identity that never arrives
-                    // fails closed.
-                    const grace = setTimeout(() => {
-                        if (!this.ownershipManifestRegistered && !this.settled) {
-                            this.failClosedOwnershipRegistration(
-                                "provider identity did not become observable within the registration grace",
-                                null,
-                            )
-                        }
-                    }, OWNERSHIP_REGISTRATION_GRACE_MS)
-                    grace.unref?.()
+                    // The synchronous `ps` misses under load and every
+                    // provider spawned in such a moment used to die on the
+                    // spot — the serial kills of runs 16-17. Identity that
+                    // is merely late gets a bounded grace: the shared
+                    // observer registers the tree on a later turn, and only
+                    // an identity that never arrives fails closed.
+                    this.awaitOwnershipRegistration(observationScansStarted, 1)
                     requestSharedObservation(0)
                 }
             }
@@ -359,6 +381,39 @@ export class ManagedProcessTree {
         // All trees entering during the same turn share this scan. `ps` runs
         // outside the Node event loop, so macOS bootstrap does not block it.
         requestSharedObservation(0)
+    }
+
+    /**
+     * The grace is for an identity that is late, not for one the observer has
+     * had no chance to see: while no scan started since this tree was built
+     * has read a table (a `ps` that timed out reads nothing), the grace is
+     * renewed, a bounded number of times.
+     */
+    private awaitOwnershipRegistration(scansAtConstruction: number, attempt: number): void {
+        const graceMs =
+            defaultTimingsForTests?.ownershipRegistrationGraceMs ?? OWNERSHIP_REGISTRATION_GRACE_MS
+        const grace = setTimeout(() => {
+            if (this.ownershipManifestRegistered || this.settled) return
+            const observerSawATable = observationLastObservedScan > scansAtConstruction
+            if (!observerSawATable && attempt < OWNERSHIP_REGISTRATION_MAX_GRACES) {
+                ownershipGraceRenewals += 1
+                requestSharedObservation(0)
+                this.awaitOwnershipRegistration(scansAtConstruction, attempt + 1)
+                return
+            }
+            this.failClosedOwnershipRegistration(
+                observerSawATable
+                    ? "provider identity did not become observable within the registration grace"
+                    : `no process-table scan succeeded in ${Math.round((graceMs * attempt) / 1000)}s, so the provider's identity could not be read`,
+                null,
+            )
+        }, graceMs)
+        grace.unref?.()
+    }
+
+    /** Why this tree's process group was killed by Baro itself, or null. */
+    get ownershipFailure(): string | null {
+        return this.ownershipFailureReason
     }
 
     /**
@@ -1030,8 +1085,12 @@ export class ManagedProcessTree {
             return
         }
         this.ownershipRegistrationFailed = true
+        this.ownershipFailureReason = reason
+        ownershipRegistrationKills += 1
         process.emitWarning(
-            `Provider process group ${this.ownedProcessGroupId} was killed because Baro could not register its ownership: ${reason}`,
+            `Provider process group ${this.ownedProcessGroupId} (${describeChild(this.child)}, ` +
+                `started ${((Date.now() - this.createdAt) / 1000).toFixed(1)}s ago) was killed because ` +
+                `Baro could not register its ownership: ${reason}`,
             { code: "BARO_PROVIDER_OWNERSHIP_REGISTRATION_FAILED" },
         )
 
@@ -1480,6 +1539,7 @@ function isZombie(state: string): boolean {
 
 async function readProcessTableAsync(): Promise<ProcessTable | null> {
     if (process.platform === "win32") return null
+    if (processTableUnreadableForTests?.()) return null
 
     if (process.platform === "linux") {
         return readConsistentLinuxProcessTableAsync()
@@ -1493,6 +1553,7 @@ async function readProcessTableAsync(): Promise<ProcessTable | null> {
 
 function readProcessTableSync(): ProcessTable | null {
     if (process.platform === "win32") return null
+    if (processTableUnreadableForTests?.()) return null
     if (process.platform === "linux") return readConsistentLinuxProcessTableSync()
     return readPsProcessTableSync()
 }
@@ -1512,6 +1573,7 @@ function readTerminalProcessTableSync(): ProcessTable | null {
 
 function readRootProcessTableSync(rootPid: number | undefined): ProcessTable | null {
     if (rootPid === undefined || process.platform === "win32") return null
+    if (processTableUnreadableForTests?.()) return null
     let record: ProcessStateSnapshot | null = null
     if (process.platform === "linux") {
         if (linuxProcessTableBackend === "ps") {

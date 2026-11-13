@@ -12,6 +12,13 @@ import assert from "node:assert/strict"
 
 import { execFileCli, execFileCliBuffer } from "../../src/harness/exec-file-cli.js"
 import {
+    activeProcessTreeCount,
+    setProcessTableUnreadableForTests,
+    setProcessTreeDefaultTimingsForTests,
+    setProcessTreeOwnershipPublisherForTests,
+} from "../../src/harness/process-tree.js"
+import { waitFor } from "../wait-for.js"
+import {
     SPAWNED_FIXTURE_DEADLINE_MS,
     withTempDir,
 } from "../execution/helpers.js"
@@ -125,6 +132,35 @@ console.log("ready");
                 /exited with code 2\nbad flag/,
             )
         })
+    })
+
+    // #288: the caller used to see `was killed by SIGKILL` and nothing else.
+    it.skipIf(process.platform === "win32")("says so when Baro itself killed the command over process ownership", async () => {
+        setProcessTreeOwnershipPublisherForTests(() => ({ ok: true, generation: 1 }))
+        setProcessTreeDefaultTimingsForTests({
+            terminationGraceMs: 50,
+            quiescenceTimeoutMs: 500,
+            ownershipRegistrationGraceMs: 30,
+        })
+        setProcessTableUnreadableForTests(() => true)
+        const warnings: Error[] = []
+        const onWarning = (warning: Error): void => {
+            warnings.push(warning)
+        }
+        process.on("warning", onWarning)
+        try {
+            await assert.rejects(
+                execFileCli(process.execPath, ["-e", "setInterval(() => {}, 1000)"]),
+                /was killed by Baro before it finished: its process ownership could not be registered \(no process-table scan succeeded/,
+            )
+            assert.equal(warnings.length, 1)
+        } finally {
+            process.off("warning", onWarning)
+            setProcessTableUnreadableForTests(null)
+            setProcessTreeDefaultTimingsForTests(null)
+            await waitFor(() => activeProcessTreeCount() === 0)
+            setProcessTreeOwnershipPublisherForTests(null)
+        }
     })
 
     it("settles an asynchronous spawn error exactly once", async () => {
