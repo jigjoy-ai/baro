@@ -18,6 +18,13 @@
     "test:related": "rstest run --related",
     "test:watch": "rstest watch --project unit"
   },
+  "baro": {
+    "verification": {
+      "scripts": {
+        "test": "test:fast"
+      }
+    }
+  },
   "dependencies": {
     "@baro/memory": "*",
     "@mozaik-ai/core": "4.2.0",

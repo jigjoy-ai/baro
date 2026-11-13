@@ -27,7 +27,7 @@ import {
     type GateCommandOutcome,
     type GateOutcome,
 } from "./continuous-gate.js"
-import { verifyBuild, type VerifyPlan } from "./verify.js"
+import { verifyBuild, type VerifyCommandResult, type VerifyPlan } from "./verify.js"
 
 export interface ContinuousGateTarget {
     /** The story's own worktree; gates must never run in the shared checkout. */
@@ -71,6 +71,25 @@ export function gateCommandWasKilled(command: { status: string; tail?: string })
     if (command.status === "passed") return false
     const tail = command.tail ?? ""
     return /exited with code null/u.test(tail) || /signal: (killed|terminated)/u.test(tail)
+}
+
+/**
+ * What a verification run says about the patch. A skipped command (tool not
+ * installed, containment cut short, a requirement we could not run) never
+ * touched it and is dropped, same reason as the killed guard. One cut at the
+ * host's own ceiling is too long for this gate: reported, but not as a failure.
+ */
+export function gateCommandOutcomes(
+    commands: readonly Pick<VerifyCommandResult, "command" | "status" | "tail" | "timedOut">[],
+): GateCommandOutcome[] {
+    return commands
+        .filter((command) => command.status !== "skipped")
+        .map((command) => ({
+            label: command.command,
+            passed: command.status === "passed",
+            detail: command.status === "passed" ? "" : command.tail ?? "",
+            ...(command.status === "failed" && command.timedOut ? { timedOut: true } : {}),
+        }))
 }
 
 export class ContinuousGateRunner extends BusMember {
@@ -191,6 +210,7 @@ export class ContinuousGateRunner extends BusMember {
             ...(this.opts.plan ? { plan: this.opts.plan } : {}),
             ...(this.opts.hostRepoRoot ? { hostRepoRoot: this.opts.hostRepoRoot } : {}),
             changedSince: baseSha,
+            scopeByPackage: true,
         })
         // A command we killed (no exit status) says nothing about the agent's
         // work. Reporting it as a failure once told an agent its tests were
@@ -198,17 +218,7 @@ export class ContinuousGateRunner extends BusMember {
         if (result.commands.some((command) => gateCommandWasKilled(command))) {
             throw new Error("a gate command was killed before it reported")
         }
-        // A skipped command (tool not installed, containment cut short, a
-        // requirement we could not run) never touched the patch, so it is not
-        // the agent's failure — same reason as the killed guard above. Drop it
-        // rather than reporting a two-state FAIL the agent would chase.
-        return result.commands
-            .filter((command) => command.status !== "skipped")
-            .map((command) => ({
-                label: command.command,
-                passed: command.status === "passed",
-                detail: command.status === "passed" ? "" : command.tail ?? "",
-            }))
+        return gateCommandOutcomes(result.commands)
     }
 
     private deliver(agentId: string, outcome: GateOutcome): void {

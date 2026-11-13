@@ -18,7 +18,36 @@ const red = [
     { label: "go test ./...", passed: false, detail: "FAIL\tinternal/order 0.4s" },
 ]
 
+const slow = [
+    { label: "npm run build", passed: true, detail: "" },
+    {
+        label: "npm run test",
+        passed: false,
+        detail: "npm timed out after 600000ms — exceeded the absolute command ceiling",
+        timedOut: true,
+    },
+]
+
 describe("continuous gate policy", () => {
+    // #286: a suite longer than the gate's own limit was reported as FAIL for a six-file change.
+    it("reports a command cut at the gate's own limit as unfinished, not as a failure", () => {
+        const outcome = summarizeGate(slow)
+        const report = renderGateReport(outcome)
+
+        assert.equal(outcome.allPassed, false, "an unfinished gate is not green either")
+        assert.match(report, /SLOW {2}npm run test/u)
+        assert.doesNotMatch(report, /FAIL/u)
+        assert.doesNotMatch(report, /--- npm run test ---/u)
+        assert.match(report, /did not finish within this gate's time limit: it says nothing about your change/u)
+        assert.match(report, /Run the part of it your change needs yourself \(npm run test\)/u)
+    })
+
+    it("keeps an unfinished command apart from a failed one when deciding what is news", () => {
+        const failed = summarizeGate([slow[0]!, { ...slow[1]!, timedOut: false }])
+        assert.notEqual(gateFingerprint(summarizeGate(slow)), gateFingerprint(failed))
+        assert.equal(shouldDeliverGate(summarizeGate(slow), summarizeGate(slow)), false)
+    })
+
     it("is green only when every command passed and something ran", () => {
         assert.equal(summarizeGate(green).allPassed, true)
         assert.equal(summarizeGate(red).allPassed, false)

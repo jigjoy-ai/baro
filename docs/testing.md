@@ -46,6 +46,20 @@ per-test timings.
   run a test that no longer matches the source). No `any` or `@ts-expect-error`
   to get past it; a deliberately invalid value gets one cast where it is built.
 
+### What Baro runs as a gate here
+
+When Baro works on this repository, its gates run a package's `build`,
+`typecheck` and `test` scripts. `npm run test` here includes the slow lane, far
+longer than a gate's ten-minute limit, so the orchestrator's `package.json`
+names the script to use instead:
+
+```json
+"baro": { "verification": { "scripts": { "test": "test:fast" } } }
+```
+
+Any package can do the same for `build`, `typecheck`, `test` or `lint`. A name
+that is not one of the package's scripts is ignored. The slow lane is CI's job.
+
 ## Other packages
 
 `npm test -w baro-dsh` and `npm test -w @baro/memory` (the latter downloads

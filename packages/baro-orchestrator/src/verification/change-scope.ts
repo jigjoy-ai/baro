@@ -6,9 +6,10 @@
  */
 
 import { execFileSync } from "node:child_process"
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync, readdirSync, readFileSync } from "node:fs"
 import { basename, dirname, extname, join, relative, resolve } from "node:path"
 
+import { resolveCommandCwd } from "./command-cwd.js"
 import type { VerifyCommandSpec } from "./verify.js"
 
 export type VerifyEcosystem = "javascript" | "rust" | "go" | "jvm"
@@ -173,29 +174,146 @@ export function changedPathsSince(cwd: string, base: string): string[] | null {
     }
 }
 
+interface WorkspacePackage {
+    /** Relative to the root, with a trailing slash. */
+    readonly dir: string
+    readonly name: string | null
+    readonly dependsOn: readonly string[]
+}
+
+/**
+ * Within JavaScript, a command that belongs to one workspace package is
+ * affected only by a change in that package or in one it depends on: a
+ * six-file change in one package once built, type-checked and tested four.
+ * A changed JavaScript file outside every package (the root manifest, the
+ * lockfile, a shared tsconfig) affects them all, and so does anything unread.
+ */
+function commandsOfUntouchedPackages(
+    commands: readonly VerifyCommandSpec[],
+    paths: readonly string[],
+    root: string,
+): Set<VerifyCommandSpec> {
+    const untouched = new Set<VerifyCommandSpec>()
+    const packages = workspacePackages(root)
+    if (packages.length === 0) return untouched
+    const prefixes = javascriptPackageDirs(root)
+        .map((dir) => relative(resolve(root), resolve(dir)).replace(/\\/gu, "/"))
+        .filter((dir) => dir !== "" && !dir.startsWith(".."))
+        .map((dir) => `${dir}/`)
+    const touched = new Set<WorkspacePackage>()
+    for (const raw of paths) {
+        const path = raw.replace(/\\/gu, "/").replace(/^\.\//u, "")
+        if (!path || !claimsOf(path, root, prefixes).includes("javascript")) continue
+        const owner = packageOf(path, packages)
+        if (!owner) return untouched
+        touched.add(owner)
+    }
+    if (touched.size === 0) return untouched
+    const affected = new Set(touched)
+    for (let grew = true; grew; ) {
+        grew = false
+        for (const candidate of packages) {
+            if (affected.has(candidate)) continue
+            if ([...affected].some(({ name }) => name !== null && candidate.dependsOn.includes(name))) {
+                affected.add(candidate)
+                grew = true
+            }
+        }
+    }
+    for (const command of commands) {
+        if (commandEcosystem(command) !== "javascript" || command.cwd === undefined) continue
+        const dir = relative(resolve(root), resolve(resolveCommandCwd(root, command.cwd))).replace(/\\/gu, "/")
+        const owner = packages.find((candidate) => candidate.dir === `${dir}/`)
+        if (owner && !affected.has(owner)) untouched.add(command)
+    }
+    return untouched
+}
+
+function packageOf(path: string, packages: readonly WorkspacePackage[]): WorkspacePackage | null {
+    let owner: WorkspacePackage | null = null
+    for (const candidate of packages) {
+        if (path.startsWith(candidate.dir) && (owner === null || candidate.dir.length > owner.dir.length)) {
+            owner = candidate
+        }
+    }
+    return owner
+}
+
+function workspacePackages(root: string): WorkspacePackage[] {
+    const dirs = new Set<string>()
+    for (const prefix of javascriptPackageDirs(root)) {
+        if (existsSync(join(prefix, "package.json"))) {
+            dirs.add(prefix)
+            continue
+        }
+        try {
+            for (const entry of readdirSync(prefix, { withFileTypes: true })) {
+                if (entry.isDirectory() && existsSync(join(prefix, entry.name, "package.json"))) {
+                    dirs.add(join(prefix, entry.name))
+                }
+            }
+        } catch {
+            // an unreadable pattern dir contributes no packages
+        }
+    }
+    const packages: WorkspacePackage[] = []
+    for (const dir of dirs) {
+        try {
+            const manifest = JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as Record<string, unknown>
+            const dependsOn = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"]
+                .flatMap((field) => {
+                    const value = manifest[field]
+                    return value && typeof value === "object" ? Object.keys(value) : []
+                })
+            packages.push({
+                dir: `${relative(resolve(root), resolve(dir)).replace(/\\/gu, "/")}/`,
+                name: typeof manifest.name === "string" ? manifest.name : null,
+                dependsOn,
+            })
+        } catch {
+            // A package whose manifest cannot be read makes the graph
+            // unknown: scope nothing.
+            return []
+        }
+    }
+    return packages
+}
+
 export interface ScopedCommands {
     readonly run: readonly VerifyCommandSpec[]
     readonly notAffected: readonly VerifyCommandSpec[]
 }
 
-/** Splits a plan's commands into those the change can affect and those it cannot. */
+/**
+ * Splits a plan's commands into those the change can affect and those it
+ * cannot. `byPackage` also narrows within a JavaScript workspace; it follows
+ * declared dependencies only, so it is for a gate that runs after every change
+ * and is followed by a run-level one that checks the whole ecosystem.
+ */
 export function scopeCommandsToChange(
     commands: readonly VerifyCommandSpec[],
     paths: readonly string[] | null,
     root: string,
     env: NodeJS.ProcessEnv = process.env,
+    options: { byPackage?: boolean } = {},
 ): ScopedCommands {
     if (env.BARO_VERIFY_SCOPE === "0" || paths === null || paths.length === 0) {
         return { run: commands, notAffected: [] }
     }
     const affected = affectedEcosystems(paths, root)
     if (affected === "all") return { run: commands, notAffected: [] }
+    const untouchedPackages = options.byPackage && affected.has("javascript")
+        ? commandsOfUntouchedPackages(commands, paths, root)
+        : new Set<VerifyCommandSpec>()
     const run: VerifyCommandSpec[] = []
     const notAffected: VerifyCommandSpec[] = []
     for (const command of commands) {
         const ecosystem = commandEcosystem(command)
-        if (ecosystem === null || affected.has(ecosystem)) run.push(command)
-        else notAffected.push(command)
+        if (ecosystem !== null && (!affected.has(ecosystem) || untouchedPackages.has(command))) {
+            notAffected.push(command)
+        } else {
+            run.push(command)
+        }
     }
     // Narrow only to a gate that still checks something: a docs-only change
     // that ran no suite would read as an unverified run.
