@@ -19,6 +19,9 @@ const GAP_LINE =
 
 const SUSPENDED_MS = 4 * 60 * 60 * 1_000
 const PHASE_BUDGET_MS = 4_000
+// The absorb case finishes in about a second; its budget only has to be far
+// below the suspend, so a loaded machine does not trip it for real.
+const ABSORB_BUDGET_MS = 60_000
 
 const DECISION_DOCUMENT = `## Existing context
 The fixture repository has one provider-neutral contract.
@@ -45,7 +48,7 @@ describe("run-architect awake phase budget", () => {
             })
             const run = await runArchitect(dir, [
                 "--codex-bin", binary,
-                "--timeout-ms", String(PHASE_BUDGET_MS),
+                "--timeout-ms", String(ABSORB_BUDGET_MS),
             ], writeSuspendPreload(dir, marker))
 
             assert.equal(run.code, 0, run.stderr)
