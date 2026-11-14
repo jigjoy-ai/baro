@@ -3,10 +3,22 @@ import { describe, it } from "@rstest/core"
 
 import {
     CONVERSATION_HISTORY_PROMPT_MAX_BYTES,
+    CONVERSATION_INTAKE_SYSTEM_PROMPT,
     ConversationIntake,
     type ConversationResponder,
     type ConversationResponderInput,
 } from "../../../src/conversation/session/conversation-intake.js"
+
+describe("the front door's reply language (#273)", () => {
+    // Naming only Serbian made a long English goal that was mostly code get a Serbian reply.
+    it("names no single language as the default and lets prose, not code, decide", () => {
+        const rule = CONVERSATION_INTAKE_SYSTEM_PROMPT.split("\n\n")[1]!
+        assert.match(rule, /English in, English\s+out; Serbian in, Serbian out/)
+        assert.match(rule, /never switch language mid-reply/)
+        assert.match(rule, /Code, paths, identifiers/)
+        assert.match(rule, /reply in English when there are none/)
+    })
+})
 
 describe("ConversationIntake", () => {
     for (const backend of ["claude", "codex"] as const) {
