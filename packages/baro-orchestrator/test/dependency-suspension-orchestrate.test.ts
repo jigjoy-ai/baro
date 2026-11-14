@@ -234,7 +234,7 @@ describe("dependency suspension orchestration", () => {
                 assert.equal(result.summary.success, false)
                 assert.match(
                     result.summary.abortReason ?? "",
-                    /without workspace cleanup/,
+                    /S1 quarantined: .*its worktree is kept as it is/,
                 )
                 assert.equal(
                     readFileSync(join(worktreePath, "partial.txt"), "utf8"),

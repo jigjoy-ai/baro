@@ -2553,7 +2553,7 @@ describe("CollectiveBoard", () => {
         })
     })
 
-    it("halts without cleanup or recovery when process quiescence is uncertified", async () => {
+    it("quarantines a story whose process quiescence is uncertified, without cleanup, recovery or a retry, and lets the run end normally", async () => {
         await withTempDir("collective-quiescence-uncertified-", async (dir) => {
             const runId = "run-quiescence-uncertified"
             const prdPath = join(dir, "prd.json")
@@ -2606,9 +2606,13 @@ describe("CollectiveBoard", () => {
                 }),
             )
 
+            // The run is not stopped on the spot: it goes on to its normal end.
+            await waitFor(env.events, RunPushRequested.is)
+            env.publish(source("repo"), RunPushed.create({ runId, pushed: false }))
             const summary = await board.done
             assert.equal(summary.success, false)
-            assert.match(summary.abortReason ?? "", /without workspace cleanup/)
+            assert.deepEqual(summary.failedStories, ["S1"])
+            assert.doesNotMatch(summary.abortReason ?? "", /stopped without workspace cleanup/)
             assert.equal(env.events.some(WorkspaceCleanupRequested.is), false)
             assert.equal(env.events.some(RecoveryStarted.is), false)
             assert.equal(env.events.filter(WorkOffered.is).length, 1)

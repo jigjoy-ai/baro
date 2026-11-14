@@ -1503,13 +1503,21 @@ export class CollectiveBoard extends SerializedObserver {
             result.failure?.kind === "infrastructure" &&
             result.failure.code === "process_quiescence_uncertified"
         ) {
-            // The worker could not prove that every process which owned this
-            // isolated worktree is gone. Any ordinary cleanup, retry, or
-            // structural recovery could therefore race a surviving writer.
-            this.terminate(
+            // A process that owned this worktree may still be alive, so cleanup,
+            // retry or recovery of THIS story could race it. No other story
+            // writes there: quarantine it and let the run go on.
+            const id = result.storyId
+            this.pendingRecovery.delete(id)
+            this.recoveryDecided.add(id)
+            this.operationalRecovery.abort(id)
+            this.recoveryAborted.add(id)
+            this.failStory(
+                id,
+                `${id} quarantined: its process tree could not be shown to have stopped, ` +
+                    `so its worktree is kept as it is and it gets no further attempt`,
                 false,
-                `${result.storyId} process-tree quiescence was not certified; ` +
-                    `stopped without workspace cleanup`,
+                undefined,
+                "process_quiescence_uncertified",
             )
             return
         }
