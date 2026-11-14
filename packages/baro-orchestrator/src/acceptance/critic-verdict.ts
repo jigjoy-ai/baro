@@ -1,6 +1,6 @@
 /** Story commands run in a sandbox that denies e.g. `ps`; one run's tests "fixed" that by returning early. */
 export const PRE_EXISTING_FAILURE_RULE =
-    "A test failure that captured evidence shows failing the same way at the story's base commit, in the same environment, is pre-existing, not a regression — this includes tests the story sandbox breaks by denying system access such as `ps`. Never fail a criterion for it or report it as a contract conflict; judge the criterion by every other test. Only the captured base-commit run proves this, never the agent's word."
+    "A test failure that captured evidence shows failing the same way at the story's base commit, in the same environment, is pre-existing, not a regression — this includes tests the story sandbox breaks by denying system access such as `ps`. Never fail a criterion for it or report it as a contract conflict; judge the criterion by every other test. Only a captured base-commit run proves this — the story's own, or Baro's host recheck — never the agent's word."
 export const TEST_WEAKENING_RULE =
     "Skipping, ignoring, early-returning from, loosening, or deleting an existing test or assertion is a violation unless a criterion explicitly asks for it, even when it turns the suite green."
 

@@ -43,6 +43,7 @@ const MAX_COMMANDS_PER_AGENT = 16
 const MAX_COMMAND_CHARS = 1_000
 const MAX_COMMAND_OUTPUT_CHARS = 1_800
 const MAX_COMMAND_EVIDENCE_CHARS = 12_000
+const MAX_HOST_RECHECK_CHARS = 8_000
 const MAX_CRITERION_CHARS = 2_000
 const MAX_CRITERIA_CHARS = 8_000
 const MAX_AGENT_OUTPUT_CHARS = 16_000
@@ -53,7 +54,7 @@ const MAX_FINGERPRINT_PATHS = 5_000
 const MAX_FINGERPRINT_FILE_BYTES = 64 * 1024 * 1024
 const MAX_FINGERPRINT_TOTAL_BYTES = 256 * 1024 * 1024
 // Must cover the sum of every individually-bounded section above.
-export const CRITIC_MAX_PROMPT_CHARS = 140_000
+export const CRITIC_MAX_PROMPT_CHARS = 148_000
 
 
 export interface CriticRepositoryTarget {
@@ -111,6 +112,12 @@ export interface CriticEvidenceSource {
      * proof no story is permitted or able to produce.
      */
     hostRunsWholeTreeVerification?: boolean
+    /** Re-runs repository gates that failed in the sandbox on the host (host-recheck.ts). */
+    hostRecheck?(request: {
+        cwd: string
+        baseSha: string | null
+        failedCommands: readonly string[]
+    }): Promise<string | null>
     gitTimeoutMs?: number
     maxDiffChars?: number
     /** Injection point for the activity feed; production uses tui-protocol emit. */
@@ -135,6 +142,8 @@ export interface CriticCommandEvidenceEntry {
     sandboxBlocked: boolean
     /** The terminal output shows the command could not start: its tool is missing. */
     toolUnavailable: boolean
+    /** The terminal output reads as a failed run. */
+    failed?: boolean
 }
 
 /**
@@ -387,6 +396,7 @@ export class CriticCommandEvidenceCollector extends BusMember {
                     sandboxBlocked:
                         output !== null && outputLooksSandboxBlocked(output),
                     toolUnavailable,
+                    failed: output !== null && !toolUnavailable && outputShowsFailure(output),
                 } satisfies CriticCommandEvidenceEntry,
                 rendered: [
                     `### Command ${index + 1}`,
@@ -947,6 +957,26 @@ function errorCode(error: unknown): string | null {
 }
 
 /** Build the backend-neutral verdict prompts with fresh, bounded evidence. */
+/** Never throws: a recheck that cannot run leaves the sandboxed evidence as it was. */
+async function hostRecheckFor(
+    agentId: string,
+    source: CriticEvidenceSource | undefined,
+    commandEvidence: { commands: readonly CriticCommandEvidenceEntry[] | null },
+): Promise<string | null> {
+    if (!source?.hostRecheck) return null
+    const failedCommands = (commandEvidence.commands ?? [])
+        .filter((command) => command.failed === true && command.freshness === "fresh")
+        .map((command) => command.command)
+    if (failedCommands.length === 0) return null
+    try {
+        const target = await source.resolveRepositoryTarget(agentId)
+        if (!target) return null
+        return await source.hostRecheck({ cwd: target.cwd, baseSha: target.baseSha, failedCommands })
+    } catch {
+        return null
+    }
+}
+
 export async function prepareCriticEvalPrompts(
     criteria: readonly string[],
     resultText: string,
@@ -983,6 +1013,7 @@ export async function prepareCriticEvaluation(
             altitudeEvidenceFor(agentId, source),
             writeSurfaceFor(agentId, source),
         ])
+    const recheck = await hostRecheckFor(agentId, source, commandEvidence)
     const afterFingerprint = await repositoryFingerprintFor(agentId, source)
     const readinessIssues = source
         ? evidenceReadinessIssues(commandEvidence, repositoryEvidence)
@@ -1019,6 +1050,7 @@ export async function prepareCriticEvaluation(
             altitude.section,
             writeSurface,
             established.filter((criterion) => segmentCriteria.includes(criterion)),
+            recheck,
         )
         offset += segmentCriteria.length
         return prompt
@@ -1184,6 +1216,7 @@ export function buildEvalPrompt(
     altitudeSection: string | null = null,
     writeSurface: readonly string[] | null = null,
     established: readonly string[] = [],
+    hostRecheck: string | null = null,
 ): string {
     const criteriaList = renderCompleteAcceptanceContract(
         criteria,
@@ -1254,6 +1287,7 @@ export function buildEvalPrompt(
               )
             : "(no shell/test command evidence was observed for this agent)",
         "",
+        ...(hostRecheck ? [boundText(redactSensitiveText(hostRecheck), MAX_HOST_RECHECK_CHARS), ""] : []),
         "## Baro-captured repository evidence",
         repositoryEvidence
             ? boundText(
@@ -2146,6 +2180,12 @@ function commandOutputLooksFailed(output: string): boolean {
     return /^(?:\[error\]|error:)|\b(?:exit(?:ed)?(?: with)? (?:code|status)|status=)[1-9]\d*\b/im.test(
         output,
     )
+}
+
+/** Wider than the status line: a piped gate (`npm run typecheck | tail`) exits 0 and still failed. */
+function outputShowsFailure(output: string): boolean {
+    return commandOutputLooksFailed(output) ||
+        /\berror TS\d+|^npm (?:error|ERR!)|^\s*(?:FAIL|✗|×)\s|\b[1-9]\d* (?:failed|failing)\b|"failed(?:Tests|Files)":\s*[1-9]/im.test(output)
 }
 
 function commandPromptPriority(

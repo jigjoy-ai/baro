@@ -10,6 +10,7 @@ const PROCESS_TESTS = [
     "test/execution/story-executor*.test.ts",
     "test/execution/shell-containment*.test.ts",
     "test/acceptance/critic-evidence*.test.ts",
+    "test/acceptance/host-recheck*.test.ts",
     "test/acceptance/stale-evidence-recovery*.test.ts",
     "test/goal/goal-invariant-reviewer*.test.ts",
     "test/goal/goal-aggregate-governance*.test.ts",

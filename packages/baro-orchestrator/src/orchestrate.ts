@@ -31,6 +31,7 @@ import {
     normalizeGoalBranchName,
 } from "./integration/git.js"
 import { materializeDependencies } from "./integration/dependency-materializer.js"
+import { HostRecheck } from "./acceptance/host-recheck.js"
 import { IntegrationWorktree } from "./integration/integration-worktree.js"
 import { capRunDiff } from "./integration/run-diff-cap.js"
 import {
@@ -1178,6 +1179,7 @@ export async function orchestrate(
             },
         })
         premiseAmendments.join(env)
+        const hostRecheck = new HostRecheck({ hostRoot: repoRoot })
         const criticEvidence: CriticEvidenceSource = {
             resolveRepositoryTarget: resolveCriticTarget,
             commandEvidence: (storyId) =>
@@ -1198,6 +1200,7 @@ export async function orchestrate(
             // Same predicate the spawn gate and story shell use, so the judge
             // is bound by the perimeter rule the worker was bound by.
             hostRunsWholeTreeVerification: true,
+            hostRecheck: (request) => hostRecheck.section(request),
             // Read at evaluation time: a progressive run receives its
             // Architect document after this observer wiring completes.
             decisionDocument: () => {

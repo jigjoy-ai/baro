@@ -217,9 +217,13 @@ const RUN_VERIFICATION: GateDisclosure = {
             "- A whole-tree regression is the integration gate's verdict to give,",
             "  not yours to pre-empt mid-story.",
             "- The shell sandbox denies some system access (for example `ps`). A",
-            "  test that fails only for that reason is not yours to fix: run the",
-            "  same command at your story's base commit to show it fails there too,",
-            "  then move on. Never skip, weaken or delete a test to get around it.",
+            "  test that fails only for that reason is not yours to fix. When one of",
+            "  the repository's own gate commands (its build, typecheck or test",
+            "  scripts) fails, Baro re-runs it on the host, outside the sandbox, on",
+            "  your files and at your base commit, and shows the reviewer both: do",
+            "  not build a base-commit copy yourself for those. For any other",
+            "  command, run it at your base commit to show it fails there too.",
+            "  Never skip, weaken or delete a test to get around it.",
         ].join("\n")
     },
 }
