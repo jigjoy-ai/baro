@@ -98,13 +98,18 @@ export function readAuthoritativeVerifyPlanOptions(prdPath: string): {
             )
             continue
         }
+        // The final gate has no per-story diff; the declared writes pick the
+        // workspace when several declare the script (`npm run typecheck`).
+        const writes = Array.isArray(value.writes)
+            ? value.writes.filter((path): path is string => typeof path === "string")
+            : []
         for (const [testIndex, command] of value.tests.entries()) {
             if (requirements.length >= MAX_REQUIREMENTS_RETURNED - 1) {
                 requirements.push(inspectionOverflow())
                 return { declaredTests: requirements, testBudgets, notStartedStoryIds }
             }
             if (typeof command === "string") {
-                requirements.push({ storyId, command })
+                requirements.push({ storyId, command, ...(writes.length > 0 ? { changedFiles: writes } : {}) })
             } else {
                 requirements.push(
                     issue(

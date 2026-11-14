@@ -147,7 +147,7 @@ describe("HostRecheck", () => {
         })
     })
 
-    it("reaches the Critic's prompt for a fresh failed gate command", async () => {
+    it("reaches the Critic's prompt for a failed gate command, stale ones included", async () => {
         await withTempDir("baro-recheck-", async (root) => {
             const { dir, base } = repo(root)
             const requests: string[][] = []
@@ -169,7 +169,7 @@ describe("HostRecheck", () => {
 
             const preparation = await prepareCriticEvaluation(["tests pass"], "done", "S1", source)
 
-            assert.deepEqual(requests, [["npm run test"]])
+            assert.deepEqual(requests, [["npm run test", "npm run typecheck"]])
             assert.match(preparation.prompts.join("\n"), /## Host recheck of failing gate commands\nstory's files: passed/)
         })
     })

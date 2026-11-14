@@ -964,9 +964,10 @@ async function hostRecheckFor(
     commandEvidence: { commands: readonly CriticCommandEvidenceEntry[] | null },
 ): Promise<string | null> {
     if (!source?.hostRecheck) return null
-    const failedCommands = (commandEvidence.commands ?? [])
-        .filter((command) => command.failed === true && command.freshness === "fresh")
-        .map((command) => command.command)
+    // Stale ones too: the recheck runs on the current files, so its result is fresh either way.
+    const failedCommands = [...new Set((commandEvidence.commands ?? [])
+        .filter((command) => command.failed === true)
+        .map((command) => command.command))]
     if (failedCommands.length === 0) return null
     try {
         const target = await source.resolveRepositoryTarget(agentId)
