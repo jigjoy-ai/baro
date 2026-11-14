@@ -130,7 +130,7 @@ describe("HostRecheck", () => {
         })
     })
 
-    it("shows a gate failing on the story's files next to the base, and checks the base once", async () => {
+    it("shows a gate failing on the story's files next to the base, and reruns nothing for identical files", async () => {
         await withTempDir("baro-recheck-", async (root) => {
             const { dir, base } = repo(root)
             writeFileSync(join(dir, "packages", "core", "a.ts"), "export const a = 2\n")
@@ -140,11 +140,45 @@ describe("HostRecheck", () => {
 
             const first = await recheck.section(request)
             await recheck.section(request)
+            // A changed file is a new snapshot, so only the story's side runs again.
+            writeFileSync(join(dir, "packages", "core", "a.ts"), "export const a = 22\n")
+            await recheck.section(request)
 
             assert.ok(first)
             assert.match(first, /story's files: failed\n```\nnpm run test \(packages\/core\) story output\n```/)
             assert.match(first, /base commit: failed\n```\nnpm run test \(packages\/core\) base output\n```/)
             assert.deepEqual(s.runs.map((run) => run.edited), [true, false, true])
+            assert.equal(s.runs.length, 3, "identical files are not rechecked twice")
+        })
+    })
+
+    it("answers within its budget while a slow recheck runs on, and serves its result to the next review", async () => {
+        await withTempDir("baro-recheck-", async (root) => {
+            const { dir, base } = repo(root)
+            writeFileSync(join(dir, "packages", "core", "a.ts"), "export const a = 2\n")
+            let release!: () => void
+            const gate = new Promise<void>((resolve) => { release = resolve })
+            const s = seams(() => "passed")
+            const recheck = new HostRecheck({
+                hostRoot: dir,
+                checkout: s.checkout,
+                runGates: async (at, labels) => {
+                    await gate
+                    return s.runGates(at, labels)
+                },
+                scratchRoot: join(root, "scratch"),
+                budgetMs: 50,
+            })
+            const request = { cwd: dir, baseSha: base, failedCommands: ["cd packages/core && npm run typecheck"] }
+
+            const early = await recheck.section(request)
+            assert.match(early!, /did not finish within 0 s\. Its result will be in the next review/)
+
+            release()
+            await new Promise((resolve) => setTimeout(resolve, 200))
+            const later = await recheck.section(request)
+            assert.match(later!, /story's files: passed/)
+            assert.equal(s.runs.length, 1)
         })
     })
 
