@@ -31,7 +31,7 @@ import {
     normalizeGoalBranchName,
 } from "./integration/git.js"
 import { materializeDependencies } from "./integration/dependency-materializer.js"
-import { HostRecheck } from "./acceptance/host-recheck.js"
+import { HOST_RECHECK_BUDGET_MS, HostRecheck } from "./acceptance/host-recheck.js"
 import { IntegrationWorktree } from "./integration/integration-worktree.js"
 import { capRunDiff } from "./integration/run-diff-cap.js"
 import {
@@ -931,6 +931,10 @@ export async function orchestrate(
 
     const useLibrarian = config.withLibrarian ?? true
     const useSentry = config.withSentry ?? true
+    // A Critic verdict may take its whole call budget plus a host recheck, so the
+    // gate and the story's review wait must outlast both.
+    const acceptanceTimeoutMs = config.collectiveAcceptanceTimeoutMs ??
+        criticCallTimeoutMs(config.parallel) + HOST_RECHECK_BUDGET_MS + 60_000
     const useMemory = config.withMemory ?? true
 
     const sessionsDir = join(baroHome(), "sessions")
@@ -1455,7 +1459,7 @@ export async function orchestrate(
         ? new AcceptanceGate({
               runId,
               targets: criticTargets,
-              timeoutMs: config.collectiveAcceptanceTimeoutMs,
+              timeoutMs: acceptanceTimeoutMs,
               maxReverificationAttempts:
                   config.collectiveAcceptanceReverificationAttempts,
               leaseAuthority: leaseBroker,
@@ -1665,7 +1669,7 @@ export async function orchestrate(
         turnReviewAuthority: critic ?? undefined,
         terminalTurnAuthority: agentTurnProjector,
         acceptanceGateAuthority: acceptanceGate ?? undefined,
-        turnReviewTimeoutMs: config.collectiveAcceptanceTimeoutMs,
+        turnReviewTimeoutMs: acceptanceTimeoutMs,
         telemetryAuthority: modelTelemetryCollector,
         billingCoordinator: gatewayBillingCoordinator ?? undefined,
     } as const

@@ -30,8 +30,12 @@ export interface HostRecheckRequest {
     failedCommands: readonly string[]
 }
 
+/** What a recheck may add to one Critic evaluation, queue included. */
+export const HOST_RECHECK_BUDGET_MS = 90_000
+
 export interface HostRecheckOptions {
     hostRoot: string
+    budgetMs?: number
     /** Test seam: builds a checkout of `rev` (a commit) at `dir`. */
     checkout?: (repoCwd: string, rev: string, dir: string) => Promise<void>
     /** Test seam: runs gate specs (by label) in a prepared checkout. */
@@ -48,18 +52,18 @@ const MAX_TAIL_CHARS = 2_500
 
 export class HostRecheck {
     private queue: Promise<unknown> = Promise.resolve()
-    private readonly atBase = new Map<string, Promise<Map<string, Outcome>>>()
+    /** By content: a base commit, or the tree of a story snapshot. A story re-reviewed on identical files reruns nothing. */
+    private readonly outcomes = new Map<string, Promise<Map<string, Outcome>>>()
 
     constructor(private readonly opts: HostRecheckOptions) {}
 
-    /** Rechecks run one at a time: each is a full gate run on the host. */
-    section(request: HostRecheckRequest): Promise<string | null> {
-        const next = this.queue.then(() => this.recheck(request))
-        this.queue = next.catch(() => undefined)
-        return next
-    }
-
-    private async recheck(request: HostRecheckRequest): Promise<string | null> {
+    /**
+     * Rechecks run one at a time: each is a full gate run on the host. The
+     * Critic waits at most the budget, queue included, so a recheck never
+     * outlasts the acceptance deadline; one still running fills the cache for
+     * the next review of the same files.
+     */
+    async section(request: HostRecheckRequest): Promise<string | null> {
         const specs = createVerifyPlan(request.cwd).commands
         const changed = await changedPaths(request.cwd, request.baseSha)
         const labels = [
@@ -68,10 +72,38 @@ export class HostRecheck {
             )),
         ]
         if (labels.length === 0) return null
+        let snapshot: { commit: string; tree: string }
+        try {
+            snapshot = await snapshotCommit(request.cwd)
+        } catch (error) {
+            return render(labels, null, null, `the host could not snapshot the story's files: ${errMsg(error)}`)
+        }
+        const cached = labels.every((label) => this.outcomes.has(`tree:${snapshot.tree}\0${label}`))
+        const run = cached
+            ? this.recheck(request, labels, snapshot)
+            : this.queue.then(() => this.recheck(request, labels, snapshot))
+        if (!cached) this.queue = run.catch(() => undefined)
+        const budget = this.opts.budgetMs ?? HOST_RECHECK_BUDGET_MS
+        let timer: ReturnType<typeof setTimeout> | undefined
+        const late = new Promise<string>((resolve) => {
+            timer = setTimeout(() => resolve(stillRunning(labels, budget)), budget)
+            timer.unref?.()
+        })
+        try {
+            return await Promise.race([run, late])
+        } finally {
+            clearTimeout(timer)
+        }
+    }
+
+    private async recheck(
+        request: HostRecheckRequest,
+        labels: readonly string[],
+        snapshot: { commit: string; tree: string },
+    ): Promise<string> {
         let atHead: Map<string, Outcome>
         try {
-            const snapshot = await snapshotCommit(request.cwd)
-            atHead = await this.runAt(request.cwd, snapshot, labels)
+            atHead = await this.cachedOutcomes(request.cwd, snapshot.commit, `tree:${snapshot.tree}`, labels)
         } catch (error) {
             return render(labels, null, null, `the host could not run them: ${errMsg(error)}`)
         }
@@ -79,7 +111,7 @@ export class HostRecheck {
         let atBase: Map<string, Outcome> | null = null
         if (stillFailing.length > 0 && request.baseSha) {
             try {
-                atBase = await this.baseOutcomes(request.cwd, request.baseSha, stillFailing)
+                atBase = await this.cachedOutcomes(request.cwd, request.baseSha, `base:${request.baseSha}`, stillFailing)
             } catch (error) {
                 return render(labels, atHead, null, `the base commit could not be checked: ${errMsg(error)}`)
             }
@@ -87,26 +119,27 @@ export class HostRecheck {
         return render(labels, atHead, atBase, null)
     }
 
-    private async baseOutcomes(
+    private async cachedOutcomes(
         cwd: string,
-        baseSha: string,
+        rev: string,
+        key: string,
         labels: readonly string[],
     ): Promise<Map<string, Outcome>> {
         const out = new Map<string, Outcome>()
         const missing: string[] = []
         for (const label of labels) {
-            const cached = this.atBase.get(`${baseSha}\0${label}`)
+            const cached = this.outcomes.get(`${key}\0${label}`)
             const hit = cached ? (await cached).get(label) : undefined
             if (hit) out.set(label, hit)
             else missing.push(label)
         }
         if (missing.length > 0) {
-            const pending = this.runAt(cwd, baseSha, missing)
-            for (const label of missing) this.atBase.set(`${baseSha}\0${label}`, pending)
+            const pending = this.runAt(cwd, rev, missing)
+            for (const label of missing) this.outcomes.set(`${key}\0${label}`, pending)
             try {
                 for (const [label, outcome] of await pending) out.set(label, outcome)
             } catch (error) {
-                for (const label of missing) this.atBase.delete(`${baseSha}\0${label}`)
+                for (const label of missing) this.outcomes.delete(`${key}\0${label}`)
                 throw error
             }
         }
@@ -153,20 +186,21 @@ async function runGatesByLabel(dir: string, labels: readonly string[]): Promise<
 }
 
 /** The worktree's current files, untracked included, as a commit; the story's index is untouched. */
-async function snapshotCommit(cwd: string): Promise<string> {
+async function snapshotCommit(cwd: string): Promise<{ commit: string; tree: string }> {
     const indexDir = mkdtempSync(join(tmpdir(), "baro-recheck-index-"))
     try {
         const env = { ...process.env, GIT_INDEX_FILE: join(indexDir, "index") }
         await git(cwd, ["read-tree", "HEAD"], env)
         await git(cwd, ["add", "-A"], env)
         const tree = (await git(cwd, ["write-tree"], env)).trim()
-        return (await git(cwd, ["commit-tree", tree, "-p", "HEAD", "-m", "baro host recheck"], {
+        const commit = (await git(cwd, ["commit-tree", tree, "-p", "HEAD", "-m", "baro host recheck"], {
             ...process.env,
             GIT_AUTHOR_NAME: "baro",
             GIT_AUTHOR_EMAIL: "baro@localhost",
             GIT_COMMITTER_NAME: "baro",
             GIT_COMMITTER_EMAIL: "baro@localhost",
         })).trim()
+        return { commit, tree }
     } finally {
         rmSync(indexDir, { recursive: true, force: true })
     }
@@ -254,6 +288,13 @@ function segments(command: string): string[] {
         .split(/(?:&&|\|\||;|\||\r?\n)/u)
         .map((segment) => segment.trim().replace(/^\(+\s*/u, "").replace(/\)+$/u, "").replace(/^(?:[A-Za-z_]\w*=\S+\s+)+/u, ""))
         .filter(Boolean)
+}
+
+function stillRunning(labels: readonly string[], budgetMs: number): string {
+    return [
+        "## Host recheck of failing gate commands",
+        `Baro is re-running ${labels.map((label) => `\`${label}\``).join(", ")} outside the story's sandbox, and it did not finish within ${Math.round(budgetMs / 1000)} s. Its result will be in the next review of the same files. Judge these commands from the other evidence now, and do not hold the missing recheck against the story.`,
+    ].join("\n")
 }
 
 function render(
