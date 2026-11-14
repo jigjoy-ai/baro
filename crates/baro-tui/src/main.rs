@@ -594,8 +594,21 @@ async fn run_main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Writes the PRD into this run's state dir (or the checkout for a legacy resume).
-fn write_run_prd(prd: &executor::PrdFile, cwd: &Path) -> std::io::Result<()> {
-    executor::write_prd(prd, &run_state::prd_dir(cwd, &prd.branch_name)?)
+/// A long `--goal-file` goal is kept beside it as goal.md, but never written
+/// into the checkout itself.
+fn write_run_prd(
+    prd: &executor::PrdFile,
+    cwd: &Path,
+    goal_text: Option<&str>,
+) -> std::io::Result<()> {
+    let dir = run_state::prd_dir(cwd, &prd.branch_name)?;
+    executor::write_prd(prd, &dir)?;
+    if let Some(text) = goal_text {
+        if dir != cwd {
+            run_state::write_run_goal(&dir, text)?;
+        }
+    }
+    Ok(())
 }
 
 /// The alternate screen around `run_app`, restored whatever the run did.
@@ -2880,6 +2893,8 @@ async fn run_app(
                                         let branch_tx = tx.clone();
                                         let err_tx = tx.clone();
                                         let exec_goal = launch_goal.clone();
+                                        let exec_goal_file =
+                                            app.conversation.goal_file_text().map(str::to_owned);
                                         if let Err(error) =
                                             begin_conversation_execution(&mut app, &cwd)
                                         {
@@ -2937,8 +2952,11 @@ async fn run_app(
                                                 }
                                             };
                                             stamp_goal_fingerprint(&mut prd, exec_goal.as_deref());
-                                            if let Err(error) = write_run_prd(&prd, &exec_cwd)
-                                            {
+                                            if let Err(error) = write_run_prd(
+                                                &prd,
+                                                &exec_cwd,
+                                                exec_goal_file.as_deref(),
+                                            ) {
                                                 let _ = err_tx
                                                     .send(AppEvent::BranchError(format!(
                                                 "Failed to persist refined resume plan: {error}"
@@ -2974,7 +2992,11 @@ async fn run_app(
                                             app.planning_error = Some(message);
                                             continue;
                                         }
-                                        if let Err(e) = write_run_prd(&prd, &cwd) {
+                                        if let Err(e) = write_run_prd(
+                                            &prd,
+                                            &cwd,
+                                            app.conversation.goal_file_text(),
+                                        ) {
                                             app.planning_error =
                                                 Some(format!("Failed to write prd.json: {}", e));
                                         } else {
@@ -3030,6 +3052,10 @@ async fn run_app(
                                             let exec_is_resume = app.is_resume;
                                             let exec_prd = prd;
                                             let exec_cwd = cwd.clone();
+                                            let exec_goal_file = app
+                                                .conversation
+                                                .goal_file_text()
+                                                .map(str::to_owned);
                                             let branch_tx = tx.clone();
                                             let err_tx = tx.clone();
                                             tokio::spawn(async move {
@@ -3100,9 +3126,11 @@ async fn run_app(
                                                 // breaking resume.
                                                 let mut exec_prd = exec_prd;
                                                 exec_prd.branch_name = actual_full_branch.clone();
-                                                if let Err(e) =
-                                                    write_run_prd(&exec_prd, &exec_cwd)
-                                                {
+                                                if let Err(e) = write_run_prd(
+                                                    &exec_prd,
+                                                    &exec_cwd,
+                                                    exec_goal_file.as_deref(),
+                                                ) {
                                                     let _ = err_tx.send(AppEvent::BranchError(
                                                 format!("Failed to persist suffixed branch in prd.json: {}", e)
                                             )).await;
@@ -4570,7 +4598,7 @@ fn confirm_and_execute(
             let _ = tx.try_send(AppEvent::BranchError(message));
             return;
         }
-        if let Err(e) = write_run_prd(&prd, cwd) {
+        if let Err(e) = write_run_prd(&prd, cwd, app.conversation.goal_file_text()) {
             let _ = tx.try_send(AppEvent::BranchError(format!(
                 "Failed to write prd.json: {}",
                 e
@@ -4625,6 +4653,7 @@ fn confirm_and_execute(
     let is_resume = app.is_resume;
     let exec_cwd = cwd.to_path_buf();
     let branch_cwd = cwd.to_path_buf();
+    let goal_file_text = app.conversation.goal_file_text().map(str::to_owned);
     tokio::spawn(async move {
         let actual_full_branch = if let Some(expected) = continuation_branch {
             // The goal branch normally lives only as a ref; the orchestrator
@@ -4677,7 +4706,7 @@ fn confirm_and_execute(
         }
         let mut exec_prd = prd;
         exec_prd.branch_name = actual_full_branch.clone();
-        if let Err(e) = write_run_prd(&exec_prd, &exec_cwd) {
+        if let Err(e) = write_run_prd(&exec_prd, &exec_cwd, goal_file_text.as_deref()) {
             let _ = tx
                 .send(AppEvent::BranchError(format!(
                     "Failed to persist branch in prd.json: {}",
@@ -4749,7 +4778,7 @@ async fn begin_progressive_execution(
     branch_authority::verify_execution_branch(cwd, &actual_branch).await?;
     bootstrap.branch_name = actual_branch.clone();
     prd_write_guard::guard_fresh_plan_write(app.is_resume)?;
-    write_run_prd(&bootstrap, cwd)
+    write_run_prd(&bootstrap, cwd, app.conversation.goal_file_text())
         .map_err(|error| format!("could not persist progressive bootstrap PRD: {error}"))?;
 
     app.project = bootstrap.project.clone();
@@ -5122,6 +5151,48 @@ mod tests {
             assert_eq!(turn.text, resolved);
             assert_eq!(turn.source, MessageSource::GoalFile);
             assert_eq!(app.conversation.goal_source(), MessageSource::GoalFile);
+            // The full goal is what write_run_prd keeps beside prd.json.
+            let full = app
+                .conversation
+                .goal_file_text()
+                .expect("a 12 000-character goal file is kept for the run directory");
+            assert_eq!(full.encode_utf16().count(), 12_000);
+            assert_eq!(full, resolved);
+        }
+
+        #[test]
+        fn write_run_prd_keeps_goal_md_beside_prd_but_never_in_the_checkout() {
+            // The only test that drives run_state's process-wide active location.
+            let root = tempfile::tempdir().unwrap();
+            let checkout = root.path().join("checkout");
+            fs::create_dir(&checkout).unwrap();
+            let prd = crate::executor::PrdFile {
+                project: "p".into(),
+                branch_name: "baro/goal".into(),
+                ..Default::default()
+            };
+            let goal = "g".repeat(12_000);
+
+            let state = crate::run_state::create_run_in(
+                &root.path().join("home"),
+                &checkout,
+                "baro/goal",
+                "run-goal-md".into(),
+            )
+            .unwrap();
+            let run_dir = state.prd_path().parent().unwrap().to_path_buf();
+            crate::run_state::activate(state);
+            super::super::write_run_prd(&prd, &checkout, Some(&goal)).unwrap();
+            assert!(run_dir.join("prd.json").is_file());
+            assert_eq!(fs::read_to_string(run_dir.join("goal.md")).unwrap(), goal);
+            super::super::write_run_prd(&prd, &checkout, None).unwrap();
+            assert_eq!(fs::read_to_string(run_dir.join("goal.md")).unwrap(), goal);
+
+            crate::run_state::activate_legacy();
+            super::super::write_run_prd(&prd, &checkout, Some(&goal)).unwrap();
+            assert!(checkout.join("prd.json").is_file());
+            assert!(!checkout.join("goal.md").exists());
+            crate::run_state::finish_active();
         }
 
         #[test]

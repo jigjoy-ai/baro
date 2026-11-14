@@ -1,9 +1,13 @@
 import assert from "node:assert/strict"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { describe, it } from "@rstest/core"
 
 import {
     buildRecoveryPromptSection,
     buildStoryOfferPrompt,
+    readRunGoalText,
 } from "../../../src/planning/domain/story-offer-prompt.js"
 import type { PrdStory } from "../../../src/prd.js"
 
@@ -100,5 +104,94 @@ describe("story offer prompt assembly", () => {
         assert.match(retried, /execution attempt failed: tests failed/)
         assert.match(retried, /baro-recovery\/run\/S1\/1/)
         assert.match(retried, /Do not merge or cherry-pick the backup wholesale/)
+    })
+
+    it("places the full goal text after the goal contract and before the decision baseline", () => {
+        const prd = {
+            goalEnvelope: {
+                objective: "Keep the boundary observable.",
+                acceptanceCriteria: ["The behavior stays observable."],
+                constraints: [],
+                nonGoals: [],
+                assumptions: [],
+            },
+            decisionDocument: "## ADR-001: Keep it\n**Status:** Accepted",
+        }
+        const fullGoal = `${"long goal paragraph. ".repeat(600)}THE TAIL MARKER`
+        const prompt = buildStoryOfferPrompt(prd, STORY, `\n\n${fullGoal}\n\n`)
+
+        const order = [
+            "## Global goal contract",
+            "## Full goal text",
+            "## Current shared design decision",
+            "Implement the change",
+        ].map((marker) => prompt.indexOf(marker))
+        assert.ok(order.every((index) => index >= 0), prompt.slice(0, 300))
+        assert.deepEqual(order, [...order].sort((a, b) => a - b))
+        assert.ok(prompt.includes(
+            "## Full goal text\n\n" +
+                "The intake saw only the head of this goal; this is the complete text the user supplied.\n\n" +
+                `${fullGoal.trim()}\n\n---\n\n`,
+        ))
+    })
+
+    it("keeps the prompt byte-for-byte unchanged without a non-empty full goal", () => {
+        const prd = {
+            goalEnvelope: {
+                objective: "Keep the boundary observable.",
+                acceptanceCriteria: ["The behavior stays observable."],
+                constraints: [],
+                nonGoals: [],
+                assumptions: [],
+            },
+            decisionDocument: "## ADR-001: Keep it\n**Status:** Accepted",
+        }
+        const baseline = buildStoryOfferPrompt(prd, STORY)
+        assert.equal(buildStoryOfferPrompt(prd, STORY, null), baseline)
+        assert.equal(buildStoryOfferPrompt(prd, STORY, " \n\t "), baseline)
+        assert.doesNotMatch(baseline, /Full goal text/)
+    })
+})
+
+describe("run goal text beside prd.json", () => {
+    function withRunDir(body: (dir: string) => void): void {
+        const dir = mkdtempSync(join(tmpdir(), "baro-run-goal-"))
+        try {
+            body(dir)
+        } finally {
+            rmSync(dir, { recursive: true, force: true })
+        }
+    }
+
+    it("returns null when goal.md is missing", () => {
+        withRunDir((dir) => {
+            assert.equal(readRunGoalText(join(dir, "prd.json")), null)
+        })
+    })
+
+    it("returns null when goal.md holds only whitespace", () => {
+        withRunDir((dir) => {
+            writeFileSync(join(dir, "goal.md"), "  \n\t\n")
+            assert.equal(readRunGoalText(join(dir, "prd.json")), null)
+        })
+    })
+
+    it("returns the file text when goal.md is present", () => {
+        withRunDir((dir) => {
+            const text = `${"x".repeat(12_000)}\n`
+            writeFileSync(join(dir, "goal.md"), text)
+            assert.equal(readRunGoalText(join(dir, "prd.json")), text)
+        })
+    })
+
+    it("rethrows read errors other than a missing file", () => {
+        withRunDir((dir) => {
+            mkdirSync(join(dir, "goal.md"))
+            assert.throws(
+                () => readRunGoalText(join(dir, "prd.json")),
+                (error: unknown) =>
+                    error instanceof Error && "code" in error && error.code === "EISDIR",
+            )
+        })
     })
 })
