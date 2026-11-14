@@ -36,6 +36,19 @@ Architect/Planner Bash tools, and final verification all use bounded,
 process-group-aware launchers that drain the complete command tree before the
 owning participant can settle.
 
+A failing check is evidence, not yet a verdict:
+
+- **Host recheck.** When one of the repository's own gate commands failed in
+  the story's sandbox, the host runs it again outside the sandbox. It runs on
+  a snapshot of the story's files first, then at the base commit if it still
+  fails. The Critic sees both results (`src/acceptance/host-recheck.ts`).
+- **Disputes.** A story may answer a `fail` with `DISPUTE: <criterion>` and
+  `because: <evidence>` instead of a change, and the Critic must answer each
+  dispute. When the Critic holds a disputed criterion violated a second time,
+  an independent judge decides that one criterion. The judge runs inside the
+  same evaluation, so the disagreement costs the story no turn
+  (`src/acceptance/disputes.ts`).
+
 AcceptanceGate keeps that lease and isolated worktree intact and requests up
 to two neutral terminal replays through `AgentTurnProjector`. Each replay gives
 Critic the same candidate output and a fresh repository snapshot; it does not

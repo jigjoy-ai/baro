@@ -11,7 +11,7 @@
 import { runCodexOneShot } from "./one-shot.js"
 import {
     VERDICT_SYSTEM_PROMPT,
-    extractVerdictJson,
+    parseVerdictJson,
     parsedConflictFields,
 } from "../../acceptance/critic-verdict.js"
 import {
@@ -71,7 +71,7 @@ export class CriticCodex extends OneShotCritic {
     }
 
     protected override parseVerdict(text: string): OneShotCriticEvaluation {
-        const parsed: unknown = JSON.parse(extractVerdictJson(text.trim()))
+        const parsed: unknown = parseVerdictJson(text)
         if (!isCodexVerdict(parsed)) {
             throw new Error("Codex critic returned an invalid verdict object")
         }

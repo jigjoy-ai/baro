@@ -54,7 +54,7 @@ import {
 import {
     VERDICT_SYSTEM_PROMPT,
     buildCorrectiveMessage,
-    extractVerdictJson,
+    parseVerdictJson,
 } from "../claude/critic.js"
 import {
     applyContractConflicts,
@@ -69,6 +69,7 @@ import {
     type CriticEvidenceSource,
 } from "../../acceptance/critic-evidence.js"
 import { CriterionLedger, honorEstablished } from "../../acceptance/criterion-ledger.js"
+import { DisputeLedger, resolveAppeals } from "../../acceptance/disputes.js"
 import { criticInput, criticReplayKey } from "../../acceptance/critic-input.js"
 import { drainCriticPending } from "../../acceptance/critic-pending.js"
 import type { AgentTurnProjector } from "../../acceptance/agent-turn-projector.js"
@@ -137,6 +138,7 @@ export class CriticOpenAI extends BusMember {
     private readonly billingCoordinator: GatewayBillingCoordinator | null
 
     private readonly ledger = new CriterionLedger()
+    private readonly disputes = new DisputeLedger()
     private readonly emissions = new Map<string, number>()
     private readonly turnCount = new Map<string, number>()
     private readonly seenTerminalIds = new Set<string>()
@@ -226,11 +228,21 @@ export class CriticOpenAI extends BusMember {
                       preparation.established,
                   )
                 : inconclusiveEvidenceVerdict(preparation.issues)
+            const judged = preparation.status === "ready"
+                ? await resolveAppeals({
+                      evaluation,
+                      disputes: preparation.disputes,
+                      ledger: this.disputes,
+                      agentId,
+                      prompts: preparation.prompts,
+                      judge: (prompt) => this.evaluate(prompt, agentId, turn, correlation),
+                  })
+                : evaluation
             if (preparation.status === "ready") {
-                this.ledger.record(agentId, preparation.repositoryFingerprint, criteria, evaluation)
+                this.ledger.record(agentId, preparation.repositoryFingerprint, criteria, judged)
             }
-            const { verdict, reasoning, violatedCriteria } = evaluation
-            const status = evaluation.status ?? "evaluated"
+            const { verdict, reasoning, violatedCriteria } = judged
+            const status = judged.status ?? "evaluated"
 
             // Consumers must see the usage evidence before the Critique it
             // explains. The stable ID also makes event-log replay idempotent.
@@ -264,8 +276,8 @@ export class CriticOpenAI extends BusMember {
                 ...(preparation.staleCommands.length > 0
                     ? { staleCommands: preparation.staleCommands }
                     : {}),
-                ...("contractConflicts" in evaluation && evaluation.contractConflicts?.length
-                    ? { contractConflicts: evaluation.contractConflicts }
+                ...("contractConflicts" in judged && judged.contractConflicts?.length
+                    ? { contractConflicts: judged.contractConflicts }
                     : {}),
             })
             for (const env of this.getBuses()) {
@@ -421,8 +433,7 @@ export class CriticOpenAI extends BusMember {
                 throw new Error("OpenAI returned empty assistant text")
             }
 
-            const verdictJson = extractVerdictJson(assistantText)
-            const parsed = JSON.parse(verdictJson) as {
+            const parsed = parseVerdictJson(assistantText) as {
                 verdict: "pass" | "fail"
                 reasoning: string
                 violated_criteria: string[]
