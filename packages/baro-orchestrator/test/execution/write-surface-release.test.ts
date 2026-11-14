@@ -19,7 +19,7 @@ import {
     StoryMerged,
     StorySpawnRequest,
 } from "../../src/semantic-events.js"
-import { joinWithCapture, source } from "./helpers.js"
+import { joinWithCapture, source, withSharedWrites } from "./helpers.js"
 
 const F = "src/shared/feature.ts"
 
@@ -144,6 +144,30 @@ describe("replan admission applies the same overlap rule as the gate", () => {
         const result = validateRuntimeReplanMutation(prd([a]), addB([F]), options)
         assert.ok(result.ok)
         assert.equal(storyWriteSurface(story("B", [F]), [a])?.ownedElsewhere[F], undefined)
+    })
+
+    it("admits B over the path of a peer that failed for good", () => {
+        const a = story("A", [F])
+        const result = validateRuntimeReplanMutation(prd([a]), addB([F]), {
+            ...options,
+            releasedOwnerIds: ["A"],
+        })
+        assert.ok(result.ok)
+    })
+
+    it("admits B over an active peer's path under shared writes, like the gate", async () => {
+        const a = story("A", [F])
+        await withSharedWrites(async () => {
+            const result = validateRuntimeReplanMutation(prd([a]), addB([F]), options)
+            assert.ok(result.ok)
+            assert.deepEqual(storyWriteSurface(story("B", ["src/b.ts"]), [a])?.ownedElsewhere, {})
+            const { result: written } = await writeWith(
+                storyWriteSurface(story("B", ["src/b.ts"]), [a]),
+                F,
+            )
+            assert.match(written, /^Wrote /)
+            assert.match(written, /Another story may be editing it too: git merges both/)
+        })
     })
 })
 

@@ -287,7 +287,13 @@ export const GateRuleAnnounced =
     defineSemanticEvent<GateRuleAnnouncedData>("gate_rule_announced")
 
 export type PathClaimDecision =
-    | { path: string; outcome: "granted"; releasedBy?: string }
+    | {
+          path: string
+          outcome: "granted"
+          releasedBy?: string
+          /** Active peers that also write it (shared writes only). */
+          sharedWith?: string[]
+      }
     | { path: string; outcome: "already_owned" }
     | { path: string; outcome: "held"; ownerStoryId: string }
     | { path: string; outcome: "refused"; reason: string }

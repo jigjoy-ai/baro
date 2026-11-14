@@ -2,6 +2,7 @@ import assert from "node:assert/strict"
 import { describe, it } from "@rstest/core"
 
 import { noticesForLanding } from "../../src/execution/merge-awareness.js"
+import { withSharedWrites } from "./helpers.js"
 
 const S1 = { storyId: "S1", paths: ["internal/order/helpers_test.go", "internal/order/model_test.go"] }
 
@@ -17,6 +18,16 @@ describe("merge awareness", () => {
         assert.equal(notice!.collides, true)
         assert.match(notice!.text, /helpers_test\.go/u)
         assert.match(notice!.text, /Its version is on the branch now/u)
+    })
+
+    it("under shared writes, tells a co-writer its separate edits still merge", async () => {
+        const [notice] = await withSharedWrites(() =>
+            noticesForLanding(S1, [{ agentId: "S12", writes: ["internal/order/helpers_test.go"] }]),
+        )
+        assert.equal(notice!.collides, true)
+        assert.match(notice!.text, /Edits to different parts of a file merge on\s+top of it/u)
+        assert.match(notice!.text, /sent back to reapply/u)
+        assert.doesNotMatch(notice!.text, /Yours will not merge|drop your copy/u)
     })
 
     it("still tells uninvolved agents what ground is no longer free", () => {

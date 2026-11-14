@@ -7,6 +7,8 @@ import { describe, it } from "@rstest/core"
 
 import {
     decidePathClaim,
+    heldElsewhere,
+    sharedWritesEnabled,
     storyWriteSurface,
 } from "../../src/execution/write-surface.js"
 import {
@@ -14,6 +16,7 @@ import {
     refreshStoryHookSurface,
 } from "../../src/harness/claude/hook-bridge.js"
 import type { PrdStory } from "../../src/prd.js"
+import { withSharedWrites } from "./helpers.js"
 
 function story(id: string, writes: string[], passes = false): PrdStory {
     return {
@@ -157,6 +160,105 @@ describe("a Claude story's write hook follows surface revisions", () => {
         try {
             refreshStoryHookSurface(dir, { writes: ["a.ts"], ownedElsewhere: {} }, collab)
             assert.throws(() => readFileSync(join(dir, "surface.json"), "utf8"))
+        } finally {
+            rmSync(dir, { recursive: true, force: true })
+        }
+    })
+})
+
+describe("shared writes (BARO_SHARED_WRITES=1)", () => {
+    it("reads the flag on every call", async () => {
+        assert.equal(sharedWritesEnabled({}), false)
+        assert.equal(sharedWritesEnabled({ BARO_SHARED_WRITES: "0" }), false)
+        assert.equal(sharedWritesEnabled({ BARO_SHARED_WRITES: "1" }), true)
+        assert.equal(sharedWritesEnabled(), false)
+        await withSharedWrites(() => assert.equal(sharedWritesEnabled(), true))
+        assert.equal(sharedWritesEnabled(), false, "the helper restores the flag")
+    })
+
+    it("co-grants a path a running peer declared, naming the peer", async () => {
+        const s3 = story("S3", ["tests/test_tools.py"])
+        const s5 = story("S5", ["tools.py"])
+        await withSharedWrites(() => {
+            assert.deepEqual(
+                decidePathClaim("S5", "tests/test_tools.py", [s3, s5], new Map()),
+                { path: "tests/test_tools.py", outcome: "granted", sharedWith: ["S3"] },
+            )
+        })
+    })
+
+    it("co-grants a path running peers claimed, and lists every co-owner", async () => {
+        const s5 = story("S5", ["tools.py"])
+        const s6 = story("S6", ["bridge.py"])
+        const s7 = story("S7", ["cli.py"])
+        const claims = new Map([["__init__.py", ["S5", "S6"]]])
+        await withSharedWrites(() => {
+            assert.deepEqual(
+                decidePathClaim("S7", "__init__.py", [s5, s6, s7], claims),
+                { path: "__init__.py", outcome: "granted", sharedWith: ["S5", "S6"] },
+            )
+            assert.equal(
+                decidePathClaim("S6", "__init__.py", [s5, s6, s7], claims).outcome,
+                "already_owned",
+            )
+        })
+    })
+
+    it("names an integrated declarer alongside the running co-owner", async () => {
+        const s3 = story("S3", ["shared.py"], true)
+        const s4 = story("S4", ["shared.py"])
+        const s5 = story("S5", ["tools.py"])
+        await withSharedWrites(() => {
+            assert.deepEqual(
+                decidePathClaim("S5", "shared.py", [s3, s4, s5], new Map()),
+                { path: "shared.py", outcome: "granted", releasedBy: "S3", sharedWith: ["S4"] },
+            )
+        })
+    })
+
+    it("owns nothing elsewhere, so no gate refuses a peer's file", async () => {
+        const s5 = story("S5", ["tools.py"])
+        const s6 = story("S6", ["bridge.py"])
+        const claims = new Map([
+            ["tests/test_tools.py", ["S5"]],
+            ["__init__.py", ["S5", "S6"]],
+        ])
+        assert.deepEqual(heldElsewhere("S6", [s5, s6], claims), {
+            "tools.py": "S5",
+            "tests/test_tools.py": "S5",
+        })
+        await withSharedWrites(() => {
+            const surface = storyWriteSurface(s6, [s5, s6], claims)
+            assert.deepEqual(surface?.ownedElsewhere, {})
+            assert.deepEqual(
+                [...(surface?.writes ?? [])].sort(),
+                ["__init__.py", "bridge.py"],
+                "a co-claimed path is in each claimant's own surface",
+            )
+            assert.deepEqual(heldElsewhere("S6", [s5, s6], claims), {})
+            assert.deepEqual(heldElsewhere("FIX", [s5, s6], claims), {})
+        })
+    })
+
+    it("lets a Claude story's hook write a file a running peer declared", async () => {
+        const dir = mkdtempSync(join(tmpdir(), "baro-hook-shared-"))
+        try {
+            const s3 = story("S3", ["tests/test_tools.py"])
+            const s5 = story("S5", ["tools.py"])
+            const collab = { command: "agent-collab", capability: "note" }
+            const write = () =>
+                execFileSync("node", [join(dir, "hook.mjs"), "pre-write"], {
+                    input: JSON.stringify({ tool_input: { file_path: "tests/test_tools.py" }, cwd: dir }),
+                    encoding: "utf8",
+                })
+
+            materializeStoryHooks(dir, storyWriteSurface(s5, [s3, s5]), collab, dir)
+            assert.match(write(), /"decision":"block"/, "without the flag the peer's file is refused")
+
+            await withSharedWrites(() => {
+                refreshStoryHookSurface(dir, storyWriteSurface(s5, [s3, s5])!, collab)
+            })
+            assert.equal(write(), "")
         } finally {
             rmSync(dir, { recursive: true, force: true })
         }

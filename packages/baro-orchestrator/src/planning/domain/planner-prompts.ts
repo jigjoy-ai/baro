@@ -10,6 +10,51 @@ import { formatObligationIdList } from "./obligation-coverage-report.js"
 import { renderUnownedInvariantLines } from "./invariant-coverage-report.js"
 import type { GoalInvariant } from "../../goal/goal-contract.js"
 import type { WriteSurfaceOverlapFacts } from "../../events/runtime-graph.js"
+import { sharedWritesEnabled } from "../../execution/write-surface.js"
+
+const RUN_SHAPE_RULE = {
+    exclusive: `Parallelism is valuable only
+when stories have independent write surfaces. Do NOT create parallel stories
+that edit the same file, component, state machine, schema, or API contract.`,
+    shared: `Parallelism is valuable only
+when stories make independent edits. Stories MAY share a file when they edit
+different parts of it: git merges them, and a real conflict sends the story
+that integrates second back to reapply its change on the latest branch. Do NOT
+create parallel stories that change the same function, component, state
+machine, schema, or API contract.`,
+}
+
+const FOCUSED_SURFACE = {
+    exclusive: "a shared\n    file/surface",
+    shared: "one shared\n    function/component/contract",
+}
+
+const PARALLEL_INDEPENDENCE = {
+    exclusive: "(different files/modules/contracts)",
+    shared: "(different modules, contracts, or parts of a file)",
+}
+
+const CONFLICT_UNIT_RULES = {
+    exclusive: `  - The unit of conflict is the FILE, not the package or module. Stories that
+    each create their own new files run in parallel even inside one package,
+    as long as none of them adds a shared top-level name.
+  - Stories editing the same file, or racing on the same state/API/schema, must
+    be sequential or become one focused story.`,
+    shared: `  - The unit of conflict is the overlapping EDIT or CONTRACT, not the file,
+    package or module. Stories may edit the same file in parallel when they
+    change different parts of it (different functions, routes, entries): git
+    merges them, and a real conflict is retried on the latest branch.
+  - Stories changing the same function or lines, or racing on the same
+    state/API/schema, must be sequential or become one focused story.`,
+}
+
+const EDGE_EVIDENCE_RULE = {
+    exclusive: `say which file S2 writes that this story writes too, or reads.`,
+    shared: `say which file S2 writes that this story reads or builds on. A file
+    both stories write does not count: they can edit it side by side. When
+    this story modifies a file S2 creates, leave that file out of this story's
+    "writes" and name it in the description; that names the edge.`,
+}
 
 /**
  * Planner system prompt, shared by all planner backends so providers
@@ -18,7 +63,9 @@ import type { WriteSurfaceOverlapFacts } from "../../events/runtime-graph.js"
  * Rust's `PrdOutput` deserialises — do not change keys without updating
  * `crates/baro-tui/src/main.rs` too.
  */
-export const PLANNER_SYSTEM_PROMPT = `You are an expert software architect. Break down the user's project goal into concrete user stories that form a dependency DAG.
+export function plannerSystemPrompt(sharedWrites = sharedWritesEnabled()): string {
+    const variant = sharedWrites ? "shared" : "exclusive"
+    return `You are an expert software architect. Break down the user's project goal into concrete user stories that form a dependency DAG.
 
 You MUST explore the existing codebase first using your tools (read files, list directories, etc.) before generating the plan.
 
@@ -124,26 +171,19 @@ When in doubt, prefer FEWER stories over more. A single 2-file story is better
 than two artificially-split 1-file stories.
 
 RUN SHAPE:
-baro can run focused, sequential, or parallel work. Parallelism is valuable only
-when stories have independent write surfaces. Do NOT create parallel stories
-that edit the same file, component, state machine, schema, or API contract.
+baro can run focused, sequential, or parallel work. ${RUN_SHAPE_RULE[variant]}
 
 Mode semantics:
   - focused: exactly one story. Use this for one bug, one UI/component issue,
-    one failing build/runtime error, or anything likely centered on a shared
-    file/surface. The story should carry enough context to finish the PR.
+    one failing build/runtime error, or anything likely centered on ${FOCUSED_SURFACE[variant]}. The story should carry enough context to finish the PR.
   - sequential: several small stories with real dependencies. Use this when the
     work is one feature that must be implemented in ordered steps.
   - parallel: a DAG with sibling stories only where you can prove independence
-    (different files/modules/contracts). Parallelism requires a reason; do not
+    ${PARALLEL_INDEPENDENCE[variant]}. Parallelism requires a reason; do not
     fan out just to use agents.
 
 Dependency rules:
-  - The unit of conflict is the FILE, not the package or module. Stories that
-    each create their own new files run in parallel even inside one package,
-    as long as none of them adds a shared top-level name.
-  - Stories editing the same file, or racing on the same state/API/schema, must
-    be sequential or become one focused story.
+${CONFLICT_UNIT_RULES[variant]}
   - Only add dependsOn when story B literally cannot start until A is merged
     because B imports a symbol A defines, modifies a file A creates, or relies
     on a schema/API A introduces.
@@ -154,7 +194,7 @@ Dependency rules:
     dependsOn, ask what this story actually reads — not what happens to precede
     it in your listing.
   - EVERY dependsOn EDGE MUST NAME A FILE. Before adding "S2" to dependsOn,
-    say which file S2 writes that this story writes too, or reads. If you
+    ${EDGE_EVIDENCE_RULE[variant]} If you
     cannot name one, the edge does not exist — delete it. "It feels safer in
     order" and "they touch the same area" are not files. The host checks this
     and drops edges no file supports.
@@ -237,6 +277,9 @@ Rules:
 - IDs: S1, S2, S3...
 - Build on existing code, don't recreate what exists
 - Output ONLY the JSON, nothing else`
+}
+
+export const PLANNER_SYSTEM_PROMPT = plannerSystemPrompt()
 
 /** Shared by all planner backends so the prompt shape is identical across providers. */
 export type ExecutionMode = "focused" | "sequential" | "parallel"
@@ -282,7 +325,9 @@ export function heuristicModeContract(args: {
         return {
             mode: "sequential",
             confidence: 0.55,
-            reason: "The goal may need multiple steps, but no LLM intake proved independent write surfaces.",
+            reason: sharedWritesEnabled()
+                ? "The goal may need multiple steps, but no LLM intake proved independent edits."
+                : "The goal may need multiple steps, but no LLM intake proved independent write surfaces.",
             maxStories: 5,
             parallelism: 1,
         }
@@ -296,7 +341,10 @@ export function heuristicModeContract(args: {
     }
 }
 
-export function renderModeContract(decision: ModeContract): string {
+export function renderModeContract(
+    decision: ModeContract,
+    sharedWrites = sharedWritesEnabled(),
+): string {
     const lines = [
         `mode: ${decision.mode}`,
         `confidence: ${decision.confidence}`,
@@ -309,11 +357,23 @@ export function renderModeContract(decision: ModeContract): string {
             "Planner rules: output EXACTLY ONE story. Do not split. Set model to \"heavy\" so this focused run uses the strong route.",
             "The story must include enough implementation context and acceptance criteria for one agent to finish the PR.",
         )
+    } else if (decision.mode === "sequential" && sharedWrites) {
+        lines.push(
+            "Planner rules: order only what genuinely has to be ordered. Sequential mode means the run has an ordered spine, not that every story hangs off the previous one.",
+            "Do not create parallel siblings that change the same function/component/state/API; siblings may share a file when they edit different parts of it. Keep each story cheap-model-capable.",
+            "Evidence overrides maxStories: when the work enumerates over independent units (controllers, modules, packages), emit one story per unit and declare each story's `writes`. The host keeps the full width when every story declares its writes; git merges edits to different parts of a shared file and retries a real conflict on the latest branch.",
+        )
     } else if (decision.mode === "sequential") {
         lines.push(
             "Planner rules: order only what genuinely has to be ordered. Sequential mode means the run has an ordered spine, not that every story hangs off the previous one.",
             "Do not create parallel siblings that edit the same file/component/state/API. Keep each story cheap-model-capable.",
             "Evidence overrides maxStories: when the work enumerates over independent units (controllers, modules, packages), emit one story per unit and declare each story's `writes`. The host verifies pairwise-disjoint write surfaces and keeps the full width; batching provably disjoint units into one story puts them all on the critical path.",
+        )
+    } else if (sharedWrites) {
+        lines.push(
+            "Planner rules: output parallel siblings only where their edits are independent.",
+            "For each sibling story, name its expected write surface in the description. Siblings may share a file when they edit different parts of it: git merges them, and a real conflict is retried on the latest branch. The same function/component/contract must be sequential.",
+            "Evidence overrides maxStories: declare each story's `writes` and the host keeps the full width when every story declares them.",
         )
     } else {
         lines.push(
@@ -330,6 +390,7 @@ export function buildIntakePrompt(args: {
     quick?: boolean
     projectContext?: string
     decisionDocument?: string
+    sharedWrites?: boolean
 }): string {
     if (args.quick) {
         return JSON.stringify({
@@ -340,6 +401,7 @@ export function buildIntakePrompt(args: {
             parallelism: 1,
         })
     }
+    const shared = args.sharedWrites ?? sharedWritesEnabled()
     return [
         "You are Baro Intake. Choose the execution shape BEFORE planning.",
         "",
@@ -347,16 +409,28 @@ export function buildIntakePrompt(args: {
         "{\"mode\":\"focused|sequential|parallel\",\"confidence\":0.0,\"reason\":\"short\",\"maxStories\":1,\"parallelism\":1}",
         "",
         "Definitions:",
-        "- focused: one strong agent/story. Use for small bugfixes, UI tweaks, build/runtime errors, one component/file/surface, or unclear shared-write work.",
+        shared
+            ? "- focused: one strong agent/story. Use for small bugfixes, UI tweaks, build/runtime errors, one component/function/surface, or unclear overlapping work."
+            : "- focused: one strong agent/story. Use for small bugfixes, UI tweaks, build/runtime errors, one component/file/surface, or unclear shared-write work.",
         "- sequential: multiple small ordered stories. Use when one feature naturally requires steps that touch shared code.",
-        "- parallel: only when there are independent write surfaces (different modules/files/contracts) that can safely run at the same time.",
+        shared
+            ? "- parallel: only when the edits are independent (different modules, contracts, or different parts of the same files) and can safely run at the same time."
+            : "- parallel: only when there are independent write surfaces (different modules/files/contracts) that can safely run at the same time.",
         "",
         "Bias rules:",
-        "- If several agents would edit the same file/component/state/schema, choose focused or sequential, not parallel.",
-        "- If the goal enumerates over N independent units (controllers, modules, packages, endpoints, files), prefer a story per unit: size maxStories to N plus any shared foundation. Disjoint write surfaces cannot conflict — the host serializes and verifies every merge — while batching N provably independent units into one story puts all of them on the critical path.",
+        shared
+            ? "- If several agents would change the same function/component/state/schema, choose focused or sequential, not parallel. Editing different parts of one file is not a conflict: git merges those edits, and a real conflict is retried on the latest branch."
+            : "- If several agents would edit the same file/component/state/schema, choose focused or sequential, not parallel.",
+        shared
+            ? "- If the goal enumerates over N independent units (controllers, modules, packages, endpoints, files), prefer a story per unit: size maxStories to N plus any shared foundation. Independent edits merge cleanly — the host serializes and verifies every merge — while batching N independent units into one story puts all of them on the critical path."
+            : "- If the goal enumerates over N independent units (controllers, modules, packages, endpoints, files), prefer a story per unit: size maxStories to N plus any shared foundation. Disjoint write surfaces cannot conflict — the host serializes and verifies every merge — while batching N provably independent units into one story puts all of them on the critical path.",
         "- If the prompt is a follow-up bug report from screenshots/console output, choose focused unless it clearly spans independent surfaces.",
-        "- If uncertain AND the write surfaces overlap or are unknown, choose focused. Unsafe parallelism is worse than leaving speed on the table — but serializing provably disjoint units is also a real cost, not a free safety.",
-        "- maxStories is a cap for the planner, not a target; the planner may exceed it only with host-verified disjoint write surfaces.",
+        shared
+            ? "- If uncertain AND the edits overlap or are unknown, choose focused. Unsafe parallelism is worse than leaving speed on the table — but serializing independent units is also a real cost, not a free safety."
+            : "- If uncertain AND the write surfaces overlap or are unknown, choose focused. Unsafe parallelism is worse than leaving speed on the table — but serializing provably disjoint units is also a real cost, not a free safety.",
+        shared
+            ? "- maxStories is a cap for the planner, not a target; the planner may exceed it only when every story declares its write surface."
+            : "- maxStories is a cap for the planner, not a target; the planner may exceed it only with host-verified disjoint write surfaces.",
         "",
         args.projectContext?.trim()
             ? `Project context summary:\n${args.projectContext.trim().slice(0, 3000)}\n`

@@ -5,7 +5,10 @@ import { join } from "node:path"
 import { describe, it } from "@rstest/core"
 
 import { createStoryTools } from "../../src/planning/adapters/story-tools.js"
-import { withTempDir } from "../execution/helpers.js"
+import type { StoryWriteSurface } from "../../src/planning/adapters/codebase-tools.js"
+import { storyWriteSurface } from "../../src/execution/write-surface.js"
+import type { PrdStory } from "../../src/prd.js"
+import { withSharedWrites, withTempDir } from "../execution/helpers.js"
 import type { Tool } from "../../src/runtime/mozaik.js"
 
 const SURFACE = {
@@ -16,7 +19,7 @@ const SURFACE = {
     },
 }
 
-function tools(cwd: string, surface = SURFACE): Map<string, Tool> {
+function tools(cwd: string, surface: StoryWriteSurface = SURFACE): Map<string, Tool> {
     const list = createStoryTools(cwd, { surface })
     return new Map(list.map((tool) => [tool.name, tool]))
 }
@@ -168,3 +171,76 @@ describe("the write surface is enforced where the model acts", () => {
         })
     })
 })
+
+describe("under shared writes a peer's file is edited, not refused", () => {
+    const self = story("S2", SURFACE.writes)
+    const peers = [
+        story("S6", ["src/menus/menu/menu.service.ts"]),
+        story("S4", ["src/shops/shops.service.ts"]),
+    ]
+
+    it("edits a file a running peer declared, and says git merges both", async () => {
+        await withSharedWrites(() =>
+            withTempDir("baro-surface-shared-edit-", async (dir) => {
+                repo(dir)
+                const surface = storyWriteSurface(self, [self, ...peers])!
+                assert.deepEqual(surface.ownedElsewhere, {})
+                const out = await call(tools(dir, surface).get("edit_file"), {
+                    path: "src/menus/menu/menu.service.ts",
+                    old: "export class MenuService {}",
+                    new: "export class MenuService { audit() {} }",
+                })
+                assert.doesNotMatch(out, /belongs to story|Error/u)
+                assert.match(out, /Another story may be editing it too: git merges both/u)
+                assert.equal(
+                    readFileSync(join(dir, "src", "menus", "menu", "menu.service.ts"), "utf8"),
+                    "export class MenuService { audit() {} }\n",
+                )
+            }),
+        )
+    })
+
+    it("keeps what a command wrote into a peer's file", async () => {
+        await withSharedWrites(() =>
+            withTempDir("baro-surface-shared-bash-", async (dir) => {
+                const root = repo(dir)
+                execFileSync("git", ["init", "-q"], { cwd: root })
+                execFileSync("git", ["config", "user.email", "t@t"], { cwd: root })
+                execFileSync("git", ["config", "user.name", "t"], { cwd: root })
+                execFileSync("git", ["add", "-A"], { cwd: root })
+                execFileSync("git", ["commit", "-qm", "base"], { cwd: root })
+
+                const bash = createStoryTools(root, {
+                    surface: storyWriteSurface(self, [self, ...peers])!,
+                    includeBash: true,
+                }).find((tool) => tool.name === "bash")
+                const out = await call(bash, {
+                    command: "printf 'export class MenuService { audited = true }\n' > src/menus/menu/menu.service.ts",
+                })
+
+                assert.doesNotMatch(out, /another story owns|reverted/u)
+                assert.equal(
+                    readFileSync(join(root, "src/menus/menu/menu.service.ts"), "utf8"),
+                    "export class MenuService { audited = true }\n",
+                )
+            }),
+        )
+    })
+})
+
+function story(id: string, writes: string[]): PrdStory {
+    return {
+        id,
+        priority: 1,
+        title: id,
+        description: `Implement ${id}.`,
+        dependsOn: [],
+        retries: 1,
+        acceptance: [`${id} works`],
+        tests: [],
+        passes: false,
+        completedAt: null,
+        durationSecs: null,
+        writes,
+    } as PrdStory
+}

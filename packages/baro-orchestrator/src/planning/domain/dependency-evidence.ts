@@ -26,6 +26,12 @@ export interface EdgePruneResult {
     readonly removed: readonly UnsupportedEdge[]
 }
 
+export interface WriteEvidenceOptions {
+    /** BARO_SHARED_WRITES: two stories writing one file are no conflict, since
+     * git merges them and a real conflict retries on the latest branch. */
+    readonly sharedWrites?: boolean
+}
+
 const PATH_PATTERN =
     /(?:src|test|tests|lib|app|apps|packages|crates)\/[A-Za-z0-9_@./-]+\.[A-Za-z0-9]+|package\.json|tsconfig(?:\.[a-z]+)?\.json/gu
 
@@ -124,9 +130,14 @@ function symbolTextOf(story: PrdStory): string {
  * An edge A→B survives if B writes something A writes — they would collide —
  * or if B's own text names a file A writes, which is how a story says it
  * builds on another's output. Anything less is not evidence: `package.json`
- * and the test command appear in every story ever written.
+ * and the test command appear in every story ever written. Under shared writes
+ * a file both write is no evidence in any form — B's text names its own files,
+ * so counting them would keep every such edge.
  */
-export function unsupportedEdges(stories: readonly PrdStory[]): UnsupportedEdge[] {
+export function unsupportedEdges(
+    stories: readonly PrdStory[],
+    options: WriteEvidenceOptions = {},
+): UnsupportedEdge[] {
     const byId = new Map(stories.map((story) => [story.id, story]))
     const unsupported: UnsupportedEdge[] = []
 
@@ -146,7 +157,10 @@ export function unsupportedEdges(stories: readonly PrdStory[]): UnsupportedEdge[
             // dependency's output ties the planner's declared order to a file.
             const mentionedDirs = referencedDirsOf(story)
             const symbolText = symbolTextOf(story)
-            const supported = dependencyWrites.some((path) => {
+            const evidence = options.sharedWrites
+                ? dependencyWrites.filter((path) => !ownWrites.has(path))
+                : dependencyWrites
+            const supported = evidence.some((path) => {
                 if (ownWrites.has(path) || mentioned.has(path)) return true
                 if (mentionedDirs.some((dir) => pathUnderDir(path, dir))) return true
                 const stem = symbolStemOf(path)
@@ -158,8 +172,11 @@ export function unsupportedEdges(stories: readonly PrdStory[]): UnsupportedEdge[
     return unsupported
 }
 
-export function pruneUnsupportedEdges(stories: readonly PrdStory[]): EdgePruneResult {
-    const removed = unsupportedEdges(stories)
+export function pruneUnsupportedEdges(
+    stories: readonly PrdStory[],
+    options: WriteEvidenceOptions = {},
+): EdgePruneResult {
+    const removed = unsupportedEdges(stories, options)
     if (removed.length === 0) return { stories: [...stories], removed }
 
     const drop = new Map<string, Set<string>>()
@@ -195,7 +212,7 @@ export interface DisjointWidthEvidence {
     readonly proven: boolean
     /** Stories that declared no write surface (silence is not evidence). */
     readonly undeclared: readonly string[]
-    /** Unordered pairs whose declared writes overlap. */
+    /** Unordered pairs whose declared writes overlap; none under shared writes. */
     readonly conflicts: readonly { a: string; b: string; path: string }[]
 }
 
@@ -208,10 +225,14 @@ export interface DisjointWidthEvidence {
  */
 export function disjointWidthEvidence(
     stories: readonly PrdStory[],
+    options: WriteEvidenceOptions = {},
 ): DisjointWidthEvidence {
     const undeclared = stories
         .filter((story) => writeSurfaceOf(story).length === 0)
         .map((story) => story.id)
+    if (options.sharedWrites) {
+        return { proven: undeclared.length === 0, undeclared, conflicts: [] }
+    }
 
     // Transitive reachability over dependsOn: ordered pairs may share files.
     const ids = stories.map((story) => story.id)

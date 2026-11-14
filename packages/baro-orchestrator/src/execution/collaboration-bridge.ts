@@ -50,7 +50,7 @@ import {
     type WorkBlockedData,
 } from "../semantic-events.js"
 import { snapshotRuntimeReplanMutation } from "../runtime-graph/runtime-replan.js"
-import type { PathClaimDecision } from "./write-surface.js"
+import { sharedWritesEnabled, type PathClaimDecision } from "./write-surface.js"
 import { correlatedTargetedMessage } from "../runtime/targeted-message-authority.js"
 import {
     SerializedObserver,
@@ -1248,6 +1248,7 @@ export class CollaborationBridge extends SerializedObserver {
         if (!lookup) return
         const seen = new Set<string>()
         const lines: string[] = []
+        const shared = sharedWritesEnabled()
         for (const candidate of text.match(/\b[\w./-]+\.[A-Za-z0-9]+\b/g) ?? []) {
             const normalized = candidate.replace(/^\.\//u, "")
             if (seen.has(normalized)) continue
@@ -1258,7 +1259,9 @@ export class CollaborationBridge extends SerializedObserver {
                 `- ${normalized} → ${owner.storyId}` +
                     (owner.integrated
                         ? " (already integrated, so it released the path: claim it with --kind claim and pull the latest run branch)"
-                        : " (not integrated yet: message it if it is running, block on it, or wait — do not write it)"),
+                        : shared
+                          ? " (not integrated yet: you may edit it too — claim it with --kind claim, and message it if you change the same part)"
+                          : " (not integrated yet: message it if it is running, block on it, or wait — do not write it)"),
             )
             if (lines.length >= 8) break
         }
@@ -1268,7 +1271,9 @@ export class CollaborationBridge extends SerializedObserver {
             text: [
                 "Ownership answer from the plan:",
                 ...lines,
-                "Writing a path a story that has not integrated holds loses your whole story at the merge gate, not just that edit.",
+                shared
+                    ? "Stories may edit the same file: git merges both, and a real conflict sends the story that integrates second back to reapply its change on the latest run branch."
+                    : "Writing a path a story that has not integrated holds loses your whole story at the merge gate, not just that edit.",
             ].join("\n"),
             metadata: { kind: "ownership_answer", sourceAgentId: "host" },
         })
@@ -1287,14 +1292,19 @@ export class CollaborationBridge extends SerializedObserver {
     ): void {
         if (!writes || writes.length === 0) return
         const claimed = writes.slice(0, 8)
+        const shared = sharedWritesEnabled()
         for (const agentId of this.activeAgents) {
             if (agentId === ownerId) continue
             this.routeMessageIntent({
                 recipientId: agentId,
                 text: [
-                    `Story ${ownerId} started and now owns these paths:`,
+                    shared
+                        ? `Story ${ownerId} started and will write these paths:`
+                        : `Story ${ownerId} started and now owns these paths:`,
                     ...claimed.map((path) => `- ${path}`),
-                    "They were unclaimed when your own surface was drawn. Writing one now loses your whole story at the merge gate — ask its owner or block on it.",
+                    shared
+                        ? "You may still edit them: git merges both, and a real conflict sends the story that integrates second back to reapply on the latest run branch. Message it if you change the same part."
+                        : "They were unclaimed when your own surface was drawn. Writing one now loses your whole story at the merge gate — ask its owner or block on it.",
                 ].join("\n"),
                 metadata: { kind: "ownership_update", sourceAgentId: "host" },
             })
@@ -1425,7 +1435,9 @@ export class CollaborationBridge extends SerializedObserver {
             const result = this.routeMessageIntent({
                 recipientId: peer,
                 text: [
-                    `Story ${agentId} now owns these paths; ask it before changing them:`,
+                    sharedWritesEnabled()
+                        ? `Story ${agentId} now also writes these paths; git merges concurrent edits, so tell it if you change the same part:`
+                        : `Story ${agentId} now owns these paths; ask it before changing them:`,
                     ...granted.slice(0, 8).map((claim) => `- ${claim.path}`),
                 ].join("\n"),
                 metadata: { kind: "ownership_update", sourceAgentId: "host" },
@@ -2434,6 +2446,9 @@ function claimPaths(value: unknown): string[] | null {
 function claimLine(claim: PathClaimDecision): string {
     switch (claim.outcome) {
         case "granted":
+            if (claim.sharedWith?.length) {
+                return `- ${claim.path}: yours too (${claim.sharedWith.join(", ")} also write${claim.sharedWith.length === 1 ? "s" : ""} it; git merges both, and a real conflict sends the story that integrates second back to reapply on the latest run branch)`
+            }
             return claim.releasedBy
                 ? `- ${claim.path}: yours now (released by ${claim.releasedBy}, which integrated; pull the latest run branch before editing)`
                 : `- ${claim.path}: yours now`

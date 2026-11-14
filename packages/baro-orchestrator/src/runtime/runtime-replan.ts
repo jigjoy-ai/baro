@@ -7,7 +7,11 @@ import {
     type PrdStory,
 } from "../prd.js"
 import { writeSurfaceOf } from "../planning/domain/dependency-evidence.js"
-import { isActiveOwner, surfacesOverlap } from "../execution/write-surface.js"
+import {
+    isActiveOwner,
+    sharedWritesEnabled,
+    surfacesOverlap,
+} from "../execution/write-surface.js"
 import { isVerificationOnlyStory } from "../planning/domain/verification-stories.js"
 import { validateGoalContractCoverage } from "../planning/domain/goal-contract-coverage.js"
 import type {
@@ -30,6 +34,9 @@ export interface RuntimeReplanValidationOptions {
     immutableStoryIds: Iterable<string>
     /** Remaining number of dynamic stories this proposal may add. */
     maxAddedStories: number
+    /** Failed stories that will never be offered again; like integrated
+     * ones, they no longer hold their files. */
+    releasedOwnerIds?: Iterable<string>
 }
 
 export interface RuntimeReplanValidationSuccess {
@@ -229,7 +236,12 @@ export function validateRuntimeReplanMutation(
         candidate.userStories.push(toPrdStory(added))
     }
 
-    const graphFailure = validateCandidateGraph(prd, candidate, addedStoryIds)
+    const graphFailure = validateCandidateGraph(
+        prd,
+        candidate,
+        addedStoryIds,
+        new Set(options.releasedOwnerIds ?? []),
+    )
     if (graphFailure) return graphFailure
 
     return {
@@ -320,6 +332,7 @@ function validateCandidateGraph(
     current: PrdFile,
     candidate: PrdFile,
     addedStoryIds: readonly string[],
+    released: ReadonlySet<string>,
 ): RuntimeReplanValidationFailure | null {
     const storyIds = new Set(candidate.userStories.map((story) => story.id))
 
@@ -356,7 +369,7 @@ function validateCandidateGraph(
         )
     }
 
-    const overlap = findWriteSurfaceOverlap(candidate, addedStoryIds)
+    const overlap = findWriteSurfaceOverlap(candidate, addedStoryIds, released)
     if (overlap) {
         const failure = reject(
             "overlapping_write_surface",
@@ -368,6 +381,7 @@ function validateCandidateGraph(
             candidate,
             addedStoryIds,
             overlap.addedStoryId,
+            released,
         )
         return facts ? { ...failure, overlap: facts } : failure
     }
@@ -436,16 +450,20 @@ function validateCandidateGraph(
 
 /**
  * Stories removed by this same mutation are already absent from `candidate`,
- * and a story that passes no longer holds its files, so neither can own a
- * conflict. Added-vs-added pairs are out of scope for this gate.
+ * and a story that passed or failed for good no longer holds its files, so
+ * none of them can own a conflict. Added-vs-added pairs are out of scope for
+ * this gate. Under shared writes a file has no single owner: nothing overlaps.
  */
 function findWriteSurfaceOverlap(
     candidate: PrdFile,
     addedStoryIds: readonly string[],
+    released: ReadonlySet<string>,
 ): { addedStoryId: string; ownerStoryId: string; paths: string[] } | undefined {
+    if (sharedWritesEnabled()) return undefined
     const added = new Set(addedStoryIds)
     const owners = candidate.userStories.filter(
-        (story) => !added.has(story.id) && isActiveOwner(story),
+        (story) =>
+            !added.has(story.id) && !released.has(story.id) && isActiveOwner(story),
     )
     if (owners.length === 0) return undefined
 
@@ -475,6 +493,7 @@ function collectWriteSurfaceOverlapFacts(
     candidate: PrdFile,
     addedStoryIds: readonly string[],
     candidateStoryId: string,
+    released: ReadonlySet<string>,
 ): WriteSurfaceOverlapFacts | undefined {
     const added = new Set(addedStoryIds)
     const subject = candidate.userStories.find(
@@ -488,7 +507,7 @@ function collectWriteSurfaceOverlapFacts(
     const collided = new Set<string>()
     for (const owner of candidate.userStories) {
         if (owner.id === candidateStoryId) continue
-        if (added.has(owner.id) || !isActiveOwner(owner)) continue
+        if (added.has(owner.id) || released.has(owner.id) || !isActiveOwner(owner)) continue
         const ownedFiles = writeSurfaceOf(owner).sort()
         const collidingPaths = surfacesOverlap(subjectWrites, ownedFiles)
         if (collidingPaths.length === 0) continue

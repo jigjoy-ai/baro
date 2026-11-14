@@ -10,6 +10,7 @@
 import { delegationEnabled } from "../../harness/session-lineage.js"
 import type { PrdExecutionMode, PrdFile, PrdStory } from "../../prd.js"
 import { disjointWidthEvidence, pruneUnsupportedEdges, writeSurfaceOf } from "./dependency-evidence.js"
+import { sharedWritesEnabled } from "../../execution/write-surface.js"
 import { deriveGoalContract } from "../../goal/goal-contract.js"
 import type { GoalEnvelope } from "../../conversation/session/conversation-contract.js"
 import {
@@ -48,6 +49,7 @@ export function enforceModeContract(prdJson: string, contract: ModeContract, goa
     }
     if (!Array.isArray(prd.userStories)) return prdJson
     let stories = prd.userStories as PrdStory[]
+    const evidenceOptions = { sharedWrites: sharedWritesEnabled() }
 
     const pruned = pruneVerificationOnlyStories(stories)
     stories = pruned.stories
@@ -95,7 +97,7 @@ export function enforceModeContract(prdJson: string, contract: ModeContract, goa
         // collision the cap protects against cannot happen — the run that
         // taught us this packed 10 provably disjoint controllers into one
         // 33-minute story because the cap said 4.
-        const evidence = disjointWidthEvidence(stories)
+        const evidence = disjointWidthEvidence(stories, evidenceOptions)
         if (evidence.proven) {
             process.stderr.write(
                 `[run-planner] maxStories=${contract.maxStories} exceeded on evidence: ` +
@@ -154,7 +156,7 @@ export function enforceModeContract(prdJson: string, contract: ModeContract, goa
             "[run-planner] no story declared a write surface; dependency edges cannot be checked\n",
         )
     }
-    const pruned2 = pruneUnsupportedEdges(stories)
+    const pruned2 = pruneUnsupportedEdges(stories, evidenceOptions)
     if (pruned2.removed.length > 0) {
         process.stderr.write(
             `[run-planner] dropped ${pruned2.removed.length} dependency edge(s) with no shared file: ` +
@@ -175,7 +177,7 @@ export function enforceModeContract(prdJson: string, contract: ModeContract, goa
     // Audit line for tuning the intake against reality: what was guessed vs
     // what the plan can actually do. Achieved runtime concurrency is a Board
     // fact; the plan's width ceiling is decided right here.
-    const widthEvidence = disjointWidthEvidence(stories)
+    const widthEvidence = disjointWidthEvidence(stories, evidenceOptions)
     process.stderr.write(
         `[mode-telemetry] proposed mode=${contract.mode} maxStories=${contract.maxStories ?? "-"} ` +
             `parallelism=${contract.parallelism ?? "-"} confidence=${contract.confidence} | ` +

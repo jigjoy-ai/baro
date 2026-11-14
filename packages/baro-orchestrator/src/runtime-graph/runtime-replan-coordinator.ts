@@ -50,6 +50,8 @@ export interface RuntimeReplanDecisionState {
     /** Planner fragment ledger to persist in the same atomic snapshot as the
      * admitted graph mutation. Other mutation lanes preserve the current one. */
     planningState?: PrdRuntimeGraphState["planning"]
+    /** Failed stories the Board will never offer again. */
+    releasedOwnerIds?: Iterable<string>
 }
 
 export type RuntimeReplanDecisionEvent =
@@ -212,6 +214,9 @@ export class RuntimeReplanCoordinator {
             proposal.mutation,
             {
                 immutableStoryIds: state.immutableStoryIds,
+                ...(state.releasedOwnerIds
+                    ? { releasedOwnerIds: state.releasedOwnerIds }
+                    : {}),
                 maxAddedStories:
                     state.maxAddedStories ??
                     Math.max(
