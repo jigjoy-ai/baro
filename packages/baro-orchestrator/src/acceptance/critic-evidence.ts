@@ -961,6 +961,20 @@ function errorCode(error: unknown): string | null {
 }
 
 /** Build the backend-neutral verdict prompts with fresh, bounded evidence. */
+/**
+ * Everything a verdict was judged on except the agent's own text, which is a
+ * self-report and never evidence. Equal keys deserve equal verdicts: a story
+ * that only answers a peer's note produces a new turn with nothing new to judge.
+ */
+export function sameEvidenceKey(prompts: readonly string[]): string {
+    const hash = createHash("sha256")
+    for (const prompt of prompts) {
+        const cut = prompt.lastIndexOf("## Untrusted agent output")
+        hash.update(cut >= 0 ? prompt.slice(0, cut) : prompt).update("\0")
+    }
+    return hash.digest("hex")
+}
+
 /** Never throws: a recheck that cannot run leaves the sandboxed evidence as it was. */
 async function hostRecheckFor(
     agentId: string,
