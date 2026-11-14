@@ -19,6 +19,7 @@ import {
 } from "../runtime/serialized-observer.js"
 import {
     createVerifyPlan,
+    loadPerCore,
     mergeVerifyPlans,
     verifyBuild,
     type VerifyBuildOptions,
@@ -91,6 +92,7 @@ export class RunVerifier extends SerializedObserver {
                     changedSince: opts.changedSince?.() ?? null,
                     signal,
                     storyExecutorsActive,
+                    machineLoad: loadPerCore,
                     onRetryDecision: (info) =>
                         void this.retryDecisions.set(info.command, info),
                 })

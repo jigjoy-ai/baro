@@ -5,8 +5,9 @@
 
 import { createHash } from "node:crypto"
 import { existsSync, mkdirSync, realpathSync } from "node:fs"
-import { homedir } from "node:os"
 import { basename, join, resolve } from "node:path"
+
+import { baroHome } from "../runtime/baro-home.js"
 
 /** Stable per-checkout directory name; the hash keeps two same-named checkouts apart. */
 export function repositoryCacheKey(hostRoot: string): string {
@@ -28,7 +29,7 @@ export function resolveCargoTargetDir(
     if (typeof declared === "string" && declared.length > 0) return declared
     const hostTarget = join(hostRoot, "target")
     if (existsSync(hostTarget)) return hostTarget
-    const cached = join(homedir(), ".baro", "cargo-target", repositoryCacheKey(hostRoot))
+    const cached = join(baroHome(), "cargo-target", repositoryCacheKey(hostRoot))
     mkdirSync(cached, { recursive: true })
     return cached
 }

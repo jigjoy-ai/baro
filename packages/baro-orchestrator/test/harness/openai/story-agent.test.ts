@@ -28,6 +28,7 @@ import {
 } from "../../../src/semantic-events.js"
 import { captureEnv, source, withTempDir } from "../../execution/helpers.js"
 import type { SemanticEvent } from "../../../src/runtime/mozaik.js"
+import { INSIDE_MACOS_SANDBOX } from "../../inside-os-sandbox.js"
 
 describe("OpenAIStoryAgent", () => {
     it("waits for a delayed authoritative review instead of completing on quiet", async () => {
@@ -820,7 +821,7 @@ describe("OpenAIStoryAgent", () => {
         })
     })
 
-    it("returns output from the signal-aware native bash tool", async () => {
+    it.skipIf(INSIDE_MACOS_SANDBOX)("returns output from the signal-aware native bash tool", async () => {
         await withTempDir("openai-story-agent-bash-output-", async (dir) => {
             const agent = new OpenAIStoryAgent(
                 {
@@ -864,7 +865,7 @@ describe("OpenAIStoryAgent", () => {
         })
     })
 
-    it("closes bash stdin and bounds stderr returned to the model", async () => {
+    it.skipIf(INSIDE_MACOS_SANDBOX)("closes bash stdin and bounds stderr returned to the model", async () => {
         await withTempDir("openai-story-agent-bash-bounds-", async (dir) => {
             const agent = new OpenAIStoryAgent(
                 {

@@ -437,4 +437,79 @@ describe("materializeDependencies", () => {
             assert.equal(existsSync(join(root, "node_modules")), false)
         })
     })
+    // A fresh worktree has no `dist/`: every typecheck failed on `@baro/memory`.
+    it("builds a workspace package another one imports when its entry is missing, dependencies first", async () => {
+        await withTempDir("baro-dep-mat-", async (root) => {
+            const host = join(root, "host")
+            const run = join(root, "run")
+            mkdirSync(host, { recursive: true })
+            const build = { build: "tsc" }
+            writeWorkspace(run, { name: "root", private: true, workspaces: ["packages/*"] })
+            writeWorkspace(join(run, "packages", "app"), {
+                name: "app",
+                dependencies: { "@x/core": "*", "@x/util": "*" },
+            })
+            writeWorkspace(join(run, "packages", "core"), {
+                name: "@x/core",
+                main: "dist/index.js",
+                dependencies: { "@x/util": "*" },
+                scripts: build,
+            })
+            writeWorkspace(join(run, "packages", "util"), {
+                name: "@x/util",
+                exports: { ".": { types: "./dist/index.d.ts", default: "./dist/index.js" } },
+                scripts: build,
+            })
+            writeWorkspace(join(run, "packages", "built"), { name: "@x/built", main: "lib/a.js", scripts: build })
+            mkdirSync(join(run, "packages", "built", "lib"))
+            writeFileSync(join(run, "packages", "built", "lib", "a.js"), "")
+            writeWorkspace(join(run, "packages", "lonely"), { name: "@x/lonely", main: "dist/a.js", scripts: build })
+            writeWorkspace(join(run, "packages", "nobuild"), { name: "@x/nobuild", main: "dist/a.js" })
+            writeWorkspace(join(run, "packages", "uses"), {
+                name: "uses",
+                devDependencies: { "@x/built": "*", "@x/nobuild": "*" },
+            })
+            const built: string[] = []
+
+            const result = await materializeDependencies({
+                hostRoot: host,
+                integrationRoot: run,
+                runInstall: async () => {},
+                runBuild: async (dir) => {
+                    built.push(relative(run, dir))
+                },
+            })
+
+            assert.deepEqual(built, [join("packages", "util"), join("packages", "core")])
+            assert.deepEqual(
+                result.workspaces.filter((w) => w.action === "built").map((w) => w.reason),
+                ["./dist/index.d.ts is not in the checkout", "dist/index.js is not in the checkout"],
+            )
+        })
+    })
+
+    it("reports a failed build and goes on", async () => {
+        await withTempDir("baro-dep-mat-", async (root) => {
+            const host = join(root, "host")
+            const run = join(root, "run")
+            mkdirSync(host, { recursive: true })
+            writeWorkspace(run, { name: "root", private: true, workspaces: ["packages/*"], dependencies: { lib: "*" } })
+            writeWorkspace(join(run, "packages", "lib"), { name: "lib", main: "dist/a.js", scripts: { build: "tsc" } })
+
+            const result = await materializeDependencies({
+                hostRoot: host,
+                integrationRoot: run,
+                runInstall: async () => {},
+                runBuild: async () => {
+                    throw new Error("tsc exited 2")
+                },
+            })
+
+            assert.deepEqual(result.workspaces.at(-1), {
+                dir: join(run, "packages", "lib"),
+                action: "build_failed",
+                reason: "tsc exited 2",
+            })
+        })
+    })
 })

@@ -61,6 +61,7 @@ import {
 } from "../semantic-events.js"
 import {
     createVerifyPlan,
+    loadPerCore,
     mergeVerifyPlans,
     verifyBuild,
     type VerifyPlan,
@@ -526,6 +527,7 @@ export class Finalizer extends BusMember {
                 plan: mergeVerifyPlans(this.baselineVerifyPlan, finalVerifyPlan),
                 hostRepoRoot: this.opts.hostRepoRoot,
                 changedSince: this.baseSha,
+                machineLoad: loadPerCore,
             })
         }
         // Complete and unfailed, but nothing built or tested the merge: an

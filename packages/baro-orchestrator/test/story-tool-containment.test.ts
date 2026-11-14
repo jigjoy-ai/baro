@@ -19,6 +19,7 @@ import { type Tool } from "../src/runtime/mozaik.js"
 
 import { createStoryTools } from "../src/planning/adapters/story-tools.js"
 import { repoWideSuiteRejection } from "../src/planning/adapters/codebase-tools.js"
+import { INSIDE_MACOS_SANDBOX } from "./inside-os-sandbox.js"
 
 function namedTool(tools: Tool[], name: string): Tool {
     const tool = tools.find((candidate) => candidate.name === name)
@@ -205,7 +206,7 @@ describe("Story tool project containment", () => {
         })
     })
 
-    it.skipIf(process.platform === "win32")("drains an inherited-stdio process tree and removes its sandbox before abort settles",
+    it.skipIf(process.platform === "win32" || INSIDE_MACOS_SANDBOX)("drains an inherited-stdio process tree and removes its sandbox before abort settles",
         async () => {
             await withProjectAndSibling(async (project) => {
                 const started = join(project, "bash-descendant-started")
@@ -283,7 +284,7 @@ setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_0
         },
     )
 
-    it("strips provider secrets and rejects environment-dump commands", async () => {
+    it.skipIf(INSIDE_MACOS_SANDBOX)("strips provider secrets and rejects environment-dump commands", async () => {
         await withProjectAndSibling(async (project) => {
             const previous = process.env.OPENAI_API_KEY
             const secret = "sk-baro-shell-sentinel-123456"
@@ -311,7 +312,7 @@ setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_0
         })
     })
 
-    it("allows only /dev/null as an external redirection sink", async () => {
+    it.skipIf(INSIDE_MACOS_SANDBOX)("allows only /dev/null as an external redirection sink", async () => {
         await withProjectAndSibling(async (project) => {
             const bash = namedTool(createStoryTools(project), "bash")
 
@@ -475,7 +476,7 @@ setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_0
         })
     })
 
-    it("allows safe subdirectory builds, writes, and git commits", async () => {
+    it.skipIf(INSIDE_MACOS_SANDBOX)("allows safe subdirectory builds, writes, and git commits", async () => {
         await withProjectAndSibling(async (project) => {
             const app = join(project, "packages", "app")
             mkdirSync(app, { recursive: true })
@@ -513,7 +514,7 @@ setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_0
         })
     })
 
-    it("allows dependency reads through the manager link on every platform and never trusts the real path", async () => {
+    it.skipIf(INSIDE_MACOS_SANDBOX)("allows dependency reads through the manager link on every platform and never trusts the real path", async () => {
         await withManagerDependencyLink(async ({ origin, story, dependencyRoot }) => {
             mkdirSync(join(story, "untrusted"))
             symlinkSync(join(origin, ".git"), join(story, "untrusted", "vendor"), "dir")
@@ -630,7 +631,7 @@ setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_0
         })
     })
 
-    it("trusts only the exact collaboration helper and gives no session write exception", async () => {
+    it.skipIf(INSIDE_MACOS_SANDBOX)("trusts only the exact collaboration helper and gives no session write exception", async () => {
         await withProjectAndSibling(async (project, sibling) => {
             const commandPath = join(sibling, "agent-collab-fixture.mjs")
             const managerPrivateDir = join(sibling, "collective-session")
@@ -690,7 +691,7 @@ setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_0
         })
     })
 
-    it.skipIf(process.platform !== "darwin" || !existsSync("/usr/bin/sandbox-exec"),)("treats node inline code as data while Seatbelt still blocks external writes", async () => {
+    it.skipIf(process.platform !== "darwin" || !existsSync("/usr/bin/sandbox-exec") || INSIDE_MACOS_SANDBOX)("treats node inline code as data while Seatbelt still blocks external writes", async () => {
         await withProjectAndSibling(async (project, sibling) => {
             const escapedWrite = join(sibling, "node-e-escape.txt")
             const bash = namedTool(createStoryTools(project), "bash")
@@ -847,7 +848,7 @@ setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_0
         })
     })
 
-    it("allows a commit in a linked Git worktree without opening sibling writes", async () => {
+    it.skipIf(INSIDE_MACOS_SANDBOX)("allows a commit in a linked Git worktree without opening sibling writes", async () => {
         const base = mkdtempSync(join(tmpdir(), "baro-sandbox-worktree-"))
         const origin = join(base, "origin")
         const story = join(base, "story")

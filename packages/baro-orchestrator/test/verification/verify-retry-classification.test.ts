@@ -21,6 +21,7 @@ import {
 } from "../../src/verification/retry-decision.js"
 import { toVerificationEvidenceInfo, type BaroEvent } from "../../src/tui-protocol.js"
 import {
+    failureTail,
     liftedCeiling,
     verifyBuild,
     type VerifyBuildOptions,
@@ -562,5 +563,76 @@ describe("the operator's view of a classified retry", () => {
             kind: "warn",
             text: "verification retry: npm run test (environment → install-dependencies)",
         })
+    })
+})
+
+describe("a gate that fails on an oversubscribed machine", () => {
+    it("is confirmed once without a remedy, and refused as before on a quiet one", () => {
+        const loaded = decideRetry("AssertionError: 3 !== 4", { contended: true })
+        assert.equal(loaded.retry, true)
+        assert.equal(loaded.bucket, "regression")
+        assert.equal(loaded.remedy, "none")
+        assert.equal(decideRetry("AssertionError: 3 !== 4", { contended: false }).refusal, "classified-regression")
+    })
+
+    it("passes when the confirmation passes, keeping the first failure, after waiting for the load to drop", async () => {
+        await withTempDir("baro-retry-contended-", async (dir) => {
+            const log = join(dir, "spawns")
+            // Fails on the first spawn only.
+            const script =
+                "const fs = require('fs');" +
+                `const first = !fs.existsSync(${JSON.stringify(log)});` +
+                `fs.appendFileSync(${JSON.stringify(log)}, 'x\\n');` +
+                "if (first) { console.error('AssertionError: timing'); process.exit(1) }"
+            const loads = [2, 1.5, 0.5]
+            const slept: number[] = []
+
+            const { command } = await runGate(
+                dir,
+                { label: "npm run test", tool: process.execPath, args: ["-e", script], cwd: dir },
+                {
+                    machineLoad: () => loads.shift() ?? 0.5,
+                    sleep: async (ms) => void slept.push(ms),
+                },
+            )
+
+            assert.equal(command.status, "passed")
+            assert.equal(command.firstFailureTail, "AssertionError: timing")
+            assert.equal(command.retriedAfterFailure, true)
+            assert.equal(spawns(log), 2)
+            assert.deepEqual(slept, [0, 5_000])
+        })
+    })
+
+    it("never retries without a load reading", async () => {
+        await withTempDir("baro-retry-unloaded-", async (dir) => {
+            const log = join(dir, "spawns")
+            const { command } = await runGate(dir, {
+                label: "npm run test",
+                tool: process.execPath,
+                args: ["-e", failingScript(log, "AssertionError: 3 !== 4")],
+                cwd: dir,
+            })
+            assert.equal(command.status, "failed")
+            assert.equal(spawns(log), 1)
+        })
+    })
+})
+
+describe("the tail a failed gate keeps", () => {
+    it("leads with the lines that name the failure when trailing noise would push them out", () => {
+        const output = [
+            "### [F01] test/a.test.ts :: a > fails",
+            "    AssertionError: expected 1 to equal 2",
+            ...Array.from({ length: 80 }, (_, i) => `[run-planner] log line ${i}`),
+            "npm error Lifecycle script `test:fast` failed with error:",
+        ].join("\n")
+
+        const tail = failureTail(output)
+
+        assert.ok(tail.startsWith("### [F01] test/a.test.ts :: a > fails\n    AssertionError: expected 1 to equal 2\n…\n"))
+        assert.ok(tail.endsWith("npm error Lifecycle script `test:fast` failed with error:"))
+        assert.ok(tail.length <= 1500)
+        assert.equal(failureTail("short output"), "short output")
     })
 })

@@ -85,6 +85,7 @@ describe("ReverifiedCommitExecutor", () => {
                     freshness: "fresh",
                     sandboxBlocked: false,
                     toolUnavailable: false,
+                    failed: false,
                 },
             ])
             assert.match(snapshot?.text ?? "", /built ok/)

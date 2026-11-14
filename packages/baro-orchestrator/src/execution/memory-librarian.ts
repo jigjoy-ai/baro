@@ -28,10 +28,10 @@ import type {
 
 const DEBUG = process.env.BARO_DEBUG?.includes("memory") ?? false
 import { appendFileSync, mkdirSync } from "fs"
-import { homedir } from "os"
 import { join } from "path"
+import { baroHome } from "../runtime/baro-home.js"
 
-const LOG_DIR = join(homedir(), ".baro", "runs")
+const LOG_DIR = join(baroHome(), "runs")
 const LOG_FILE = join(LOG_DIR, `memory-${Date.now()}.log`)
 try { mkdirSync(LOG_DIR, { recursive: true }) } catch {}
 
