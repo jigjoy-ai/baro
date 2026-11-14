@@ -432,6 +432,17 @@ function packageCommand(
     }
 }
 
+/** Every command `name` runs is `rstest run …`, directly or through `npm run <script>`. */
+function rstestOnlyScript(manifest: PackageManifest | null, name: string, depth = 0): boolean {
+    const script = manifest?.scripts?.[name]
+    if (typeof script !== "string" || depth > 4 || /[\r\n;|`$<>]/.test(script)) return false
+    return script.split("&&").map((part) => part.trim()).every((part) => {
+        if (/^rstest run(?:\s+[\w.:=/-]+)*$/.test(part)) return true
+        const nested = /^npm run ([\w:.-]+)$/.exec(part)?.[1]
+        return nested !== undefined && rstestOnlyScript(manifest, nested, depth + 1)
+    })
+}
+
 function exactRstestScript(value: unknown): boolean {
     return (
         typeof value === "string" &&
@@ -812,6 +823,26 @@ function translatePackage(
             requirement,
             `custom package script '${script}' is not trusted by the baseline verifier policy`,
         )
+    }
+    const focusCwd = workspace?.cwd ?? cwd
+    const ownerManifest = workspace ? readManifest(join(workspace.cwd!, "package.json")) : manifest
+    if (
+        script === "test" &&
+        focusedArgs.length > 0 &&
+        !exactRstestScript(ownerManifest?.scripts?.test) &&
+        rstestOnlyScript(ownerManifest, "test") &&
+        focusedArgs.every((value) => safeRstestFocusPath(focusCwd, value))
+    ) {
+        // `npm test -- a.test.ts` appends the path to the LAST command of a
+        // composite script (`test:fast && test:slow`), whose project may not
+        // hold that file. rstest given the path itself finds its project.
+        return {
+            label: `npx rstest run ${focusedArgs.join(" ")}${resolvedRel !== undefined ? ` (${resolvedRel})` : workspace ? ` (${relative(cwd, workspace.cwd!).replace(/\\/g, "/")})` : ""}`,
+            tool: "npx",
+            args: ["--no", "rstest", "run", ...focusedArgs],
+            ...(workspace ? { cwd: workspace.cwd } : {}),
+            containedPaths: focusedArgs.map(focusedPathRequirement),
+        }
     }
     const authority =
         workspace ?? managers.find((manager) => manager.cwd === undefined)

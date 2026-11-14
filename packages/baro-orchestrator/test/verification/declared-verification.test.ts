@@ -2903,3 +2903,54 @@ describe("a declared test in a package that names its gate script", () => {
         })
     })
 })
+
+describe("a focused declared test in a package whose test script chains rstest lanes", () => {
+    // `npm test -w pkg -- a.test.ts` reached only the last lane of `test:fast && test:slow`,
+    // which held no such file: "No test files found", counted as a regression.
+    it("runs rstest on the focused paths directly, and leaves other scripts as they were", async () => {
+        await withTempDir("baro-verify-declared-rstest-lanes-", async (dir) => {
+            writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "root", private: true, workspaces: ["packages/*"] }))
+            mkdirSync(join(dir, "packages", "core", "test"), { recursive: true })
+            writeFileSync(join(dir, "packages", "core", "test", "a.test.ts"), "")
+            writeFileSync(
+                join(dir, "packages", "core", "package.json"),
+                JSON.stringify({
+                    name: "core",
+                    scripts: {
+                        test: "npm run test:fast && npm run test:slow",
+                        "test:fast": "rstest run --project unit",
+                        "test:slow": "rstest run --project process --pool.maxWorkers 2",
+                    },
+                }),
+            )
+            mkdirSync(join(dir, "packages", "web", "test"), { recursive: true })
+            writeFileSync(join(dir, "packages", "web", "test", "b.test.ts"), "")
+            writeFileSync(
+                join(dir, "packages", "web", "package.json"),
+                JSON.stringify({ name: "web", scripts: { test: "vitest run && echo done" } }),
+            )
+            const managers = [
+                { manager: "npm" as const },
+                { manager: "npm" as const, cwd: join(dir, "packages", "core") },
+                { manager: "npm" as const, cwd: join(dir, "packages", "web") },
+            ]
+
+            const [focused, other, whole] = translateDeclaredTests(
+                dir,
+                [
+                    { storyId: "S1", command: "npm run test -w packages/core -- test/a.test.ts" },
+                    { storyId: "S1", command: "npm test -w packages/web -- test/b.test.ts" },
+                    { storyId: "S1", command: "npm test -w packages/core" },
+                ],
+                managers,
+            )
+
+            assert.equal(focused?.tool, "npx")
+            assert.deepEqual(focused?.args, ["--no", "rstest", "run", "test/a.test.ts"])
+            assert.equal(focused?.cwd, join(dir, "packages", "core"))
+            assert.equal(focused?.label, "npx rstest run test/a.test.ts (packages/core)")
+            assert.deepEqual(other?.args, ["run", "test", "--", "test/b.test.ts"])
+            assert.deepEqual(whole?.args, ["run", "test"])
+        })
+    })
+})
