@@ -4,8 +4,8 @@
  */
 
 import { createHash } from "node:crypto"
-import { existsSync, mkdirSync, realpathSync } from "node:fs"
-import { basename, join, resolve } from "node:path"
+import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs"
+import { basename, delimiter, join, resolve } from "node:path"
 
 import { baroHome } from "../runtime/baro-home.js"
 
@@ -39,5 +39,38 @@ export function cargoEnvFor(
     hostRoot: string,
     env?: NodeJS.ProcessEnv,
 ): NodeJS.ProcessEnv {
-    return { ...(env ?? process.env), CARGO_TARGET_DIR: resolveCargoTargetDir(hostRoot, env) }
+    const base = env ?? process.env
+    const toolchain = cargoOnPath(base) ? null : rustToolchainBin(base)
+    return {
+        ...base,
+        ...(toolchain ? { PATH: [toolchain, base.PATH].filter(Boolean).join(delimiter) } : {}),
+        CARGO_TARGET_DIR: resolveCargoTargetDir(hostRoot, env),
+    }
+}
+
+function cargoOnPath(env: NodeJS.ProcessEnv): boolean {
+    const names = process.platform === "win32" ? ["cargo.exe", "cargo.cmd"] : ["cargo"]
+    return (env.PATH ?? "").split(delimiter).some((dir) => dir && names.some((name) => existsSync(join(dir, name))))
+}
+
+/**
+ * rustup installs cargo where only a login shell's profile puts it on PATH;
+ * a gate spawned from anything else reported a real install as missing.
+ */
+export function rustToolchainBin(env: NodeJS.ProcessEnv): string | null {
+    const home = env.HOME ?? env.USERPROFILE
+    if (!home) return null
+    const exe = process.platform === "win32" ? "cargo.exe" : "cargo"
+    const cargoHome = join(env.CARGO_HOME || join(home, ".cargo"), "bin")
+    if (existsSync(join(cargoHome, exe))) return cargoHome
+    const rustupHome = env.RUSTUP_HOME || join(home, ".rustup")
+    let toolchain: string | undefined
+    try {
+        toolchain = /^default_toolchain\s*=\s*"([^"]+)"/mu.exec(readFileSync(join(rustupHome, "settings.toml"), "utf8"))?.[1]
+    } catch {
+        return null
+    }
+    if (!toolchain || toolchain.includes("/") || toolchain.includes("..")) return null
+    const bin = join(rustupHome, "toolchains", toolchain, "bin")
+    return existsSync(join(bin, exe)) ? bin : null
 }
