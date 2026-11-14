@@ -164,10 +164,15 @@ describe("Critic", () => {
         await critic.onExternalEvent(source("turn-2"), resultEvent())
         await critic.idle()
 
-        assert.equal(evaluations, 2)
+        // Both turns get a verdict; the second is judged on the same evidence, so the model is not asked again.
+        assert.equal(evaluations, 1)
         assert.deepEqual(
             env.events.filter(Critique.is).map((event) => event.payload.turn),
             [1, 2],
+        )
+        assert.match(
+            env.events.filter(Critique.is)[1]!.payload.reasoning,
+            /^Same evidence as the previous review of this story; its verdict stands\.\ndone$/,
         )
     })
 

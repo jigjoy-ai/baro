@@ -40,7 +40,8 @@ describe("CriticCodex", () => {
             const measurements = env.events.filter(ModelInvocationMeasured.is)
 
             assert.equal(critiques.length, 3)
-            assert.equal(measurements.length, 3)
+            // Identical turns are judged on the same evidence: one model call, three verdicts.
+            assert.equal(measurements.length, 1)
             assert.ok(
                 env.events.findIndex(ModelInvocationMeasured.is) <
                     env.events.findIndex(Critique.is),

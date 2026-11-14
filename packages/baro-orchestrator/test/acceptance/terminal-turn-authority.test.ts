@@ -76,7 +76,8 @@ describe("terminal-turn consumer authority", () => {
             await critic.onExternalEvent(projector, projectedTerminal)
             await critic.idle()
 
-            assert.equal(evaluations, 2, backend)
+            // Two real terminals get two verdicts; with equal evidence the second reuses the first's model call.
+            assert.equal(evaluations, 1, backend)
             assert.deepEqual(
                 env.events.filter(Critique.is).map((event) => event.payload.turn),
                 [1, 2],

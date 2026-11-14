@@ -66,10 +66,12 @@ import {
     applyUnavailableChecks,
     mergeSegmentVerdicts,
     prepareCriticEvaluation,
+    sameEvidenceKey,
     type CriticEvidenceSource,
 } from "../../acceptance/critic-evidence.js"
 import { CriterionLedger, honorEstablished } from "../../acceptance/criterion-ledger.js"
 import { DisputeLedger, resolveAppeals } from "../../acceptance/disputes.js"
+import { repeatedVerdict } from "../../acceptance/critic-verdict.js"
 import { criticInput, criticReplayKey } from "../../acceptance/critic-input.js"
 import { drainCriticPending } from "../../acceptance/critic-pending.js"
 import type { AgentTurnProjector } from "../../acceptance/agent-turn-projector.js"
@@ -139,6 +141,7 @@ export class CriticOpenAI extends BusMember {
 
     private readonly ledger = new CriterionLedger()
     private readonly disputes = new DisputeLedger()
+    private readonly lastVerdicts = new Map<string, { key: string; evaluation: Promise<CriticOpenAIEvaluation | ReturnType<typeof inconclusiveEvidenceVerdict>> }>()
     private readonly emissions = new Map<string, number>()
     private readonly turnCount = new Map<string, number>()
     private readonly seenTerminalIds = new Set<string>()
@@ -209,44 +212,69 @@ export class CriticOpenAI extends BusMember {
                 this.opts.evidence,
                 (fingerprint) => this.ledger.established(agentId, fingerprint),
             )
-            const evaluation = preparation.status === "ready"
-                ? honorEstablished(
-                      applyUnavailableChecks(
-                          applyContractConflicts(
-                              mergeSegmentVerdicts(
-                                  await Promise.all(
-                                      preparation.prompts.map((prompt) =>
-                                          this.evaluate(prompt, agentId, turn, correlation),
+            // A dispute must reach the Critic again even on unchanged evidence: holding it twice is what earns an appeal.
+            const key = preparation.status === "ready" && preparation.disputes.length === 0
+                ? sameEvidenceKey(preparation.prompts)
+                : null
+            const previous = key ? this.lastVerdicts.get(agentId) : undefined
+            const repeated = previous !== undefined && previous.key === key
+            let evaluation: CriticOpenAIEvaluation | ReturnType<typeof inconclusiveEvidenceVerdict>
+            let judged: typeof evaluation
+            if (repeated) {
+                evaluation = repeatedVerdict(await previous.evaluation)
+                judged = evaluation
+            } else {
+                const fresh = (async () => {
+                    const merged = preparation.status === "ready"
+                        ? honorEstablished(
+                              applyUnavailableChecks(
+                                  applyContractConflicts(
+                                      mergeSegmentVerdicts(
+                                          await Promise.all(
+                                              preparation.prompts.map((prompt) =>
+                                                  this.evaluate(prompt, agentId, turn, correlation),
+                                              ),
+                                          ),
                                       ),
+                                      criteria,
                                   ),
+                                  criteria,
+                                  preparation.unavailableCommands,
                               ),
-                              criteria,
-                          ),
-                          criteria,
-                          preparation.unavailableCommands,
-                      ),
-                      preparation.established,
-                  )
-                : inconclusiveEvidenceVerdict(preparation.issues)
-            const judged = preparation.status === "ready"
-                ? await resolveAppeals({
-                      evaluation,
-                      disputes: preparation.disputes,
-                      ledger: this.disputes,
-                      agentId,
-                      prompts: preparation.prompts,
-                      judge: (prompt) => this.evaluate(prompt, agentId, turn, correlation),
-                  })
-                : evaluation
-            if (preparation.status === "ready") {
-                this.ledger.record(agentId, preparation.repositoryFingerprint, criteria, judged)
+                              preparation.established,
+                          )
+                        : inconclusiveEvidenceVerdict(preparation.issues)
+                    const appealed = preparation.status === "ready"
+                        ? await resolveAppeals({
+                              evaluation: merged,
+                              disputes: preparation.disputes,
+                              ledger: this.disputes,
+                              agentId,
+                              prompts: preparation.prompts,
+                              judge: (prompt) => this.evaluate(prompt, agentId, turn, correlation),
+                          })
+                        : merged
+                    return { merged, appealed }
+                })()
+                // Set before awaiting, so a concurrent turn with the same evidence waits for this call.
+                const shared = fresh.then(({ appealed }) => appealed)
+                if (key) this.lastVerdicts.set(agentId, { key, evaluation: shared })
+                const { merged, appealed } = await fresh
+                evaluation = merged
+                judged = appealed
+                if ((judged.status ?? "evaluated") !== "evaluated" && this.lastVerdicts.get(agentId)?.evaluation === shared) {
+                    this.lastVerdicts.delete(agentId)
+                }
+                if (preparation.status === "ready") {
+                    this.ledger.record(agentId, preparation.repositoryFingerprint, criteria, judged)
+                }
             }
             const { verdict, reasoning, violatedCriteria } = judged
             const status = judged.status ?? "evaluated"
 
             // Consumers must see the usage evidence before the Critique it
             // explains. The stable ID also makes event-log replay idempotent.
-            if (preparation.status === "ready" && !this.billingCoordinator) {
+            if (preparation.status === "ready" && !repeated && !this.billingCoordinator) {
                 const telemetry = "telemetry" in evaluation
                     ? evaluation.telemetry
                     : undefined

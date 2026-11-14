@@ -247,3 +247,11 @@ export function extractVerdictJson(text: string): string {
     }
     throw new Error(`unbalanced JSON object in critic response: ${trimmed.slice(0, 200)}`)
 }
+
+/** A verdict reissued for a turn whose evidence equals the last judged one. */
+export function repeatedVerdict<T extends { reasoning: string }>(evaluation: T): T {
+    const note = "Same evidence as the previous review of this story; its verdict stands."
+    return evaluation.reasoning.startsWith(note)
+        ? evaluation
+        : { ...evaluation, reasoning: `${note}\n${evaluation.reasoning}` }
+}

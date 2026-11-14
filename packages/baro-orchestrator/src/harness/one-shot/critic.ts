@@ -30,10 +30,12 @@ import {
     applyUnavailableChecks,
     mergeSegmentVerdicts,
     prepareCriticEvaluation,
+    sameEvidenceKey,
     type CriticEvidenceSource,
 } from "../../acceptance/critic-evidence.js"
 import { CriterionLedger, honorEstablished } from "../../acceptance/criterion-ledger.js"
 import { DisputeLedger, resolveAppeals } from "../../acceptance/disputes.js"
+import { repeatedVerdict } from "../../acceptance/critic-verdict.js"
 import { withIsolatedCriticCwd } from "../critic-cli-isolation.js"
 import { criticInput, criticReplayKey } from "../../acceptance/critic-input.js"
 import { drainCriticPending } from "../../acceptance/critic-pending.js"
@@ -83,6 +85,7 @@ export abstract class OneShotCritic extends BusMember {
     private readonly maxEmissionsPerAgent: number
     private readonly ledger = new CriterionLedger()
     private readonly disputes = new DisputeLedger()
+    private readonly lastVerdicts = new Map<string, { key: string; evaluation: OneShotCriticEvaluation }>()
     private readonly targets: ReadonlyMap<string, readonly string[]>
     protected readonly runId: string | undefined
     private readonly evidence: CriticEvidenceSource | undefined
@@ -190,7 +193,14 @@ export abstract class OneShotCritic extends BusMember {
                 repositoryFingerprint = preparation.repositoryFingerprint
                 staleCommands = preparation.staleCommands
                 preparationReady = preparation.status === "ready"
-                evaluation = preparationReady
+                // A dispute must reach the Critic again even on unchanged evidence: holding it twice is what earns an appeal.
+                const key = preparationReady && preparation.disputes.length === 0
+                    ? sameEvidenceKey(preparation.prompts)
+                    : null
+                const previous = key ? this.lastVerdicts.get(agentId) : undefined
+                evaluation = previous && previous.key === key
+                    ? repeatedVerdict(previous.evaluation)
+                    : preparationReady
                     ? honorEstablished(
                           applyUnavailableChecks(
                               applyContractConflicts(
@@ -209,7 +219,7 @@ export abstract class OneShotCritic extends BusMember {
                           preparation.established,
                       )
                     : inconclusiveEvidenceVerdict(preparation.issues)
-                if (preparationReady) {
+                if (preparationReady && !(previous && previous.key === key)) {
                     evaluation = await resolveAppeals({
                         evaluation,
                         disputes: preparation.disputes,
@@ -219,6 +229,9 @@ export abstract class OneShotCritic extends BusMember {
                         judge: (prompt) => this.evaluate(prompt, agentId, turn),
                     })
                     this.ledger.record(agentId, repositoryFingerprint, criteria, evaluation)
+                    if (key && (evaluation.status ?? "evaluated") === "evaluated") {
+                        this.lastVerdicts.set(agentId, { key, evaluation })
+                    }
                 }
             } catch (error) {
                 evaluation = {
