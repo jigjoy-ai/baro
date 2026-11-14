@@ -6,6 +6,9 @@
  * (prd, story) rather than live scheduler state.
  */
 
+import { readFileSync } from "node:fs"
+import { dirname, join } from "node:path"
+
 import {
     buildDefaultStoryPrompt,
     type PrdFile,
@@ -20,6 +23,7 @@ import { renderRuntimeAmendmentsForPrompt } from "./runtime-amendments.js"
 export function buildStoryOfferPrompt(
     prd: Pick<PrdFile, "goalEnvelope" | "decisionDocument" | "runtimeGraph"> | null,
     story: PrdStory,
+    fullGoal: string | null = null,
 ): string {
     const sections: string[] = []
     const contract = deriveGoalContract(prd?.goalEnvelope)
@@ -28,6 +32,19 @@ export function buildStoryOfferPrompt(
             "## Global goal contract",
             "",
             renderGoalContractPrompt(contract, story.goalInvariantIds ?? []),
+            "",
+            "---",
+            "",
+        )
+    }
+    const goalText = fullGoal?.trim()
+    if (goalText) {
+        sections.push(
+            "## Full goal text",
+            "",
+            "The intake saw only the head of this goal; this is the complete text the user supplied.",
+            "",
+            goalText,
             "",
             "---",
             "",
@@ -57,6 +74,29 @@ export function buildStoryOfferPrompt(
     }
     sections.push(buildDefaultStoryPrompt(story))
     return sections.join("\n")
+}
+
+/** File beside prd.json holding the full text of a long --goal-file goal. */
+const RUN_GOAL_FILE = "goal.md"
+
+/**
+ * Reads the full goal text the CLI keeps beside prd.json when the intake saw
+ * only a bounded head of it. Returns null when there is no such file or it
+ * holds only whitespace; any other read error is rethrown.
+ */
+export function readRunGoalText(prdPath: string): string | null {
+    let text: string
+    try {
+        text = readFileSync(join(dirname(prdPath), RUN_GOAL_FILE), "utf8")
+    } catch (error) {
+        if (isNodeErrorWithCode(error, "ENOENT")) return null
+        throw error
+    }
+    return text.trim() ? text : null
+}
+
+function isNodeErrorWithCode(error: unknown, code: string): boolean {
+    return error instanceof Error && "code" in error && error.code === code
 }
 
 export interface StoryRecoveryContext {

@@ -18,6 +18,7 @@ import {
 import {
     buildRecoveryPromptSection,
     buildStoryOfferPrompt,
+    readRunGoalText,
 } from "../planning/domain/story-offer-prompt.js"
 import {
     blockedStoryIds,
@@ -290,6 +291,7 @@ const MAX_GOAL_REMEDIATION_ADMISSION_ATTEMPTS = 3
 export class CollectiveBoard extends SerializedObserver {
     private phase: BoardPhase = "idle"
     private prd: PrdFile | null = null
+    private fullGoalText: string | null = null
     /** Paths taken at runtime beyond a story's declared writes (path → story). */
     private readonly pathClaims = new Map<string, string>()
     private surfaceRevision = 0
@@ -1131,6 +1133,7 @@ export class CollectiveBoard extends SerializedObserver {
         this.phase = "preparing"
         this.startedAt = this.clock.awakeNow()
         this.prd = this.progressivePlanning.initialize(loadPrd(this.opts.prdPath))
+        this.fullGoalText = readRunGoalText(this.opts.prdPath)
         validatePrdArchitectureObligationCoverage(
             this.prd,
             deriveGoalContract(this.prd.goalEnvelope),
@@ -3231,7 +3234,7 @@ export class CollectiveBoard extends SerializedObserver {
         }
         const sessionSource = this.sessionSourceFor(story, checkpointBase, recovery)
         const offerId = this.offers.nextOfferId(story.id)
-        const basePrompt = buildStoryOfferPrompt(this.prd, story)
+        const basePrompt = buildStoryOfferPrompt(this.prd, story, this.fullGoalText)
         const recoveryPrompt = recovery
             ? buildRecoveryPromptSection(recovery)
             : null

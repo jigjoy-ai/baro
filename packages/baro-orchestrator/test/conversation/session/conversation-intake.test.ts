@@ -191,6 +191,27 @@ describe("ConversationIntake", () => {
         )
     })
 
+    it("refuses an over-long goal synchronously with its length and the limit", () => {
+        let modelCalls = 0
+        const intake = new ConversationIntake({
+            sessionId: "session-too-long",
+            responder: {
+                backend: "codex",
+                async respond(input) {
+                    modelCalls += 1
+                    return JSON.stringify(readyWire(input.sessionId, input.requestId))
+                },
+            },
+        })
+        assert.throws(
+            () => intake.submit({ requestId: "request-too-long", text: "g".repeat(8_001) }),
+            (error: unknown) =>
+                error instanceof TypeError &&
+                error.message === "the goal is 8,001 characters; the limit is 8,000",
+        )
+        assert.equal(modelCalls, 0)
+    })
+
     it("bounds multibyte history by UTF-8 bytes while preserving the newest pair and current turn", async () => {
         const repeated = (label: string, length: number): string =>
             `${label}:${"界".repeat(length - label.length - 1)}`
