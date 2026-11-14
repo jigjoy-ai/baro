@@ -9,6 +9,7 @@ import * as fs from "fs"
 import * as path from "path"
 
 import { type Tool } from "../../runtime/mozaik.js"
+import { sharedWritesEnabled } from "../../execution/write-surface.js"
 
 import {
     createCodebaseTools,
@@ -77,6 +78,14 @@ function surfaceNote(
     if (!surface || surface.writes.length === 0) return ""
     const normalized = path.replace(/^\.\//u, "")
     if (surface.writes.includes(normalized)) return ""
+    if (sharedWritesEnabled()) {
+        return (
+            `\nNote: ${normalized} is not in this story's declared write surface. ` +
+            `Another story may be editing it too: git merges both, and a real ` +
+            `conflict sends this story back to reapply its change on the latest ` +
+            `run branch.`
+        )
+    }
     return (
         `\nNote: ${normalized} is not in this story's declared write surface. ` +
         `Nobody else owns it, so this write stands, but the merge gate is the ` +

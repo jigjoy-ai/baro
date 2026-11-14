@@ -134,12 +134,15 @@ import {
 import {
     RuntimeReplanCoordinator,
     type RuntimeReplanDecisionOutcome,
+    type RuntimeReplanDecisionState,
 } from "../runtime-graph/runtime-replan-coordinator.js"
 import { ProgressivePlanningCoordinator } from "../planning/application/progressive-planning-coordinator.js"
 import { OperationalRecoveryPolicy } from "./operational-recovery.js"
 import { writeSurfaceOf } from "../planning/domain/dependency-evidence.js"
 import {
+    claimantsOf,
     decidePathClaim,
+    heldElsewhere,
     isActiveOwner,
     storyWriteSurface,
     surfaceKey,
@@ -292,8 +295,8 @@ export class CollectiveBoard extends SerializedObserver {
     private phase: BoardPhase = "idle"
     private prd: PrdFile | null = null
     private fullGoalText: string | null = null
-    /** Paths taken at runtime beyond a story's declared writes (path → story). */
-    private readonly pathClaims = new Map<string, string>()
+    /** Paths taken at runtime beyond a story's declared writes (path → claimants). */
+    private readonly pathClaims = new Map<string, readonly string[]>()
     private surfaceRevision = 0
     /** Checkpoints running stories published for their dependents. */
     private readonly checkpoints = new Map<
@@ -550,7 +553,7 @@ export class CollectiveBoard extends SerializedObserver {
                     this.prd = prd
                 },
                 admitGraph: ({ proposal, planningState, maxAddedStories }) => {
-                    const outcome = this.runtimeReplans.decide(proposal, {
+                    const outcome = this.decideReplan(proposal, {
                         active:
                             this.phase === "preparing" ||
                             this.phase === "running",
@@ -947,6 +950,7 @@ export class CollectiveBoard extends SerializedObserver {
                     storyIds: this.wave?.storyIds,
                 }),
             )
+            this.announceRevisedSurfaces(this.runtimeReplans.graphVersion)
             this.maybeCompleteWave()
             return
         }
@@ -984,6 +988,7 @@ export class CollectiveBoard extends SerializedObserver {
             if (event.payload.action === "abort") {
                 this.recoveryAborted.add(event.payload.storyId)
             }
+            this.announceRevisedSurfaces(this.runtimeReplans.graphVersion)
             this.maybeCompleteWave()
             return
         }
@@ -1322,7 +1327,7 @@ export class CollectiveBoard extends SerializedObserver {
                 modifiedDeps: { [request.storyId]: nextDependsOn },
             },
         }
-        const outcome = this.runtimeReplans.decide(proposal, {
+        const outcome = this.decideReplan(proposal, {
             active: true,
             prd: this.prd,
             immutableStoryIds: immutable,
@@ -1779,6 +1784,7 @@ export class CollectiveBoard extends SerializedObserver {
                 }),
             )
         }
+        this.announceRevisedSurfaces(this.runtimeReplans.graphVersion)
         this.maybeCompleteWave()
     }
 
@@ -1908,6 +1914,7 @@ export class CollectiveBoard extends SerializedObserver {
                     {
                         immutableStoryIds,
                         maxAddedStories: Number.MAX_SAFE_INTEGER,
+                        releasedOwnerIds: this.failedForGoodIds(),
                     },
                 ),
             }
@@ -1919,7 +1926,7 @@ export class CollectiveBoard extends SerializedObserver {
                 entry.mutation,
                 currentLevel,
             )
-            const outcome = this.runtimeReplans.decide(proposal, {
+            const outcome = this.decideReplan(proposal, {
                 active: this.phase === "running",
                 prd: boundaryPrd,
                 immutableStoryIds,
@@ -2039,7 +2046,7 @@ export class CollectiveBoard extends SerializedObserver {
                 policyReplanMutation(replan),
                 currentLevel,
             )
-            const outcome = this.runtimeReplans.decide(proposal, {
+            const outcome = this.decideReplan(proposal, {
                 active: this.phase === "running",
                 prd: this.prd,
                 immutableStoryIds: this.prd.userStories
@@ -2332,7 +2339,7 @@ export class CollectiveBoard extends SerializedObserver {
                 modifiedDeps: {},
             },
         }
-        const outcome = this.runtimeReplans.decide(proposal, {
+        const outcome = this.decideReplan(proposal, {
             active: true,
             prd: this.prd,
             immutableStoryIds: this.runtimeImmutableStoryIds(),
@@ -2450,7 +2457,7 @@ export class CollectiveBoard extends SerializedObserver {
                 modifiedDeps: {},
             },
         }
-        const outcome = this.runtimeReplans.decide(proposal, {
+        const outcome = this.decideReplan(proposal, {
             active: true,
             prd: this.prd,
             immutableStoryIds: this.runtimeImmutableStoryIds(),
@@ -2619,7 +2626,7 @@ export class CollectiveBoard extends SerializedObserver {
         for (const storyId of additionalImmutableStoryIds) {
             immutableStoryIds.add(storyId)
         }
-        const outcome = this.runtimeReplans.decide(proposal, {
+        const outcome = this.decideReplan(proposal, {
             active: this.phase === "running",
             prd: this.prd,
             immutableStoryIds,
@@ -2946,9 +2953,7 @@ export class CollectiveBoard extends SerializedObserver {
             !story.passes &&
             this.failed.has(story.id) &&
             this.capacityRecoveryPending.has(story.id) &&
-            !this.recoveryAborted.has(story.id) &&
-            !this.unclaimable.has(story.id) &&
-            !this.unmergeable.has(story.id),
+            !this.recoveryClosed(story.id),
         )
         if (capacityRecovery.length > 0) {
             const deadline = this.softDeadlineReason()
@@ -2974,9 +2979,7 @@ export class CollectiveBoard extends SerializedObserver {
             !story.passes &&
             this.failed.has(story.id) &&
             this.operationalRecovery.isPending(story.id) &&
-            !this.recoveryAborted.has(story.id) &&
-            !this.unclaimable.has(story.id) &&
-            !this.unmergeable.has(story.id),
+            !this.recoveryClosed(story.id),
         )
         const operationalRecovery = pendingOperationalRecovery.filter((story) =>
             this.operationalRecovery.isReady(story.id),
@@ -3015,10 +3018,8 @@ export class CollectiveBoard extends SerializedObserver {
 
         const recovery = this.prd.userStories.filter((story) => {
             if (story.passes || !this.failed.has(story.id)) return false
-            if (this.recoveryAborted.has(story.id)) return false
-            if (this.unclaimable.has(story.id) || this.unmergeable.has(story.id)) return false
-            const attempts = this.recoveryAttempts.get(story.id) ?? 0
-            return attempts < (this.opts.maxRecoveryAttemptsPerStory ?? 1)
+            if (this.recoveryClosed(story.id)) return false
+            return this.recoveryAttemptsLeft(story.id)
         })
         if (recovery.length > 0) {
             const halt = this.healingHaltReason()
@@ -3179,10 +3180,10 @@ export class CollectiveBoard extends SerializedObserver {
      * exist yet at its own offer time.
      */
     ownerOfPath(path: string): { storyId: string; integrated: boolean } | null {
-        const stories = this.prd?.userStories ?? []
+        const stories = this.ownerStories()
         const owns = (story: PrdStory) =>
             writeSurfaceOf(story).includes(path) ||
-            this.pathClaims.get(path) === story.id
+            claimantsOf(this.pathClaims, path).includes(story.id)
         // An active owner is the one that matters; a story that integrated
         // only released the path.
         const owner =
@@ -3197,10 +3198,11 @@ export class CollectiveBoard extends SerializedObserver {
      * A running story takes paths beyond its declared writes, decided now
      * instead of after an attempt: free paths (unowned, or released by a story
      * that integrated) become its own, and every running lease is told the
-     * new boundary; a path an active peer owns stays with that peer.
+     * new boundary; a path an active peer owns stays with that peer, or is
+     * co-owned under shared writes.
      */
     claimPaths(storyId: string, paths: readonly string[]): PathClaimDecision[] {
-        const stories = this.prd?.userStories ?? []
+        const stories = this.ownerStories()
         if (!this.leases.has(storyId)) {
             return paths.map((path) => ({
                 path,
@@ -3214,7 +3216,12 @@ export class CollectiveBoard extends SerializedObserver {
         const granted = decisions.filter(
             (decision) => decision.outcome === "granted",
         )
-        for (const decision of granted) this.pathClaims.set(decision.path, storyId)
+        for (const decision of granted) {
+            const others = decision.sharedWith
+                ? (this.pathClaims.get(decision.path) ?? [])
+                : []
+            this.pathClaims.set(decision.path, [...others, storyId])
+        }
         if (granted.length > 0) {
             this.announceRevisedSurfaces(this.runtimeReplans.graphVersion)
         }
@@ -3266,7 +3273,7 @@ export class CollectiveBoard extends SerializedObserver {
         ].sort()
         const surface = storyWriteSurface(
             story,
-            this.prd?.userStories ?? [],
+            this.ownerStories(),
             this.pathClaims,
         )
         const offered = WorkOffered.create({
@@ -3323,26 +3330,58 @@ export class CollectiveBoard extends SerializedObserver {
         this.emit(offered)
     }
 
-    /** What other unintegrated stories hold, declared or claimed; computed
-     * even for a story that declared nothing, which may write anywhere else. */
     private heldElsewhereFor(storyId: string): Record<string, string> {
-        const stories = this.prd?.userStories ?? []
-        const self = stories.find((candidate) => candidate.id === storyId)
-        const own = new Set([
-            ...(self ? writeSurfaceOf(self) : []),
-            ...[...this.pathClaims].filter(([, owner]) => owner === storyId).map(([path]) => path),
-        ])
-        const held: Record<string, string> = {}
-        for (const peer of stories) {
-            if (peer.id === storyId || !isActiveOwner(peer)) continue
-            const claimed = [...this.pathClaims]
-                .filter(([, owner]) => owner === peer.id)
-                .map(([path]) => path)
-            for (const path of [...writeSurfaceOf(peer), ...claimed]) {
-                if (!own.has(path)) held[path] ??= peer.id
-            }
-        }
-        return held
+        return heldElsewhere(storyId, this.ownerStories(), this.pathClaims)
+    }
+
+    private recoveryClosed(storyId: string): boolean {
+        return (
+            this.recoveryAborted.has(storyId) ||
+            this.unclaimable.has(storyId) ||
+            this.unmergeable.has(storyId)
+        )
+    }
+
+    private recoveryAttemptsLeft(storyId: string): boolean {
+        return (
+            (this.recoveryAttempts.get(storyId) ?? 0) <
+            (this.opts.maxRecoveryAttemptsPerStory ?? 1)
+        )
+    }
+
+    /** Failed, and no retry gate in scheduleNextWave will ever offer it again.
+     * Monotonic: none of these flags reopens for a story without a lease, and a
+     * Surgeon decision can only remove such a story, never re-offer it. */
+    private failedForGood(storyId: string): boolean {
+        if (!this.failed.has(storyId)) return false
+        if (this.recoveryClosed(storyId)) return true
+        return (
+            !this.capacityRecoveryPending.has(storyId) &&
+            !this.operationalRecovery.isPending(storyId) &&
+            !this.recoveryAttemptsLeft(storyId)
+        )
+    }
+
+    private failedForGoodIds(): string[] {
+        return [...this.failed].filter((storyId) => this.failedForGood(storyId))
+    }
+
+    /** Stories that can still hold paths: a story that failed for good
+     * releases its surface like one that integrated. */
+    private ownerStories(): PrdStory[] {
+        return (this.prd?.userStories ?? []).filter(
+            (story) => !this.failedForGood(story.id),
+        )
+    }
+
+    private decideReplan(
+        proposal: RuntimeReplanProposedData,
+        state: Omit<RuntimeReplanDecisionState, "releasedOwnerIds">,
+    ): RuntimeReplanDecisionOutcome {
+        return this.runtimeReplans.decide(proposal, {
+            ...state,
+            releasedOwnerIds: this.failedForGoodIds(),
+        })
     }
 
     /** Integrated, or (for a story allowed to start early) checkpointed by a
@@ -3458,7 +3497,7 @@ export class CollectiveBoard extends SerializedObserver {
             )
             return
         }
-        const surface = storyWriteSurface(story, stories, this.pathClaims)
+        const surface = storyWriteSurface(story, this.ownerStories(), this.pathClaims)
         const outside = surface
             ? request.changedPaths.filter((path) => !surface.writes.includes(path))
             : []
@@ -3949,7 +3988,7 @@ export class CollectiveBoard extends SerializedObserver {
         const stories = this.prd?.userStories ?? []
         const story = stories.find((candidate) => candidate.id === storyId)
         if (!story) return
-        const surface = storyWriteSurface(story, stories, this.pathClaims)
+        const surface = storyWriteSurface(story, this.ownerStories(), this.pathClaims)
         const key = surfaceKey(surface)
         if (key === lease.announcedSurfaceKey) return
         lease.announcedSurfaceKey = key

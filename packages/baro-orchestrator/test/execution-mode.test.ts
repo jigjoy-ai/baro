@@ -13,6 +13,7 @@ import { buildArchitectUserMessage } from "../src/planning/domain/architect-prom
 import { completeSoleStoryOwnership, enforceModeContract, resolveEffectiveParallel, widestDagLevel } from "../src/planning/domain/mode-enforcement.js"
 import { isVerificationOnlyStory } from "../src/planning/domain/verification-stories.js"
 import type { PrdExecutionMode, PrdFile, PrdStory } from "../src/prd.js"
+import { withSharedWrites } from "./execution/helpers.js"
 
 const mode = (m: Partial<PrdExecutionMode> & { mode: PrdExecutionMode["mode"] }): PrdExecutionMode => ({ reason: "r", ...m })
 
@@ -479,6 +480,20 @@ describe("enforceModeContract", () => {
             "goal",
         )) as PrdFile
         assert.equal(out.userStories.length, 2)
+    })
+
+    it("keeps overlapping width and drops a shared-file-only edge under shared writes", async () => {
+        const out = await withSharedWrites(() => JSON.parse(enforceModeContract(
+            prd([
+                { id: "S1", writes: ["src/a.ts"] },
+                { id: "S2", writes: ["src/shared.ts"] },
+                { id: "S3", dependsOn: ["S2"], writes: ["src/shared.ts", "src/c.ts"] },
+            ]),
+            { mode: "sequential", confidence: 0.7, reason: "guess", maxStories: 2, parallelism: 1 },
+            "goal",
+        )) as PrdFile)
+        assert.deepEqual(out.userStories.map((s) => s.id), ["S1", "S2", "S3"])
+        assert.deepEqual(out.userStories[2]!.dependsOn, [])
     })
 
     it("leaves a compliant PRD alone apart from the stamp", () => {

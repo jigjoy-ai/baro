@@ -42,6 +42,7 @@ import {
     captureEnv,
     joinWithCapture,
     source,
+    withSharedWrites,
     withTempDir,
 } from "./helpers.js"
 
@@ -446,6 +447,62 @@ describe("CollaborationBridge", () => {
             )
             bridge.leave(env)
         })
+    })
+
+    it("under shared writes, answers ownership without forbidding the write", async () => {
+        await withSharedWrites(() =>
+            withTempDir("collaboration-bridge-owner-shared-", async (dir) => {
+                const bridge = new CollaborationBridge({
+                    runId: "run-owner-shared",
+                    sessionDir: dir,
+                    pollMs: 5,
+                    unsafeAllowFilesystemTransport: true,
+                    unsafeAllowUnboundAuthorities: true,
+                    pathOwner: (path) =>
+                        path === "src/audit/audit.module.ts"
+                            ? { storyId: "S3", integrated: false }
+                            : null,
+                })
+                const env = joinWithCapture(bridge)
+                env.publish(
+                    source("broker"),
+                    WorkLeaseGranted.create({
+                        runId: "run-owner-shared",
+                        offerId: "offer-S9",
+                        leaseId: "lease-9",
+                        workerId: "worker",
+                        generation: 1,
+                        request: {
+                            storyId: "S9",
+                            prompt: "S9",
+                            model: "standard",
+                            retries: 1,
+                            timeoutSecs: 60,
+                        },
+                    }),
+                )
+                await bridge.idle()
+                writeFileSync(
+                    join(dir, "outbox", "help.json"),
+                    JSON.stringify({
+                        leaseId: "lease-9",
+                        kind: "help",
+                        text: "Which story owns src/audit/audit.module.ts?",
+                    }),
+                )
+
+                const answer = await waitFor(
+                    env.events,
+                    (event): event is ReturnType<typeof AgentTargetedMessage.create> =>
+                        AgentTargetedMessage.is(event) &&
+                        event.payload.metadata.kind === "ownership_answer",
+                )
+                assert.match(answer.payload.text, /audit\.module\.ts → S3 \(not integrated yet: you may edit it too/u)
+                assert.match(answer.payload.text, /git merges both/u)
+                assert.doesNotMatch(answer.payload.text, /do not write it|loses your whole story/u)
+                bridge.leave(env)
+            }),
+        )
     })
 
     it("validates a lease and republishes worker intent onto Mozaik", async () => {
@@ -2535,6 +2592,52 @@ describe("CollaborationBridge — runtime path claims", () => {
             )
             bridge.leave(env)
         })
+    })
+
+    it("under shared writes, tells both sides a co-owned path merges through git", async () => {
+        await withSharedWrites(() =>
+            withTempDir("collaboration-claim-shared-", async (dir) => {
+                const runId = "run-claim-shared"
+                const broker = source("broker")
+                const bridge = new CollaborationBridge({
+                    runId,
+                    sessionDir: dir,
+                    claimPaths: (_storyId, paths) => [
+                        { path: paths[0]!, outcome: "granted", sharedWith: ["S6"] },
+                    ],
+                })
+                bridge.setLeaseAuthority(broker)
+                const env = joinWithCapture(bridge)
+                await bridge.ready()
+                grantLease(env, broker, runId, "S5", "lease-S5", 1, 3)
+                grantLease(env, broker, runId, "S6", "lease-S6", 1, 3)
+                await bridge.idle()
+                const claimant = bridge.capabilityForLease({
+                    runId, storyId: "S5", leaseId: "lease-S5", generation: 1, deliveryMode: "poll",
+                })
+                const peer = bridge.capabilityForLease({
+                    runId, storyId: "S6", leaseId: "lease-S6", generation: 1, deliveryMode: "poll",
+                })
+
+                const sent = await brokerFetch(claimant, "/v1/events", {
+                    method: "POST",
+                    body: {
+                        kind: "claim",
+                        eventId: "event-claim-shared",
+                        paths: ["tests/test_tools.py"],
+                        reason: "adds a case next to S6's",
+                    },
+                })
+                assert.equal(sent.status, 202)
+
+                const answer = JSON.stringify((await brokerFetch(claimant, "/v1/inbox")).value.messages)
+                assert.match(answer, /tests\/test_tools\.py: yours too \(S6 also writes it; git merges both/)
+                const told = JSON.stringify((await brokerFetch(peer, "/v1/inbox")).value.messages)
+                assert.match(told, /Story S5 now also writes these paths; git merges concurrent edits/)
+                assert.doesNotMatch(told, /now owns these paths/)
+                bridge.leave(env)
+            }),
+        )
     })
 
     it("rejects a claim that names a tree or escapes the repository", async () => {

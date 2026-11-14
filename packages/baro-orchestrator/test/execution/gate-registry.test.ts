@@ -8,8 +8,10 @@ import {
     BASE_GATES,
     SPAWN_GATES,
     announceGates,
+    surfaceRemedyLines,
 } from "../../src/execution/gate-registry.js"
 import { buildDefaultStoryPrompt } from "../../src/prd.js"
+import { withSharedWrites } from "./helpers.js"
 
 const ROOT = join(import.meta.dirname, "..", "..")
 
@@ -149,6 +151,31 @@ describe("gate registry — enforced means announced", () => {
         assert.ok(prompt.includes("[gate:altitude]"))
         assert.ok(prompt.includes("1500"))
         assert.ok(prompt.includes("80"))
+    })
+
+    it("under shared writes the write-surface rule says git merges, with its marker kept", async () => {
+        const gate = SPAWN_GATES.find((candidate) => candidate.id === "write-surface")!
+        const ctx = { surface: { writes: ["src/a.ts"], ownedElsewhere: {} } }
+        const exclusive = gate.announce(ctx)!
+        assert.match(exclusive, /never copy a file into your surface/)
+        await withSharedWrites(() => {
+            const text = gate.announce(ctx)!
+            assert.ok(text.includes("[gate:write-surface]"))
+            assert.equal(gate.enforcedBy, "src/integration/git-coordinator.ts")
+            assert.match(text, /Other stories may edit these files/)
+            assert.match(text, /a real\s+conflict sends the story that integrates second back to reapply/)
+            assert.doesNotMatch(text, /loses the whole story|do NOT edit it|refused/)
+            assert.match(gate.summary, /git merges them/)
+            assert.deepEqual(
+                surfaceRemedyLines("agent-collab", "note"),
+                surfaceRemedyLines("agent-collab", "note", true),
+            )
+        })
+        assert.match(gate.summary, /refused at the write/)
+        assert.notDeepEqual(
+            surfaceRemedyLines("agent-collab", "note"),
+            surfaceRemedyLines("agent-collab", "note", true),
+        )
     })
 
     it("the projections cannot be quietly reverted to hand-written text", () => {

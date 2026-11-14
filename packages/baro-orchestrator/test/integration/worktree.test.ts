@@ -13,6 +13,9 @@ import {
 } from "../../src/integration/integration-worktree.js"
 import { captureCriticRepositoryFingerprint } from "../../src/acceptance/critic-evidence.js"
 import { WorktreeManager, WorktreeRefusalError } from "../../src/integration/worktree.js"
+import { heldElsewhere } from "../../src/execution/write-surface.js"
+import type { PrdStory } from "../../src/prd.js"
+import { withSharedWrites } from "../execution/helpers.js"
 import {
     removeWorktreeRun,
     uniqueRunId,
@@ -528,7 +531,59 @@ describe("WorktreeManager — ownership at integration", () => {
         commitInWorktree(p3, "own.ts", "export const own = 1\n")
         assert.equal(await mgr.mergeBack("S3", undefined, { "theirs.ts": "S2" }), true)
     })
+
+    it("under shared writes, lets git decide: different hunks merge, the same hunk retries", async () => {
+        const stories = [
+            surfaceStory("S1", ["mine.ts"]),
+            surfaceStory("S2", ["a.txt"]),
+            surfaceStory("S3", ["other.ts"]),
+        ]
+        assert.deepEqual(heldElsewhere("S1", stories), { "a.txt": "S2", "other.ts": "S3" })
+        await withSharedWrites(async () => {
+            const p1 = (await mgr.create("S1"))!
+            const p2 = (await mgr.create("S2"))!
+            const p3 = (await mgr.create("S3"))!
+            commitInWorktree(p2, "a.txt", "line1\nline2\nS2edit\n")
+            commitInWorktree(p1, "a.txt", "S1edit\nline2\nline3\n")
+            commitInWorktree(p3, "a.txt", "S3edit\nline2\nline3\n")
+
+            assert.equal(await mgr.mergeBack("S2", undefined, heldElsewhere("S2", stories)), true)
+            assert.deepEqual(heldElsewhere("S1", stories), {})
+            assert.equal(await mgr.mergeBack("S1", undefined, heldElsewhere("S1", stories)), true)
+            assert.equal(readFileSync(join(repo, "a.txt"), "utf8"), "S1edit\nline2\nS2edit\n")
+
+            await assert.rejects(
+                mgr.mergeBack("S3", undefined, heldElsewhere("S3", stories)),
+                (error: Error & { invariant?: string }) => error.invariant === "merge_conflict",
+            )
+            const backup = await mgr.prepareConflictRetry("S3")
+            assert.match(backup, new RegExp(`^baro-recovery/${runId}/S3/`))
+            const retry = (await mgr.create("S3"))!
+            assert.equal(
+                readFileSync(join(retry, "a.txt"), "utf8"),
+                "S1edit\nline2\nS2edit\n",
+                "the retry reapplies on the latest run branch",
+            )
+        })
+    })
 })
+
+function surfaceStory(id: string, writes: string[]): PrdStory {
+    return {
+        id,
+        priority: 1,
+        title: id,
+        description: `Implement ${id}.`,
+        dependsOn: [],
+        retries: 1,
+        acceptance: [`${id} works`],
+        tests: [],
+        passes: false,
+        completedAt: null,
+        durationSecs: null,
+        writes,
+    } as PrdStory
+}
 
 describe("WorktreeManager — directory names", () => {
     it("names every story worktree like the user's checkout, and cleans up its parent", async () => {

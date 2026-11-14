@@ -146,6 +146,18 @@ export async function withInjectedJigJoyEnvironment(
     }
 }
 
+/** Runs `fn` with BARO_SHARED_WRITES=1 and restores whatever was there. */
+export async function withSharedWrites<T>(fn: () => Promise<T> | T): Promise<T> {
+    const before = process.env.BARO_SHARED_WRITES
+    process.env.BARO_SHARED_WRITES = "1"
+    try {
+        return await fn()
+    } finally {
+        if (before === undefined) delete process.env.BARO_SHARED_WRITES
+        else process.env.BARO_SHARED_WRITES = before
+    }
+}
+
 /** JavaScript statement for a fake Node CLI to persist its selected env. */
 export function harnessEnvironmentCaptureProgram(path: string): string {
     return `writeFileSync(${JSON.stringify(path)}, JSON.stringify({

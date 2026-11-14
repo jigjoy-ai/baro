@@ -10,6 +10,7 @@ import { StoryResult } from "../../src/semantic-events.js"
 import { noticesForOverlap } from "../../src/execution/overlap-awareness.js"
 import { OverlapAwarenessRunner } from "../../src/execution/overlap-awareness-runner.js"
 import { Sentry } from "../../src/execution/sentry.js"
+import { withSharedWrites } from "./helpers.js"
 
 describe("overlap awareness policy", () => {
     it("tells both sides, each about the other", () => {
@@ -36,6 +37,15 @@ describe("overlap awareness policy", () => {
     it("bounds how many peers it names", () => {
         const [notice] = noticesForOverlap("a.go", ["S1", "S2", "S3", "S4", "S5", "S6", "S7"])
         assert.match(notice!.text, /and 2 other agent\(s\)/u)
+    })
+
+    it("under shared writes, says git merges separate parts instead of one winner", async () => {
+        const [notice] = await withSharedWrites(() => noticesForOverlap("a.go", ["S1", "S2"]))
+        assert.match(notice!.text, /S2 is writing it too/u)
+        assert.match(notice!.text, /Git merges edits to different parts of the file/u)
+        assert.match(notice!.text, /sent back to reapply its change on the latest run branch/u)
+        assert.match(notice!.text, /Settle it between you/u)
+        assert.doesNotMatch(notice!.text, /only one of them will merge cleanly|stop writing/u)
     })
 })
 

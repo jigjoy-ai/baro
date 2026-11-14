@@ -11,6 +11,8 @@
  * only after an agent paid for the silence.
  */
 
+import { sharedWritesEnabled } from "./write-surface.js"
+
 export interface GateAnnounceContext {
     /** Declared write surface at spawn; absent for the base prompt stage. */
     surface?: {
@@ -75,8 +77,11 @@ const BUILD_BEFORE_COMMIT: GateDisclosure = {
 const WRITE_SURFACE: GateDisclosure = {
     id: "write-surface",
     enforcedBy: "src/integration/git-coordinator.ts",
-    summary:
-        "A write to a path a peer that has not integrated owns is refused at the write; any other path can be claimed at runtime.",
+    get summary() {
+        return sharedWritesEnabled()
+            ? "Stories may write the same file: git merges them, and a real conflict sends the later story back to reapply on the latest branch."
+            : "A write to a path a peer that has not integrated owns is refused at the write; any other path can be claimed at runtime."
+    },
     announce: (ctx) => {
         const surface = ctx.surface
         if (!surface || surface.writes.length === 0) return null
@@ -90,6 +95,17 @@ const WRITE_SURFACE: GateDisclosure = {
             "",
             ...surface.writes.map((path) => `- ${path}`),
             "",
+            ...(sharedWritesEnabled()
+                ? [
+                      "Other stories may edit these files, or any other, at the same",
+                      "time. Each works in its own worktree and git merges the results:",
+                      "edits to different parts of a file merge cleanly, and a real",
+                      "conflict sends the story that integrates second back to reapply",
+                      "its change on the latest run branch. Change only the parts of a",
+                      "file your story needs.",
+                      "",
+                  ]
+                : []),
             ...(owners.length > 0
                 ? [
                       "Held by other stories that have not integrated yet. A write to",
@@ -116,7 +132,21 @@ const WRITE_SURFACE: GateDisclosure = {
 export function surfaceRemedyLines(
     command: string,
     capability: string,
+    sharedWrites = sharedWritesEnabled(),
 ): string[] {
+    if (sharedWrites) {
+        return [
+            "If you need a file you did not declare, claim it BEFORE you write it,",
+            "so every running peer learns you are in it:",
+            `- ${command} emit ${capability} --kind claim --paths-json ${JSON.stringify(JSON.stringify(["<FILE>"]))} --reason ${JSON.stringify("WHY YOU NEED IT")}`,
+            "  The Board grants it at once, even when another story writes it too.",
+            "If a peer is changing the same part of a file you need — a function,",
+            "a route, a shared entry — tell it before you edit:",
+            `- ${command} emit ${capability} --kind message --to <STORY> --text ${JSON.stringify("WHICH PART OF <FILE> YOU ARE CHANGING, AND WHY")}`,
+            "- If the architecture contract is what is wrong, withdraw that claim",
+            "  with the dispute command above instead of repairing around it.",
+        ]
+    }
     return [
         "If you need a file you did not declare, claim it BEFORE you write it.",
         "The Board answers immediately; never copy a file into your surface:",

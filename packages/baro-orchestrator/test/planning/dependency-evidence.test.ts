@@ -6,6 +6,7 @@ import { applyReplan, normalizePrd } from "../../src/prd.js"
 import { validateProgressivePlannerStory } from "../../src/planning/domain/progressive-plan.js"
 import { PUBLISH_PLAN_FRAGMENT_INPUT_SCHEMA } from "../../src/planning/adapters/planner-openai-progressive.js"
 import {
+    disjointWidthEvidence,
     pruneUnsupportedEdges,
     referencedPathsOf,
     unsupportedEdges,
@@ -482,5 +483,72 @@ describe("directory-level edge evidence", () => {
         assert.deepEqual(unsupportedEdges([helper, stranger]), [
             { from: "S2", to: "S9" },
         ])
+    })
+})
+
+// The MenuService pair: two stories each add a method to one service. With
+// shared writes git merges them, so the file they share orders nothing.
+describe("edge evidence under shared writes", () => {
+    const shared = { sharedWrites: true }
+    const service = "src/menus/menu/menu.service.ts"
+    const first = story("S1", {
+        writes: [service],
+        description: `Add MenuService.archive() in ${service}.`,
+    })
+    const second = story("S2", {
+        dependsOn: ["S1"],
+        writes: [service, "src/menus/menu/menu.controller.ts"],
+        description: `Add MenuService.restore() in ${service} and route it.`,
+    })
+
+    it("drops an edge whose only support is a file both stories write", () => {
+        assert.deepEqual(unsupportedEdges([first, second]), [])
+        assert.deepEqual(unsupportedEdges([first, second], shared), [
+            { from: "S1", to: "S2" },
+        ])
+        assert.deepEqual(
+            pruneUnsupportedEdges([first, second], shared).stories[1]!.dependsOn,
+            [],
+        )
+    })
+
+    it("keeps an edge the dependent names through a file only the dependency writes", () => {
+        const creator = story("S1", { writes: [service, "src/menus/menu/menu.dto.ts"] })
+        const user = story("S2", {
+            dependsOn: ["S1"],
+            writes: [service],
+            description: "Validate restore() input with src/menus/menu/menu.dto.ts.",
+        })
+        assert.deepEqual(unsupportedEdges([creator, user], shared), [])
+    })
+
+    it("keeps an edge the dependent names by a symbol only the dependency writes", () => {
+        const creator = story("S1", { writes: [service, "src/audit/audit.service.ts"] })
+        const user = story("S2", {
+            dependsOn: ["S1"],
+            writes: [service],
+            description: "Record every restore through AuditService.",
+        })
+        assert.deepEqual(unsupportedEdges([creator, user], shared), [])
+    })
+
+    it("keeps an edge from a manifest-writing story", () => {
+        const installer = story("S1", { writes: ["package.json", service] })
+        const user = story("S2", { dependsOn: ["S1"], writes: [service] })
+        assert.deepEqual(unsupportedEdges([installer, user], shared), [])
+    })
+
+    it("lets width stand on declared writes, overlapping or not", () => {
+        const a = story("A", { writes: [service] })
+        const b = story("B", { writes: [service] })
+        assert.equal(disjointWidthEvidence([a, b]).proven, false)
+        const evidence = disjointWidthEvidence([a, b], shared)
+        assert.equal(evidence.proven, true)
+        assert.deepEqual(evidence.conflicts, [])
+        assert.equal(
+            disjointWidthEvidence([a, story("C")], shared).proven,
+            false,
+            "a story that declares nothing still keeps the cap",
+        )
     })
 })

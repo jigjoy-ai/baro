@@ -3,6 +3,7 @@ import { createHash } from "node:crypto"
 import { isDeepStrictEqual } from "node:util"
 
 import { disjointWidthEvidence, pruneUnsupportedEdges } from "../domain/dependency-evidence.js"
+import { sharedWritesEnabled } from "../../execution/write-surface.js"
 
 import {
     normalizePrd,
@@ -355,12 +356,15 @@ export class ProgressivePlanningCoordinator {
             // Judged against the stories already admitted too, so an edge back
             // into an earlier fragment can be checked against what it writes.
             const fragmentStoryIds = new Set(repairedStories.map(({ id }) => id))
-            const prunedAll = pruneUnsupportedEdges([
-                ...state.prd.userStories.filter(
-                    ({ id }) => !fragmentStoryIds.has(id),
-                ),
-                ...repairedStories,
-            ])
+            const prunedAll = pruneUnsupportedEdges(
+                [
+                    ...state.prd.userStories.filter(
+                        ({ id }) => !fragmentStoryIds.has(id),
+                    ),
+                    ...repairedStories,
+                ],
+                { sharedWrites: sharedWritesEnabled() },
+            )
             droppedEdges = prunedAll.removed.map(
                 (edge) => `${edge.from}->${edge.to}`,
             )
@@ -505,7 +509,9 @@ export class ProgressivePlanningCoordinator {
                 !existingStories.some((existing) => existing.id === story.id),
             ),
         ]
-        const widthEvidence = disjointWidthEvidence(boardStories)
+        const widthEvidence = disjointWidthEvidence(boardStories, {
+            sharedWrites: sharedWritesEnabled(),
+        })
         if (
             widthEvidence.proven &&
             planning.admittedStoryIds.length + validated.stories.length > maxPlannerStories

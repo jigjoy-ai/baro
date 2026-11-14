@@ -12,6 +12,8 @@
  * reading a message it cannot use has paid a turn for nothing.
  */
 
+import { sharedWritesEnabled } from "./write-surface.js"
+
 export interface LandedWork {
     readonly storyId: string
     /** Files that story wrote, as observed on the bus — not a git diff. */
@@ -42,6 +44,7 @@ export interface AwarenessNotice {
 export function noticesForLanding(
     landed: LandedWork,
     audience: readonly AwarenessAudience[],
+    sharedWrites = sharedWritesEnabled(),
 ): AwarenessNotice[] {
     const landedPaths = normalize(landed.paths)
     if (landedPaths.length === 0) return []
@@ -55,7 +58,7 @@ export function noticesForLanding(
             recipientId: listener.agentId,
             collides: shared.length > 0,
             text: shared.length > 0
-                ? renderCollision(landed.storyId, shared, landedPaths)
+                ? renderCollision(landed.storyId, shared, landedPaths, sharedWrites)
                 : renderLanding(landed.storyId, landedPaths),
         })
     }
@@ -67,6 +70,7 @@ function renderCollision(
     storyId: string,
     shared: readonly string[],
     all: readonly string[],
+    sharedWrites: boolean,
 ): string {
     const lines = [
         `[baro] ${storyId} has merged, and it wrote ${plural(shared.length, "file")} you also wrote:`,
@@ -78,8 +82,16 @@ function renderCollision(
     }
     lines.push(
         "",
-        "Its version is on the branch now. Yours will not merge on top of it as it stands —",
-        "read what landed and either build on it or drop your copy.",
+        ...(sharedWrites
+            ? [
+                  "Its version is on the branch now. Edits to different parts of a file merge on",
+                  "top of it; if you changed the same lines, your story is sent back to reapply",
+                  "its change on the latest run branch — read what landed and keep clear of it.",
+              ]
+            : [
+                  "Its version is on the branch now. Yours will not merge on top of it as it stands —",
+                  "read what landed and either build on it or drop your copy.",
+              ]),
     )
     return lines.join("\n")
 }
