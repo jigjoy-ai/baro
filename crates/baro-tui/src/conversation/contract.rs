@@ -3,7 +3,8 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ConversationError, ConversationPhase, MessageSource, MAX_GOAL_FILE_CHARS, MAX_MESSAGE_CHARS,
+    ConversationError, ConversationPhase, MessageSource, MAX_GOAL_FILE_CHARS,
+    MAX_INTAKE_HEAD_CHARS, MAX_MESSAGE_CHARS,
 };
 
 const MAX_WIRE_BYTES: usize = 128 * 1024;
@@ -405,6 +406,33 @@ pub fn truncate_goal_for_intake(value: &str) -> Option<String> {
     ))
 }
 
+/// The bounded head of a goal-file turn that the intake model receives. A turn
+/// of `MAX_MESSAGE_CHARS` UTF-16 units or fewer is sent whole (`None`); a
+/// longer one is cut to at most `MAX_INTAKE_HEAD_CHARS` units behind a note
+/// line, so the result always fits the intake's 8 000-unit text check while
+/// the full text stays in the run directory.
+pub fn intake_head(value: &str) -> Option<String> {
+    let total = value.encode_utf16().count();
+    if total <= MAX_MESSAGE_CHARS {
+        return None;
+    }
+    // A surrogate pair straddling the ceiling is dropped whole rather than
+    // split, so `kept` can land one unit under it.
+    let mut head = String::new();
+    let mut kept = 0usize;
+    for character in value.chars() {
+        let width = character.len_utf16();
+        if kept + width > MAX_INTAKE_HEAD_CHARS {
+            break;
+        }
+        kept += width;
+        head.push(character);
+    }
+    Some(format!(
+        "note: goal truncated for intake; read characters 1-{kept} of {total}; the full goal is kept in the run directory for planning and stories\n{head}"
+    ))
+}
+
 pub(super) fn validate_text(
     field: &'static str,
     value: &str,
@@ -592,6 +620,54 @@ mod tests {
             normalized_source_text("message", smuggled, MessageSource::GoalFile),
             Err(ConversationError::UnsafeControlCharacter("message"))
         ));
+    }
+
+    #[test]
+    fn intake_head_sends_short_text_whole() {
+        assert_eq!(intake_head("a short goal"), None);
+        assert_eq!(intake_head(&"a".repeat(MAX_MESSAGE_CHARS)), None);
+        // 4 000 emoji are exactly 8 000 UTF-16 units.
+        assert_eq!(
+            intake_head(&"\u{1f600}".repeat(MAX_MESSAGE_CHARS / 2)),
+            None
+        );
+    }
+
+    #[test]
+    fn intake_head_caps_a_long_ascii_goal_behind_a_note() {
+        let goal = format!("{}TAIL", "a".repeat(11_996));
+        let head = intake_head(&goal).unwrap();
+        let (note, body) = head.split_once('\n').unwrap();
+        assert_eq!(
+            note,
+            "note: goal truncated for intake; read characters 1-7600 of 12000; \
+             the full goal is kept in the run directory for planning and stories"
+        );
+        assert_eq!(body, "a".repeat(MAX_INTAKE_HEAD_CHARS));
+        assert!(head.encode_utf16().count() <= MAX_MESSAGE_CHARS);
+        assert!(!head.contains("TAIL"));
+    }
+
+    #[test]
+    fn intake_head_never_splits_a_surrogate_pair() {
+        // One leading ASCII unit puts every emoji pair across the ceiling.
+        let goal = format!("x{}", "\u{1f600}".repeat(6_000));
+        let total = goal.encode_utf16().count();
+        assert_eq!(total, 12_001);
+        let head = intake_head(&goal).unwrap();
+        let (note, body) = head.split_once('\n').unwrap();
+        assert!(
+            note.starts_with("note: goal truncated for intake; read characters 1-7599 of 12001;")
+        );
+        assert_eq!(body.encode_utf16().count(), MAX_INTAKE_HEAD_CHARS - 1);
+        assert!(body
+            .chars()
+            .skip(1)
+            .all(|character| character == '\u{1f600}'));
+        assert!(head.encode_utf16().count() <= MAX_MESSAGE_CHARS);
+        // The largest stored goal-file turn still yields a head under the check.
+        let largest = "\u{1f600}".repeat((MAX_GOAL_FILE_CHARS + 256) / 2);
+        assert!(intake_head(&largest).unwrap().encode_utf16().count() <= MAX_MESSAGE_CHARS);
     }
 
     #[test]

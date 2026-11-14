@@ -216,6 +216,15 @@ pub fn prd_path(cwd: &Path) -> PathBuf {
     }
 }
 
+/// The full text of a long `--goal-file` goal, kept beside prd.json so
+/// planning and stories can read what the intake only saw the head of.
+pub const RUN_GOAL_FILE: &str = "goal.md";
+
+/// Write `dir/goal.md`, replacing any earlier copy so a repeat call is idempotent.
+pub fn write_run_goal(dir: &Path, text: &str) -> io::Result<()> {
+    std::fs::write(dir.join(RUN_GOAL_FILE), text)
+}
+
 /// Called only on success; a failed run stays resumable.
 pub fn finish_active() {
     let mut guard = active();
@@ -278,6 +287,27 @@ mod tests {
         }
         drop(lock);
         state
+    }
+
+    #[test]
+    fn write_run_goal_writes_and_overwrites_goal_md() {
+        let root = tempdir().unwrap();
+        let goal = "g".repeat(12_000);
+        write_run_goal(root.path(), &goal).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.path().join(RUN_GOAL_FILE)).unwrap(),
+            goal
+        );
+        write_run_goal(root.path(), &goal).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.path().join("goal.md")).unwrap(),
+            goal
+        );
+        write_run_goal(root.path(), "a shorter replacement").unwrap();
+        assert_eq!(
+            fs::read_to_string(root.path().join("goal.md")).unwrap(),
+            "a shorter replacement"
+        );
     }
 
     #[test]

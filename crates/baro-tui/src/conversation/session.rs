@@ -127,6 +127,21 @@ impl ConversationSession {
             .unwrap_or_default()
     }
 
+    /// The full text of a goal read from `--goal-file` that is too long for the
+    /// intake to read whole, so the run directory must keep it for planning and
+    /// stories. `None` for a typed goal or a goal file of `MAX_MESSAGE_CHARS`
+    /// UTF-16 units or fewer.
+    pub fn goal_file_text(&self) -> Option<&str> {
+        if self.goal_source() != MessageSource::GoalFile {
+            return None;
+        }
+        self.transcript
+            .iter()
+            .find(|turn| turn.role == TranscriptRole::User)
+            .map(|turn| turn.text.as_str())
+            .filter(|text| text.encode_utf16().count() > MAX_MESSAGE_CHARS)
+    }
+
     /// Record a caller-correlated user turn and open exactly one response slot.
     pub fn begin_request(
         &mut self,
@@ -562,6 +577,39 @@ fn response_history_text(response: &ConversationWireResponse) -> String {
 mod tests {
     use super::super::contract::ClarificationQuestion;
     use super::*;
+
+    #[test]
+    fn goal_file_text_is_only_a_goal_file_over_the_message_ceiling() {
+        let mut long_file = ConversationSession::new("session-1").unwrap();
+        let goal = "g".repeat(MAX_MESSAGE_CHARS + 1);
+        long_file
+            .begin_request_from(MessageSource::GoalFile, "request-1", goal.clone())
+            .unwrap();
+        assert_eq!(long_file.goal_file_text(), Some(goal.as_str()));
+
+        let mut short_file = ConversationSession::new("session-1").unwrap();
+        short_file
+            .begin_request_from(
+                MessageSource::GoalFile,
+                "request-1",
+                "g".repeat(MAX_MESSAGE_CHARS),
+            )
+            .unwrap();
+        assert_eq!(short_file.goal_file_text(), None);
+
+        let mut typed = ConversationSession::new("session-1").unwrap();
+        typed
+            .begin_request("request-1", "g".repeat(MAX_MESSAGE_CHARS))
+            .unwrap();
+        assert_eq!(typed.goal_file_text(), None);
+
+        assert_eq!(
+            ConversationSession::new("session-1")
+                .unwrap()
+                .goal_file_text(),
+            None
+        );
+    }
 
     fn envelope() -> GoalEnvelope {
         GoalEnvelope {
