@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 
 pub use context::ConversationContextSnapshot;
 pub use contract::{
-    render_planning_prompt, truncate_goal_for_intake, ClarificationQuestion, ConversationKind,
-    ConversationWireResponse, GoalEnvelope,
+    intake_head, render_planning_prompt, truncate_goal_for_intake, ClarificationQuestion,
+    ConversationKind, ConversationWireResponse, GoalEnvelope,
 };
 pub use session::{
     ApplyOutcome, ConversationPhase, ConversationSession, TranscriptRole, TranscriptTurn,
@@ -30,6 +30,9 @@ pub(super) const MAX_MESSAGE_CHARS: usize = 8_000;
 /// The intake context ceiling for a goal read from `--goal-file`, in the same
 /// UTF-16 code units `MAX_MESSAGE_CHARS` counts.
 pub const MAX_GOAL_FILE_CHARS: usize = 120_000;
+/// The most UTF-16 code units of a long goal-file turn the intake model reads;
+/// with its note line the head stays under `MAX_MESSAGE_CHARS`.
+pub const MAX_INTAKE_HEAD_CHARS: usize = 7_600;
 /// The truncation note is prepended after the goal is cut, so a stored
 /// goal-file turn sits one note line above the intake ceiling.
 pub(super) const MAX_INTAKE_NOTE_CHARS: usize = 256;

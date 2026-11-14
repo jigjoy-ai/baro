@@ -4,6 +4,7 @@
 //! bounded RepoScout research calls followed by one text-only Conversation call and
 //! exits, so planning/run Mozaik state can never leak across follow-ups.
 
+use std::borrow::Cow;
 use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
@@ -13,8 +14,8 @@ use tokio::process::Command;
 
 use crate::app::LlmProvider;
 use crate::conversation::{
-    ConversationError, ConversationKind, ConversationSession, ConversationWireResponse,
-    TranscriptRole,
+    intake_head, ConversationError, ConversationKind, ConversationSession,
+    ConversationWireResponse, MessageSource, TranscriptRole, TranscriptTurn,
 };
 use crate::discovery::{self, ScriptEntry};
 use crate::repository_brief::{
@@ -42,7 +43,7 @@ struct TurnInput<'a> {
     session_id: &'a str,
     request_id: &'a str,
     intent: ConversationIntent,
-    text: &'a str,
+    text: Cow<'a, str>,
     history: Vec<HistoryEntry<'a>>,
 }
 
@@ -51,7 +52,7 @@ struct TurnInput<'a> {
 struct HistoryEntry<'a> {
     request_id: &'a str,
     role: &'static str,
-    text: &'a str,
+    text: Cow<'a, str>,
 }
 
 pub struct ConversationRunOptions<'a> {
@@ -285,7 +286,13 @@ async fn run_conversation_turn_with_entry(
     })
 }
 
-fn pending_user_text<'a>(session: &'a ConversationSession, request_id: &str) -> Option<&'a str> {
+/// The intake text of the pending request's user turn: a goal-file turn over
+/// the intake's 8 000-unit check is sent as its bounded head, every other turn
+/// whole. The transcript keeps the full text either way.
+fn pending_user_text<'a>(
+    session: &'a ConversationSession,
+    request_id: &str,
+) -> Option<Cow<'a, str>> {
     session
         .transcript()
         .iter()
@@ -293,7 +300,16 @@ fn pending_user_text<'a>(session: &'a ConversationSession, request_id: &str) -> 
         .find(|turn| {
             turn.role == TranscriptRole::User && turn.request_id.as_deref() == Some(request_id)
         })
-        .map(|turn| turn.text.as_str())
+        .map(intake_text)
+}
+
+fn intake_text(turn: &TranscriptTurn) -> Cow<'_, str> {
+    if turn.source == MessageSource::GoalFile {
+        if let Some(head) = intake_head(&turn.text) {
+            return Cow::Owned(head);
+        }
+    }
+    Cow::Borrowed(&turn.text)
 }
 
 fn completed_history(session: &ConversationSession) -> Vec<HistoryEntry<'_>> {
@@ -316,12 +332,12 @@ fn completed_history(session: &ConversationSession) -> Vec<HistoryEntry<'_>> {
             HistoryEntry {
                 request_id,
                 role: "user",
-                text: &user.text,
+                text: intake_text(user),
             },
             HistoryEntry {
                 request_id,
                 role: "assistant",
-                text: &assistant.text,
+                text: Cow::Borrowed(&assistant.text),
             },
         ));
     }
@@ -454,6 +470,83 @@ mod tests {
         assert_eq!(value["history"][0]["role"], "user");
         assert_eq!(value["history"][1]["requestId"], "request-1");
         assert_eq!(value["history"][1]["role"], "assistant");
+    }
+
+    #[test]
+    fn conversation_runner_sends_a_goal_file_turn_as_its_bounded_head() {
+        let goal = format!("{}TAIL", "g".repeat(11_996));
+        let mut session = ConversationSession::new("session-goal-file").unwrap();
+        session
+            .begin_request_from(MessageSource::GoalFile, "request-1", goal.clone())
+            .unwrap();
+        assert_eq!(session.transcript()[0].text.encode_utf16().count(), 12_000);
+
+        let head = pending_user_text(&session, "request-1").unwrap();
+        assert!(matches!(head, Cow::Owned(_)));
+        assert!(head.encode_utf16().count() <= 8_000);
+        assert!(
+            head.starts_with("note: goal truncated for intake; read characters 1-7600 of 12000; ")
+        );
+        assert!(!head.contains("TAIL"));
+
+        // The same goal stays a bounded head once it is history for a typed turn.
+        assert_eq!(
+            session.apply_response(ready("session-goal-file", "request-1")),
+            Ok(ApplyOutcome::Accepted(ConversationKind::Ready))
+        );
+        session.take_ready_handoff().unwrap().unwrap();
+        for phase in [
+            crate::conversation::ConversationPhase::Planning,
+            crate::conversation::ConversationPhase::Executing,
+            crate::conversation::ConversationPhase::Verifying,
+            crate::conversation::ConversationPhase::Completed,
+        ] {
+            session.transition_to(phase).unwrap();
+        }
+        let typed = "t".repeat(7_999);
+        session.begin_request("request-2", typed.clone()).unwrap();
+
+        let input = TurnInput {
+            schema_version: 1,
+            session_id: session.session_id(),
+            request_id: session.pending_request_id().unwrap(),
+            intent: ConversationIntent::Clarification,
+            text: pending_user_text(&session, "request-2").unwrap(),
+            history: completed_history(&session),
+        };
+        let value = serde_json::to_value(input).unwrap();
+        assert_eq!(
+            value.as_object().unwrap().len(),
+            6,
+            "no TurnInput field is added"
+        );
+        assert_eq!(
+            value["text"],
+            typed.as_str(),
+            "a typed turn is sent unchanged"
+        );
+        let history_user = value["history"][0]["text"].as_str().unwrap();
+        assert!(history_user
+            .starts_with("note: goal truncated for intake; read characters 1-7600 of 12000; "));
+        assert!(history_user.encode_utf16().count() <= 8_000);
+        assert_eq!(
+            value["history"][1]["text"],
+            "Clear; sending this to planning."
+        );
+        // The transcript still holds the complete goal.
+        assert_eq!(session.transcript()[0].text, goal);
+    }
+
+    #[test]
+    fn conversation_runner_sends_a_short_goal_file_turn_whole() {
+        let goal = "s".repeat(8_000);
+        let mut session = ConversationSession::new("session-short-goal-file").unwrap();
+        session
+            .begin_request_from(MessageSource::GoalFile, "request-1", goal.clone())
+            .unwrap();
+        let text = pending_user_text(&session, "request-1").unwrap();
+        assert!(matches!(text, Cow::Borrowed(_)));
+        assert_eq!(text, goal.as_str());
     }
 
     #[test]
