@@ -1,8 +1,9 @@
 import { execFileSync } from "node:child_process"
 import { randomBytes } from "node:crypto"
 import { rmSync } from "node:fs"
-import { tmpdir } from "node:os"
 import { join, sep } from "node:path"
+
+import { worktreesRoot } from "../../src/integration/worktrees-root.js"
 
 /** WorktreeManager keys its base dir off the run id, so a fixed id is a fixed
  * path: two lanes sharing one would inherit each other's filesystem state. */
@@ -11,7 +12,7 @@ export function uniqueRunId(prefix: string): string {
 }
 
 export function worktreeRunRoot(runId: string): string {
-    return join(tmpdir(), "baro-worktrees", runId)
+    return join(worktreesRoot(), runId)
 }
 
 function tryGit(cwd: string, args: string[]): string | null {

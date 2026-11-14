@@ -8,11 +8,11 @@ import {
     unlinkSync,
     writeFileSync,
 } from "fs"
-import { tmpdir } from "os"
 import { join, resolve } from "path"
 
 import { diskUsage, formatBytes } from "../runtime/disk-usage.js"
 import { INTEGRATION_WORKTREE_DIRNAME } from "./integration-worktree.js"
+import { legacyWorktreesRoot, worktreesRoot } from "./worktrees-root.js"
 import { runRepositoryCommand as exec } from "./repository-command.js"
 import { meaningfulStatusLines } from "./worktree.js"
 
@@ -22,9 +22,7 @@ const OWNER_MARKER = /^\.baro-run-(\d+)\.pid$/
 export const LEGACY_IDLE_MS = 24 * 60 * 60_000
 const GIT_TIMEOUT_MS = 60_000
 
-export function worktreesRoot(): string {
-    return join(tmpdir(), "baro-worktrees")
-}
+export { worktreesRoot } from "./worktrees-root.js"
 
 /** Marks runDir as owned by a live process; the release is idempotent and
  * removes the dir only if nothing else is left in it. One marker per pid, so
@@ -79,18 +77,20 @@ export interface ReclaimSummary {
  * contains, is someone's unmerged work and stays, as does its story dir.
  */
 export async function reclaimStaleRunDirs(opts: ReclaimOptions): Promise<ReclaimSummary> {
-    const root = opts.root ?? worktreesRoot()
+    const roots = opts.root ? [opts.root] : [worktreesRoot(), legacyWorktreesRoot()]
     const summary: ReclaimSummary = { reclaimed: [], kept: [], bytes: 0 }
-    for (const name of listDir(root).sort()) {
-        const runDir = join(root, name)
-        if (name === opts.currentRunId || !isDirectory(runDir)) continue
-        if (runIsAlive(runDir, name, opts)) continue
-        await reclaimRunDir(runDir, name, opts, summary)
+    for (const root of roots) {
+        for (const name of listDir(root).sort()) {
+            const runDir = join(root, name)
+            if (name === opts.currentRunId || !isDirectory(runDir)) continue
+            if (runIsAlive(runDir, name, opts)) continue
+            await reclaimRunDir(runDir, name, opts, summary)
+        }
     }
     if (summary.reclaimed.length > 0) {
         opts.log(
             `reclaimed ${summary.reclaimed.length} leftover worktree dir(s) of dead runs ` +
-                `(${formatBytes(summary.bytes)}) under ${root}`,
+                `(${formatBytes(summary.bytes)}) under ${roots.join(", ")}`,
         )
     }
     return summary
