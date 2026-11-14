@@ -1,10 +1,10 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
-import { join } from "node:path"
+import { delimiter, join } from "node:path"
 import assert from "node:assert/strict"
 import { describe, it } from "@rstest/core"
 
 import { baroHome } from "../../src/runtime/baro-home.js"
-import { cargoEnvFor, resolveCargoTargetDir } from "../../src/verification/cargo-env.js"
+import { cargoEnvFor, resolveCargoTargetDir, rustToolchainBin } from "../../src/verification/cargo-env.js"
 import { verifyBuild, type VerifyPlan } from "../../src/verification/verify.js"
 import { withTempDir } from "../execution/helpers.js"
 
@@ -73,6 +73,31 @@ describe("cargoEnvFor", () => {
                 cargoEnvFor(host, { CARGO_TARGET_DIR: "/pinned" }).CARGO_TARGET_DIR,
                 "/pinned",
             )
+        })
+    })
+})
+
+describe("a rustup install that is not on PATH", () => {
+    it("puts the default toolchain's bin on PATH for cargo, and leaves a PATH that has cargo alone", async () => {
+        await withTempDir("baro-cargo-env-rustup-", async (home) => {
+            const bin = join(home, ".rustup", "toolchains", "stable-x", "bin")
+            mkdirSync(bin, { recursive: true })
+            writeFileSync(join(bin, "cargo"), "")
+            writeFileSync(join(home, ".rustup", "settings.toml"), 'version = "12"\ndefault_toolchain = "stable-x"\n')
+            mkdirSync(join(home, "target"))
+
+            assert.equal(cargoEnvFor(home, { HOME: home, PATH: "/bin" }).PATH, `${bin}${delimiter}/bin`)
+            assert.equal(cargoEnvFor(home, { HOME: home, PATH: bin }).PATH, bin)
+            assert.equal(cargoEnvFor(home, { PATH: "/bin" }).PATH, "/bin")
+        })
+    })
+
+    it("prefers ~/.cargo/bin when rustup put cargo there", async () => {
+        await withTempDir("baro-cargo-env-cargo-home-", async (home) => {
+            mkdirSync(join(home, ".cargo", "bin"), { recursive: true })
+            writeFileSync(join(home, ".cargo", "bin", "cargo"), "")
+            assert.equal(rustToolchainBin({ HOME: home }), join(home, ".cargo", "bin"))
+            assert.equal(rustToolchainBin({ HOME: join(home, "nobody") }), null)
         })
     })
 })

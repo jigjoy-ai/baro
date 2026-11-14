@@ -211,16 +211,21 @@ export function matchGateSpecs(
             dir = resolve(dir ?? root, words[1]!)
             continue
         }
+        // A narrowed run (`cargo test -p x`, `npm run test:fast -- a.test.ts`) maps to its
+        // whole gate: the host runs the declared command, never the agent's arguments.
         const same = specs.filter((spec) =>
             !spec.preflightFailure &&
             !spec.incompleteReason &&
-            words.length === spec.args.length + 1 &&
+            words.length >= spec.args.length + 1 &&
             words[0] === spec.tool &&
             spec.args.every((arg, index) => words[index + 1] === arg),
         )
         if (dir !== null) {
             const at = dir
-            found.push(...same.filter((spec) => resolve(spec.cwd ?? root) === at))
+            found.push(...same.filter((spec) =>
+                resolve(spec.cwd ?? root) === at ||
+                (spec.cwd === undefined && WORKSPACE_TOOLS.has(spec.tool) && !escapes(root, at)),
+            ))
             continue
         }
         if (same.length <= 1) {
@@ -234,6 +239,9 @@ export function matchGateSpecs(
     }
     return found.filter((spec, index) => found.indexOf(spec) === index && !escapes(root, spec.cwd))
 }
+
+/** Find their workspace from any directory inside it. */
+const WORKSPACE_TOOLS = new Set(["cargo", "go"])
 
 function escapes(root: string, cwd: string | undefined): boolean {
     if (!cwd) return false

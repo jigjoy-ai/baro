@@ -87,8 +87,20 @@ describe("matchGateSpecs", () => {
         assert.deepEqual(found.map((s) => s.label), ["npm run typecheck (packages/web)"])
     })
 
+    it("maps a narrowed run to its whole gate, and cargo from any directory in the workspace", () => {
+        const cargo = [...specs, { label: "cargo test", tool: "cargo", args: ["test"] }]
+        assert.deepEqual(
+            matchGateSpecs(root, "npm run typecheck -- --noEmit false", specs, ["packages/core/a.ts"]).map((s) => s.label),
+            ["npm run typecheck (packages/core)"],
+        )
+        assert.deepEqual(
+            matchGateSpecs(root, "cd crates/tui && cargo test -p tui 2>&1 | grep FAILED", cargo, []).map((s) => s.label),
+            ["cargo test"],
+        )
+        assert.deepEqual(matchGateSpecs(root, "npm run typecheck:watch", specs, ["packages/core/a.ts"]), [])
+    })
+
     it("never matches a command that is not the gate's own argv", () => {
-        assert.deepEqual(matchGateSpecs(root, "npm run typecheck -- --noEmit false", specs, ["packages/core/a.ts"]), [])
         assert.deepEqual(matchGateSpecs(root, "npx tsc -p tsconfig.json", specs, ["packages/core/a.ts"]), [])
         assert.deepEqual(matchGateSpecs(root, "cd packages/web && npm run test", specs, []), [])
         assert.deepEqual(matchGateSpecs(root, "cd ../elsewhere && npm run test", specs, []), [])
