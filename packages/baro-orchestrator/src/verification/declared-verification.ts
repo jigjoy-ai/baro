@@ -96,6 +96,7 @@ interface PackageManifest {
     name?: unknown
     scripts?: Record<string, unknown>
     workspaces?: unknown
+    baro?: { verification?: { scripts?: unknown } }
 }
 
 interface DeclaredTokens {
@@ -821,17 +822,21 @@ function translatePackage(
         )
     }
     const containedPaths = focusedArgs.map(focusedPathRequirement)
+    const owner = workspace
+        ? readManifest(join(workspace.cwd!, "package.json"))
+        : manifest
+    const runs = focusedArgs.length === 0 ? packageGateScript(owner, script) : script
     return {
         label: resolvedRel !== undefined
-            ? `${authority.manager} run ${script}${trailingArgs.length ? " " + trailingArgs.join(" ") : ""} (${resolvedRel})`
+            ? `${authority.manager} run ${runs}${trailingArgs.length ? " " + trailingArgs.join(" ") : ""} (${resolvedRel})`
             : [
                   authority.manager,
                   "run",
-                  script,
+                  runs,
                   ...(selector.declared ?? []),
                   ...trailingArgs,
               ].join(" "),
-        ...packageCommand(authority, script, trailingArgs),
+        ...packageCommand(authority, runs, trailingArgs),
         ...(workspace ? { cwd: workspace.cwd } : {}),
         ...(containedPaths.length > 0 ? { containedPaths } : {}),
         ...(script === "test" &&
@@ -841,6 +846,21 @@ function translatePackage(
             ? { canonicalDeclaredFocus: "rstest" as const }
             : {}),
     }
+}
+
+/**
+ * The script a package named for this gate (`"baro": { "verification":
+ * { "scripts": { "test": "test:fast" } } }`), as the detected gates use it.
+ * Only for an unfocused run: focused arguments were written for the script named.
+ */
+function packageGateScript(manifest: PackageManifest | null, script: string): string {
+    const declared = manifest?.baro?.verification?.scripts
+    const override = declared && typeof declared === "object" && !Array.isArray(declared)
+        ? (declared as Record<string, unknown>)[script]
+        : undefined
+    return typeof override === "string" && typeof manifest?.scripts?.[override] === "string"
+        ? override
+        : script
 }
 
 function hasParentTraversal(value: string): boolean {

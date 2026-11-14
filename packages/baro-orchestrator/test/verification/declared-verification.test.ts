@@ -2866,3 +2866,40 @@ describe("declared package scripts in npm-workspaces monorepos", () => {
         })
     })
 })
+
+describe("a declared test in a package that names its gate script", () => {
+    // A run on this repo declared `npm test --workspace packages/baro-orchestrator`;
+    // the package says its gate is `test:fast`, and the whole suite hit the 10-minute ceiling.
+    it("runs the gate script for an unfocused run and the named script for a focused one", async () => {
+        await withTempDir("baro-verify-declared-gate-script-", async (dir) => {
+            writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "root", private: true, workspaces: ["packages/*"] }))
+            mkdirSync(join(dir, "packages", "core", "test"), { recursive: true })
+            writeFileSync(join(dir, "packages", "core", "test", "a.test.ts"), "")
+            writeFileSync(
+                join(dir, "packages", "core", "package.json"),
+                JSON.stringify({
+                    name: "core",
+                    scripts: { test: "node -e 0", "test:fast": "node -e 0" },
+                    baro: { verification: { scripts: { test: "test:fast" } } },
+                }),
+            )
+            const managers = [{ manager: "npm" as const }, { manager: "npm" as const, cwd: join(dir, "packages", "core") }]
+
+            const [bySelector, byChangedFiles, focused] = translateDeclaredTests(
+                dir,
+                [
+                    { storyId: "S1", command: "npm test --workspace packages/core" },
+                    { storyId: "S1", command: "npm test", changedFiles: ["packages/core/src/a.ts"] },
+                    { storyId: "S1", command: "npm test --workspace packages/core -- test/a.test.ts" },
+                ],
+                managers,
+            )
+
+            assert.deepEqual(bySelector?.args, ["run", "test:fast"])
+            assert.equal(bySelector?.label, "npm run test:fast --workspace packages/core")
+            assert.deepEqual(byChangedFiles?.args, ["run", "test:fast"])
+            assert.equal(byChangedFiles?.label, "npm run test:fast (packages/core)")
+            assert.deepEqual(focused?.args, ["run", "test", "--", "test/a.test.ts"])
+        })
+    })
+})
