@@ -24,6 +24,7 @@ import { collectAltitudeFindings } from "./altitude-probe.js"
 import { contentPreservingCommand } from "./content-preserving-command.js"
 import type { ContractConflict, UnavailableCheck } from "./critic-verdict.js"
 import { PRE_EXISTING_FAILURE_RULE, TEST_WEAKENING_RULE } from "./critic-verdict.js"
+import { disputeSection, parseDisputes, type StoryDispute } from "./disputes.js"
 import {
     altitudeActivityText,
     renderAltitudeEvidenceSection,
@@ -44,6 +45,7 @@ const MAX_COMMAND_CHARS = 1_000
 const MAX_COMMAND_OUTPUT_CHARS = 1_800
 const MAX_COMMAND_EVIDENCE_CHARS = 12_000
 const MAX_HOST_RECHECK_CHARS = 8_000
+const MAX_DISPUTE_CHARS = 8_000
 const MAX_CRITERION_CHARS = 2_000
 const MAX_CRITERIA_CHARS = 8_000
 const MAX_AGENT_OUTPUT_CHARS = 16_000
@@ -54,7 +56,7 @@ const MAX_FINGERPRINT_PATHS = 5_000
 const MAX_FINGERPRINT_FILE_BYTES = 64 * 1024 * 1024
 const MAX_FINGERPRINT_TOTAL_BYTES = 256 * 1024 * 1024
 // Must cover the sum of every individually-bounded section above.
-export const CRITIC_MAX_PROMPT_CHARS = 148_000
+export const CRITIC_MAX_PROMPT_CHARS = 156_000
 
 
 export interface CriticRepositoryTarget {
@@ -177,6 +179,8 @@ export interface CriticEvaluationPreparation {
     established: readonly string[]
     /** Fresh commands that could not start; only these let a verdict report a check as unavailable. */
     unavailableCommands: readonly string[]
+    /** Criteria the story disputes in this turn's output (disputes.ts). */
+    disputes: readonly StoryDispute[]
 }
 
 export interface InconclusiveCriticVerdict {
@@ -1036,6 +1040,7 @@ export async function prepareCriticEvaluation(
     const established = issues.length === 0 && afterFingerprint.value && establishedFor
         ? establishedFor(afterFingerprint.value).filter((criterion) => criteria.includes(criterion))
         : []
+    const disputes = parseDisputes(resultText, criteria)
     const segments = splitAcceptanceContract(criteria)
     let offset = 0
     const prompts = segments.map((segmentCriteria, index) => {
@@ -1052,6 +1057,7 @@ export async function prepareCriticEvaluation(
             writeSurface,
             established.filter((criterion) => segmentCriteria.includes(criterion)),
             recheck,
+            disputes.filter((dispute) => segmentCriteria.includes(dispute.criterion)),
         )
         offset += segmentCriteria.length
         return prompt
@@ -1078,6 +1084,7 @@ export async function prepareCriticEvaluation(
         unavailableCommands: (commandEvidence.commands ?? [])
             .filter((command) => command.toolUnavailable && command.freshness === "fresh")
             .map((command) => command.command),
+        disputes,
     }
 }
 
@@ -1218,6 +1225,7 @@ export function buildEvalPrompt(
     writeSurface: readonly string[] | null = null,
     established: readonly string[] = [],
     hostRecheck: string | null = null,
+    disputes: readonly StoryDispute[] = [],
 ): string {
     const criteriaList = renderCompleteAcceptanceContract(
         criteria,
@@ -1280,6 +1288,7 @@ export function buildEvalPrompt(
         criteriaList,
         "",
         ...establishedSection(criteria, established, segment?.offset ?? 0),
+        ...(disputes.length > 0 ? [boundText(redactSensitiveText(disputeSection(disputes)!), MAX_DISPUTE_CHARS)] : []),
         "## Baro-captured command/test evidence",
         commandEvidence
             ? boundText(

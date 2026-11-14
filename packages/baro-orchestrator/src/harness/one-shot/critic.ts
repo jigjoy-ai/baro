@@ -20,7 +20,7 @@ import {
 import {
     applyContractConflicts,
     buildCorrectiveMessage,
-    extractVerdictJson,
+    parseVerdictJson,
     parsedConflictFields,
     type ContractConflict,
     type UnavailableCheck,
@@ -33,6 +33,7 @@ import {
     type CriticEvidenceSource,
 } from "../../acceptance/critic-evidence.js"
 import { CriterionLedger, honorEstablished } from "../../acceptance/criterion-ledger.js"
+import { DisputeLedger, resolveAppeals } from "../../acceptance/disputes.js"
 import { withIsolatedCriticCwd } from "../critic-cli-isolation.js"
 import { criticInput, criticReplayKey } from "../../acceptance/critic-input.js"
 import { drainCriticPending } from "../../acceptance/critic-pending.js"
@@ -81,6 +82,7 @@ export abstract class OneShotCritic extends BusMember {
     private readonly terminalAuthorities: TerminalTurnAuthorityOptions
     private readonly maxEmissionsPerAgent: number
     private readonly ledger = new CriterionLedger()
+    private readonly disputes = new DisputeLedger()
     private readonly targets: ReadonlyMap<string, readonly string[]>
     protected readonly runId: string | undefined
     private readonly evidence: CriticEvidenceSource | undefined
@@ -116,7 +118,7 @@ export abstract class OneShotCritic extends BusMember {
 
     /** Turn raw evaluator text into a verdict; throw to mark inconclusive. */
     protected parseVerdict(text: string): OneShotCriticEvaluation {
-        const parsed = JSON.parse(extractVerdictJson(text.trim())) as {
+        const parsed = parseVerdictJson(text) as {
             verdict: "pass" | "fail"
             reasoning: string
             violated_criteria: string[]
@@ -208,6 +210,14 @@ export abstract class OneShotCritic extends BusMember {
                       )
                     : inconclusiveEvidenceVerdict(preparation.issues)
                 if (preparationReady) {
+                    evaluation = await resolveAppeals({
+                        evaluation,
+                        disputes: preparation.disputes,
+                        ledger: this.disputes,
+                        agentId,
+                        prompts: preparation.prompts,
+                        judge: (prompt) => this.evaluate(prompt, agentId, turn),
+                    })
                     this.ledger.record(agentId, repositoryFingerprint, criteria, evaluation)
                 }
             } catch (error) {

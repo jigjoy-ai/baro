@@ -1,3 +1,5 @@
+import { DISPUTE_INSTRUCTIONS } from "./disputes.js"
+
 /** Story commands run in a sandbox that denies e.g. `ps`; one run's tests "fixed" that by returning early. */
 export const PRE_EXISTING_FAILURE_RULE =
     "A test failure that captured evidence shows failing the same way at the story's base commit, in the same environment, is pre-existing, not a regression — this includes tests the story sandbox breaks by denying system access such as `ps`. Never fail a criterion for it or report it as a contract conflict; judge the criterion by every other test. Only a captured base-commit run proves this — the story's own, or Baro's host recheck — never the agent's word."
@@ -198,8 +200,19 @@ export function buildCorrectiveMessage(
             lines.push(`- ${c}`)
         }
     }
-    lines.push("", "Please address the above and resubmit your work.")
+    lines.push("", "Please address the above and resubmit your work.", "", DISPUTE_INSTRUCTIONS)
     return lines.join("\n")
+}
+
+/** A model sometimes escapes a character JSON does not (`\_`, `\'`); keep the backslash literal. */
+export function parseVerdictJson(text: string): unknown {
+    const json = extractVerdictJson(text.trim())
+    try {
+        return JSON.parse(json)
+    } catch (error) {
+        if (!(error instanceof SyntaxError)) throw error
+        return JSON.parse(json.replace(/\\\\|\\(?!["\\/bfnrtu])/gu, (match) => match === "\\\\" ? match : "\\\\"))
+    }
 }
 
 /**

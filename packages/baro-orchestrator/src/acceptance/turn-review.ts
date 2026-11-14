@@ -2,6 +2,7 @@ import type {
     CritiqueData,
     StoryFailureData,
 } from "../semantic-events.js"
+import { DISPUTE_INSTRUCTIONS } from "./disputes.js"
 
 export type TurnReviewWaitResult =
     | { kind: "review"; review: CritiqueData }
@@ -390,6 +391,8 @@ export function turnReviewFeedback(review: CritiqueData): string {
         "",
         "Inspect the current changes, fix the underlying issue, re-run the relevant checks, and return a new terminal candidate.",
         "The output of each check you run is captured automatically as evidence [gate:evidence-capture] — one shaped run per command suffices; do not re-run a passing check to reformat or archive its output.",
+        "",
+        DISPUTE_INSTRUCTIONS,
     ].join("\n")
 }
 

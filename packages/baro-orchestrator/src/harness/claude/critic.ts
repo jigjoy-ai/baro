@@ -41,7 +41,7 @@ import {
 } from "../one-shot/critic.js"
 import {
     VERDICT_SYSTEM_PROMPT,
-    extractVerdictJson,
+    parseVerdictJson,
     parsedConflictFields,
 } from "../../acceptance/critic-verdict.js"
 
@@ -50,6 +50,7 @@ export {
     VERDICT_SYSTEM_PROMPT,
     buildCorrectiveMessage,
     extractVerdictJson,
+    parseVerdictJson,
     verdictSystemPrompt,
 } from "../../acceptance/critic-verdict.js"
 
@@ -191,8 +192,7 @@ export class Critic extends OneShotCritic {
                 throw new Error("claude returned empty result")
             }
 
-            const verdictJson = extractVerdictJson(verdictText)
-            const parsed = JSON.parse(verdictJson) as {
+            const parsed = parseVerdictJson(verdictText) as {
                 verdict: "pass" | "fail"
                 reasoning: string
                 violated_criteria: string[]
