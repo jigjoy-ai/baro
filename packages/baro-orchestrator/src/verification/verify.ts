@@ -16,6 +16,7 @@
  */
 
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs"
+import { cpus, loadavg } from "node:os"
 import { isAbsolute, join, relative, resolve, sep } from "node:path"
 
 import type { VerificationCommandOutput } from "../events/verification.js"
@@ -218,6 +219,8 @@ export interface VerifyBuildOptions {
     sleep?: (ms: number) => Promise<void>
     /** A timeout under story load is retried only once this reports false. */
     storyExecutorsActive?: () => boolean
+    /** 1-minute load average per core (`loadPerCore`); above 1 a failed gate is confirmed once on a quieter machine. Unset: never. */
+    machineLoad?: () => number
     /** Run only detected commands whose ecosystem changed since this commit (change-scope.ts). */
     changedSince?: string | null
     /** With `changedSince`: also skip workspace packages the change cannot reach. */
@@ -1443,7 +1446,7 @@ async function runCmd(
         return {
             status: "failed",
             durationMs: Date.now() - startedAt,
-            tail: combined.slice(-TAIL_BYTES),
+            tail: failureTail(combined),
             output: captureCommandOutput(err.stdout ?? "", err.stderr ?? ""),
             ...(timedOut ? { timedOut: true as const } : {}),
         }
@@ -1534,6 +1537,42 @@ function throwIfAborted(signal?: AbortSignal): void {
  * Runs every detectable command even if an earlier one fails, so the PR body can
  * surface all the problems at once.
  */
+const CONTENDED_LOAD = 1
+const QUIET_LOAD = 0.75
+const QUIET_WAIT_MS = 120_000
+const QUIET_POLL_MS = 5_000
+const FAILURE_LINE_BYTES = 600
+
+export function loadPerCore(): number {
+    return loadavg()[0]! / Math.max(1, cpus().length)
+}
+
+function delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function waitForQuiet(
+    load: () => number,
+    sleep: (ms: number) => Promise<void>,
+    signal: AbortSignal | undefined,
+): Promise<void> {
+    for (let waited = 0; waited < QUIET_WAIT_MS && load() > QUIET_LOAD; waited += QUIET_POLL_MS) {
+        throwIfAborted(signal)
+        await sleep(QUIET_POLL_MS)
+    }
+}
+
+/** Test runners print their failures well before the trailing noise (npm's lifecycle lines, stderr logs). */
+export function failureTail(combined: string): string {
+    const tail = combined.slice(-TAIL_BYTES)
+    const named = combined
+        .split(/\r?\n/u)
+        .filter((line) => /^\s*(?:### \[F\d+\]|FAIL\b|not ok\b|✗|×)|\berror TS\d+|AssertionError/u.test(line) && !tail.includes(line))
+    if (named.length === 0) return tail
+    const head = named.join("\n").slice(0, FAILURE_LINE_BYTES)
+    return `${head}\n…\n${combined.slice(-(TAIL_BYTES - head.length - 3))}`
+}
+
 export async function verifyBuild(
     cwd: string,
     options: VerifyBuildOptions = {},
@@ -1633,11 +1672,14 @@ export async function verifyBuild(
             // impossible whatever the tail turns out to be, and the tail of the
             // first attempt is kept whether or not the retry is taken — a
             // refused regression is exactly what the story agent needs.
+            const loadOf = options.machineLoad ?? (() => 0)
+            const contended = loadOf() > CONTENDED_LOAD
             decision = decideRetry(outcome.tail, {
                 timedOut: outcome.timedOut,
                 environment: outcome.environment,
                 retryable: outcome.retryable,
                 storyExecutorsActive: options.storyExecutorsActive?.(),
+                contended,
             })
             firstFailureTail = outcome.tail
             if (decision.retry) {
@@ -1662,6 +1704,15 @@ export async function verifyBuild(
                 // backoff survives here: the remedy, not elapsed time, is what
                 // makes the retry worth taking, so nothing waits by default.
                 await options.sleep?.(0)
+                if (contended && decision.bucket === "regression") {
+                    emitActivity({
+                        type: "activity",
+                        id: "_verify",
+                        kind: "warn",
+                        text: `${c.label} failed on an oversubscribed machine; confirming it once the load drops`,
+                    })
+                    await waitForQuiet(loadOf, options.sleep ?? delay, options.signal)
+                }
                 throwIfAborted(options.signal)
                 outcome = await runCmd(
                     cwd,

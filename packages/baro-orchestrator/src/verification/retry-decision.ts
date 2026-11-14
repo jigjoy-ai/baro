@@ -21,6 +21,8 @@ export interface RetryHints {
     readonly retryable?: boolean
     /** Unknown counts as busy: an absent reading must not license a retry. */
     readonly storyExecutorsActive?: boolean
+    /** The machine was oversubscribed while the command ran. */
+    readonly contended?: boolean
 }
 
 export type RetryRefusal =
@@ -60,15 +62,18 @@ export function decideRetry(
         return refuse("story-executors-active")
     }
     // A regression's tail is the story agent's evidence; re-running only
-    // delays handing it back.
-    if (bucket === "regression") return refuse("classified-regression")
+    // delays handing it back. Unless it failed on an oversubscribed machine:
+    // a timing-sensitive test fails there without any change to blame.
+    if (bucket === "regression" && hints.contended !== true) return refuse("classified-regression")
     return {
         retry: true,
         bucket,
         remedy:
             bucket === "time-ceiling"
                 ? "lift-ceiling"
-                : remedy === "none"
+                : bucket === "regression"
+                  ? "none"
+                  : remedy === "none"
                   ? "install-dependencies"
                   : remedy,
         signalId,
