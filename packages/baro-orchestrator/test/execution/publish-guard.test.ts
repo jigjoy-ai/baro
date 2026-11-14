@@ -35,6 +35,7 @@ import {
 } from "../../src/planning/domain/architecture-obligation-contract.js"
 import { deriveGoalContract } from "../../src/goal/goal-contract.js"
 import { deliveryObligationViolation } from "../../src/planning/domain/delivery-obligation.js"
+import { INSIDE_MACOS_SANDBOX } from "../inside-os-sandbox.js"
 
 describe("publishCommandRefusal", () => {
     for (const command of [
@@ -73,7 +74,7 @@ describe("publishCommandRefusal", () => {
 })
 
 describe("OpenAI story lane", () => {
-    it("runBash without denyPublish runs the command as before", async () => {
+    it.skipIf(INSIDE_MACOS_SANDBOX)("runBash without denyPublish runs the command as before", async () => {
         await withTempDir("publish-guard-plain-", async (dir) => {
             const bash = createCodebaseTools(dir).find((t) => t.name === "bash")!
             const output = await bash.invoke!({

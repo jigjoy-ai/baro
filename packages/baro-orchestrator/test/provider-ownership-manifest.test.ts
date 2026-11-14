@@ -14,6 +14,7 @@ import {
     ManagedProcessTree,
     POSIX_PROCESS_GROUPS_SUPPORTED,
 } from "../src/harness/process-tree.js"
+import { INSIDE_MACOS_SANDBOX } from "./inside-os-sandbox.js"
 
 const TOKEN = "provider-ownership-test-token"
 let cleanup: (() => Promise<void>) | null = null
@@ -119,7 +120,7 @@ describe("provider ownership manifest", () => {
         assert.equal(processAlive(child.pid), false)
     })
 
-    it.skipIf(!POSIX_PROCESS_GROUPS_SUPPORTED,)("publishes a live same-group provider when its shim exits immediately", async () => {
+    it.skipIf(!POSIX_PROCESS_GROUPS_SUPPORTED || INSIDE_MACOS_SANDBOX)("publishes a live same-group provider when its shim exits immediately", async () => {
         const fixture = manifestFixture(TOKEN)
         const providerPidPath = join(fixture.directory, "immediate-provider-pid")
         configureProviderOwnershipManifest(fixture.path, TOKEN)
@@ -212,7 +213,7 @@ process.exit(0)
         assert.deepEqual(manifest.providers, [])
     })
 
-    it.skipIf(!POSIX_PROCESS_GROUPS_SUPPORTED)("retains an observed same-group provider after its short-lived shim exits",
+    it.skipIf(!POSIX_PROCESS_GROUPS_SUPPORTED || INSIDE_MACOS_SANDBOX)("retains an observed same-group provider after its short-lived shim exits",
         async () => {
             const fixture = manifestFixture(TOKEN)
             const providerPidPath = join(fixture.directory, "provider-pid")

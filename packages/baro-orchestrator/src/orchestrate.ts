@@ -8,7 +8,7 @@
  */
 
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "fs"
-import { homedir, hostname, tmpdir } from "os"
+import { hostname, tmpdir } from "os"
 import { dirname, join } from "path"
 import { fileURLToPath } from "url"
 import { randomUUID } from "node:crypto"
@@ -42,6 +42,7 @@ import {
 import { WorktreeManager } from "./integration/worktree.js"
 import { installAwakeGapReporter } from "./runtime/awake-clock-log.js"
 import { StoryOutcomeAuthority } from "./runtime/story-outcome-authority.js"
+import { baroHome } from "./runtime/baro-home.js"
 import { deriveGoalContract } from "./goal/goal-contract.js"
 import { buildDag } from "./runtime-graph/dag.js"
 import {
@@ -932,7 +933,7 @@ export async function orchestrate(
     const useSentry = config.withSentry ?? true
     const useMemory = config.withMemory ?? true
 
-    const sessionsDir = join(homedir(), ".baro", "sessions")
+    const sessionsDir = join(baroHome(), "sessions")
 
     // Prune stale session dirs (>24h old) to prevent unbounded growth.
     if (useMemory) {

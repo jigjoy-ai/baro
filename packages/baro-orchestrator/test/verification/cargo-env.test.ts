@@ -1,9 +1,9 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
-import { homedir } from "node:os"
 import { join } from "node:path"
 import assert from "node:assert/strict"
 import { describe, it } from "@rstest/core"
 
+import { baroHome } from "../../src/runtime/baro-home.js"
 import { cargoEnvFor, resolveCargoTargetDir } from "../../src/verification/cargo-env.js"
 import { verifyBuild, type VerifyPlan } from "../../src/verification/verify.js"
 import { withTempDir } from "../execution/helpers.js"
@@ -36,7 +36,7 @@ describe("resolveCargoTargetDir", () => {
     it("falls back to a stable per-repository cache when the host has no target/", async () => {
         await withTempDir("baro-cargo-env-a-", async (hostA) => {
             await withTempDir("baro-cargo-env-b-", async (hostB) => {
-                const cacheRoot = join(homedir(), ".baro", "cargo-target")
+                const cacheRoot = join(baroHome(), "cargo-target")
                 const first = resolveCargoTargetDir(hostA, {})
                 const second = resolveCargoTargetDir(hostA, {})
                 const other = resolveCargoTargetDir(hostB, {})

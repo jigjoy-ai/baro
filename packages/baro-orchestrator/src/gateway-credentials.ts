@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs"
-import { homedir } from "node:os"
 import { join } from "node:path"
+
+import { baroHome } from "./runtime/baro-home.js"
 
 const MAX_CREDENTIAL_FILE_BYTES = 16 * 1024
 const MAX_RESPONSE_BYTES = 32 * 1024
@@ -42,7 +43,7 @@ export class GatewayCredentialError extends Error {
 export async function acquireGatewayCredential(
     options: AcquireGatewayCredentialOptions = {},
 ): Promise<IssuedGatewayCredential> {
-    const path = options.credentialsPath ?? join(homedir(), ".baro", "credentials.json")
+    const path = options.credentialsPath ?? join(baroHome(), "credentials.json")
     let raw: Buffer
     try {
         raw = readFileSync(path)

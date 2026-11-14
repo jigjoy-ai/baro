@@ -1,8 +1,8 @@
 import { lstatSync, readdirSync, rmSync } from "node:fs"
-import { homedir } from "node:os"
 import { join } from "node:path"
 
 import { packageCacheRoot } from "../harness/package-cache.js"
+import { baroHome } from "../runtime/baro-home.js"
 import { diskUsage, formatBytes } from "../runtime/disk-usage.js"
 
 // Long enough that no build still running from a previous run start loses
@@ -13,7 +13,7 @@ export const CARGO_LEFTOVER_MAX_AGE_MS = 2 * 24 * 60 * 60_000
 export function cargoTargetCacheRoots(env: NodeJS.ProcessEnv = process.env): string[] {
     return [
         join(packageCacheRoot(env), "cargo-target"),
-        join(homedir(), ".baro", "cargo-target"),
+        join(baroHome(), "cargo-target"),
     ]
 }
 

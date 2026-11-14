@@ -7,6 +7,7 @@ import { describe, it } from "@rstest/core"
 
 import { confinedSpawn, storyCredentialEnv } from "../../src/harness/os-sandbox.js"
 import { storyPackageCache } from "../../src/harness/package-cache.js"
+import { INSIDE_MACOS_SANDBOX } from "../inside-os-sandbox.js"
 
 // Codex, OpenCode, Pi and Devin run their tools with approvals and their own
 // sandboxes off; an audit found nothing but a git/gh PATH shim around them.
@@ -38,7 +39,7 @@ describe("OS confinement of a story's CLI lane", () => {
         }
     })
 
-    it.skipIf(process.platform !== "darwin")("holds the whole CLI process tree to the worktree on macOS", () => {
+    it.skipIf(process.platform !== "darwin" || INSIDE_MACOS_SANDBOX)("holds the whole CLI process tree to the worktree on macOS", () => {
         const root = realpathSync(mkdtempSync(join(tmpdir(), "baro-confine-")))
         try {
             execFileSync("git", ["init", "-q", "-b", "main", join(root, "repo")])

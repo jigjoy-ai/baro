@@ -1,7 +1,7 @@
 import { mkdirSync, readdirSync, realpathSync, type Dirent } from "node:fs"
-import { homedir } from "node:os"
 import { join } from "node:path"
 import { gitSandboxPaths } from "../execution/shell-containment.js"
+import { baroHome } from "../runtime/baro-home.js"
 import { repositoryCacheKey } from "../verification/cargo-env.js"
 
 /**
@@ -19,7 +19,7 @@ export interface StoryPackageCache {
 
 export function packageCacheRoot(env: NodeJS.ProcessEnv = process.env): string {
     const configured = env.BARO_PACKAGE_CACHE?.trim()
-    return configured ? configured : join(homedir(), ".baro", "cache", "packages")
+    return configured ? configured : join(baroHome(), "cache", "packages")
 }
 
 export function storyPackageCache(

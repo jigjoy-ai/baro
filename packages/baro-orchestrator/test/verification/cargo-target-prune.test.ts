@@ -12,7 +12,7 @@ import {
     utimesSync,
     writeFileSync,
 } from "node:fs"
-import { tmpdir } from "node:os"
+import { homedir, tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 
 import type {
@@ -124,9 +124,16 @@ describe("pruneCargoTargetCaches", () => {
     })
 
     it("names the story package cache and the verification cache as its roots", () => {
-        const roots = cargoTargetCacheRoots({ BARO_PACKAGE_CACHE: join(scratch, "pkg") })
-        assert.equal(roots[0], join(scratch, "pkg", "cargo-target"))
-        assert.ok(roots[1].endsWith(join(".baro", "cargo-target")))
+        const saved = process.env.BARO_HOME
+        delete process.env.BARO_HOME
+        try {
+            const roots = cargoTargetCacheRoots({ BARO_PACKAGE_CACHE: join(scratch, "pkg") })
+            assert.equal(roots[0], join(scratch, "pkg", "cargo-target"))
+            assert.equal(roots[1], join(homedir(), ".baro", "cargo-target"))
+        } finally {
+            if (saved === undefined) delete process.env.BARO_HOME
+            else process.env.BARO_HOME = saved
+        }
     })
 })
 
@@ -214,10 +221,11 @@ describe("orchestrate() run start", () => {
     let stderrWrite: typeof process.stderr.write
 
     beforeEach(() => {
-        for (const key of ["HOME", "BARO_PACKAGE_CACHE", "TMPDIR", "BARO_RUN_START_CLEANUP"]) {
+        for (const key of ["HOME", "BARO_HOME", "BARO_PACKAGE_CACHE", "TMPDIR", "BARO_RUN_START_CLEANUP"]) {
             saved[key] = process.env[key]
         }
         process.env.HOME = join(scratch, "home")
+        process.env.BARO_HOME = join(scratch, "home", ".baro")
         process.env.BARO_PACKAGE_CACHE = join(scratch, "pkg")
         process.env.TMPDIR = scratch
         delete process.env.BARO_RUN_START_CLEANUP
