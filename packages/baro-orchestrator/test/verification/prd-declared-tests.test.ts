@@ -21,6 +21,21 @@ const story = (id: string, tests: string[], extra: Record<string, unknown> = {})
 })
 
 describe("readAuthoritativeVerifyPlanOptions", () => {
+    // A run on this repo failed its final gate: "npm run typecheck" is declared
+    // by three workspaces and the final gate had no files to choose one by.
+    it("hands a story's declared writes to its tests, so a monorepo script finds its workspace", () => {
+        const path = prdFile({
+            userStories: [
+                story("S1", ["npm run typecheck"], { writes: ["packages/core/src/a.ts", 7] }),
+                story("S2", ["npm test"]),
+            ],
+        })
+        assert.deepEqual(readAuthoritativeVerifyPlanOptions(path).declaredTests, [
+            { storyId: "S1", command: "npm run typecheck", changedFiles: ["packages/core/src/a.ts"] },
+            { storyId: "S2", command: "npm test" },
+        ])
+    })
+
     it("keeps every story's tests when the PRD has no progressive admission ledger", () => {
         const path = prdFile({
             userStories: [story("S1", ["npm test -- a"]), story("S2", ["npm test -- b"])],
