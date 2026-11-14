@@ -131,7 +131,10 @@ export class Critic extends OneShotCritic {
         )
         const collector = new ClaudeStreamResultCollector()
         collector.feed(Buffer.from(response.stdout, "utf8"))
-        return collector.resultLine() ?? ""
+        const line = collector.resultLine()
+        // A clean exit with no result line read as "Unexpected end of JSON input", naming nothing.
+        if (line === null) throw new Error(noResultLine(response.stdout, response.stderr))
+        return line
     }
 
     protected override async evaluate(
@@ -555,4 +558,14 @@ function isErrorSubtype(value: unknown): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+export function noResultLine(stdout: string, stderr: string): string {
+    const lastEvent = stdout.trim().split("\n").at(-1)?.slice(0, 200) ?? ""
+    const errTail = stderr.trim().slice(-300)
+    return [
+        `claude exited without a result line (${stdout.length} bytes of stream)`,
+        lastEvent ? `last event: ${lastEvent}` : "no events",
+        errTail ? `stderr: ${errTail}` : "no stderr",
+    ].join("; ")
 }

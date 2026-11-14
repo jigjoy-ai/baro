@@ -4,7 +4,7 @@ import { join } from "node:path"
 import { describe, it } from "@rstest/core"
 
 import { knownMetric, unknownMetric } from "../../../src/telemetry/model-telemetry.js"
-import { Critic } from "../../../src/harness/claude/critic.js"
+import { Critic, noResultLine } from "../../../src/harness/claude/critic.js"
 import {
     AgentResult,
     AgentTargetedMessage,
@@ -407,3 +407,14 @@ function writeShell(dir: string, name: string, body: string): string {
     chmodSync(path, 0o755)
     return path
 }
+
+describe("a Claude Critic call that ends without a result line", () => {
+    it("names the stream size, the last event and stderr instead of a JSON parse error", () => {
+        const message = noResultLine('{"type":"system"}\n{"type":"stream_event"}\n', "rate limited\n")
+        assert.equal(
+            message,
+            'claude exited without a result line (42 bytes of stream); last event: {"type":"stream_event"}; stderr: rate limited',
+        )
+        assert.equal(noResultLine("", ""), "claude exited without a result line (0 bytes of stream); no events; no stderr")
+    })
+})
