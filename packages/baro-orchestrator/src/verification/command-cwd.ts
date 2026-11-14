@@ -15,6 +15,7 @@ import {
     isIntegrationWorktreeRoot,
 } from "../integration/integration-worktree.js"
 import { pathAliases } from "../runtime/worktree-path.js"
+import { LEGACY_WORKTREES_DIR_NAME, WORKTREES_DIR_NAME } from "../integration/worktrees-root.js"
 
 export const RETRY_BACKOFF_MS = 2000
 
@@ -36,13 +37,13 @@ function sameDirectory(a: string, b: string): boolean {
 }
 
 /**
- * `<tmpdir>/baro-worktrees/<runId>/<agentId>/<repo>`, when it is runCwd's sibling or
+ * `<tmpdir>/baro-worktrees.noindex/<runId>/<agentId>/<repo>` (or the legacy `baro-worktrees`), when it is runCwd's sibling or
  * has vanished — e.g. a workspace under a removed `__run` after the run cwd
  * fell back to the host checkout.
  */
 function remappableWorktreeRoot(runCwd: string, candidate: string): string | null {
     const parts = candidate.split(sep)
-    const at = parts.lastIndexOf("baro-worktrees")
+    const at = Math.max(parts.lastIndexOf(WORKTREES_DIR_NAME), parts.lastIndexOf(LEGACY_WORKTREES_DIR_NAME))
     if (at < 0 || parts.length < at + 4) return null
     // `<run>/<agent>/<repo>`: a worktree's own directory sits one level down.
     const root = parts.slice(0, at + 4).join(sep)

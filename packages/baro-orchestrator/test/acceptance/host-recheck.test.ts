@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { execFileSync } from "node:child_process"
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, it } from "@rstest/core"
 
@@ -179,6 +179,33 @@ describe("HostRecheck", () => {
             const later = await recheck.section(request)
             assert.match(later!, /story's files: passed/)
             assert.equal(s.runs.length, 1)
+        })
+    })
+
+    it("links the integration tree's dependencies into its checkout, and removing the checkout keeps them", async () => {
+        await withTempDir("baro-recheck-", async (root) => {
+            const { dir, base } = repo(root)
+            const integration = join(root, "integration")
+            mkdirSync(join(integration, "node_modules", "dep"), { recursive: true })
+            writeFileSync(join(integration, "node_modules", "dep", "index.js"), "module.exports = 1\n")
+            writeFileSync(join(dir, "packages", "core", "a.ts"), "export const a = 2\n")
+            let linked: boolean | null = null
+            const recheck = new HostRecheck({
+                hostRoot: dir,
+                dependencyRoot: integration,
+                scratchRoot: join(root, "scratch"),
+                runGates: async (at, labels) => {
+                    linked = lstatSync(join(at, "node_modules")).isSymbolicLink()
+                    return labels.map((label) => ({ command: label, status: "passed" as const, durationMs: 1 }))
+                },
+            })
+
+            const section = await recheck.section({ cwd: dir, baseSha: base, failedCommands: ["cd packages/core && npm run typecheck"] })
+
+            assert.match(section!, /story's files: passed/)
+            assert.equal(linked, true)
+            assert.equal(readFileSync(join(integration, "node_modules", "dep", "index.js"), "utf8"), "module.exports = 1\n")
+            assert.equal(git(dir, "worktree", "list").trim().split("\n").length, 1)
         })
     })
 

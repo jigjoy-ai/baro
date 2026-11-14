@@ -1,5 +1,4 @@
 import { existsSync, readdirSync, realpathSync, rmSync, rmdirSync } from "fs"
-import { tmpdir } from "os"
 import { basename, dirname, join, resolve } from "path"
 
 import { GitGate, pushBranchUpstream } from "./git.js"
@@ -8,13 +7,13 @@ import {
     isRepositoryCommandTimeout,
     runRepositoryCommand as exec,
 } from "./repository-command.js"
+import { worktreesRoot } from "./worktrees-root.js"
 
 export const INTEGRATION_WORKTREE_DIRNAME = "__run"
 
 export function integrationWorktreePath(runId: string, repoRoot: string): string {
     return join(
-        tmpdir(),
-        "baro-worktrees",
+        worktreesRoot(),
         runId,
         INTEGRATION_WORKTREE_DIRNAME,
         worktreeLeafName(repoRoot),

@@ -18,7 +18,6 @@ import {
     rmdirSync,
     symlinkSync,
 } from "fs"
-import { tmpdir } from "os"
 import { dirname, join, resolve } from "path"
 
 import { SHELL_SCRATCH_DIRNAME } from "../execution/gate-registry.js"
@@ -30,6 +29,7 @@ import {
     isRepositoryCommandTimeout,
     runRepositoryCommand as exec,
 } from "./repository-command.js"
+import { worktreesRoot } from "./worktrees-root.js"
 
 // A fresh worktree has no installed dependency artifacts, so dep dirs are
 // symlinked to one shared location: one story's `npm install` (pip/composer/…)
@@ -159,7 +159,7 @@ export class WorktreeManager {
         private readonly runId: string,
         opts: WorktreeManagerOptions = {},
     ) {
-        this.baseDir = join(tmpdir(), "baro-worktrees", runId)
+        this.baseDir = join(worktreesRoot(), runId)
         this.linkDepDirs = opts.linkDepDirs ?? true
         this.integrationRoot = opts.integrationRoot ?? repoRoot
         this.log =

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, it } from "@rstest/core"
 import assert from "node:assert/strict"
+import { LEGACY_WORKTREES_DIR_NAME, WORKTREES_DIR_NAME } from "../../src/integration/worktrees-root.js"
 import { execFileSync, spawnSync } from "node:child_process"
 import {
     existsSync,
@@ -45,7 +46,7 @@ let logs: string[]
 
 beforeEach(() => {
     scratch = realpathSync(mkdtempSync(join(tmpdir(), "baro-stale-runs-")))
-    root = join(scratch, "baro-worktrees")
+    root = join(scratch, WORKTREES_DIR_NAME)
     mkdirSync(root)
     repo = join(scratch, "repo")
     mkdirSync(repo)
@@ -107,6 +108,24 @@ describe("reclaimStaleRunDirs", () => {
         assert.ok(summary.bytes >= 4096)
         assert.ok(logs.some((line) => /reclaimed 1 leftover worktree dir/.test(line)), logs.join("\n"))
         assert.equal(git(repo, "rev-parse", "--verify", "baro-wt/run-dead/S1"), git(repo, "rev-parse", "main"))
+    })
+
+    it("also sweeps the directory older versions used, when no root is given", async () => {
+        const previous = process.env.TMPDIR
+        process.env.TMPDIR = scratch
+        try {
+            const legacy = join(scratch, LEGACY_WORKTREES_DIR_NAME, "run-old")
+            mkdirSync(legacy, { recursive: true })
+            writeFileSync(join(legacy, `.baro-run-${deadPid()}.pid`), "x\n")
+
+            const summary = await reclaimStaleRunDirs({ currentRunId: "run-current", log: (line) => logs.push(line) })
+
+            assert.deepEqual(summary.reclaimed, [legacy])
+            assert.equal(existsSync(legacy), false)
+        } finally {
+            if (previous === undefined) delete process.env.TMPDIR
+            else process.env.TMPDIR = previous
+        }
     })
 
     it("keeps a dead run's story worktree whose branch has unmerged commits", async () => {

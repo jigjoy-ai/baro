@@ -1184,7 +1184,10 @@ export async function orchestrate(
             },
         })
         premiseAmendments.join(env)
-        const hostRecheck = new HostRecheck({ hostRoot: repoRoot })
+        const hostRecheck = new HostRecheck({
+            hostRoot: repoRoot,
+            ...(integrationRoot !== repoRoot ? { dependencyRoot: integrationRoot } : {}),
+        })
         const criticEvidence: CriticEvidenceSource = {
             resolveRepositoryTarget: resolveCriticTarget,
             commandEvidence: (storyId) =>

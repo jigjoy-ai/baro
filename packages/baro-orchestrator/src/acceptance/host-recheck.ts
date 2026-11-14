@@ -9,15 +9,17 @@
  * agent's command line: the same trust the run's final verification has.
  */
 
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { isAbsolute, join, relative, resolve, sep } from "node:path"
 
 import { materializeDependencies } from "../integration/dependency-materializer.js"
 import { runRepositoryCommand } from "../integration/repository-command.js"
+import { worktreesRoot } from "../integration/worktrees-root.js"
 import {
     createVerifyPlan,
     verifyBuild,
+    workspacePackageDirs,
     type VerifyCommandResult,
     type VerifyCommandSpec,
 } from "../verification/verify.js"
@@ -35,6 +37,8 @@ export const HOST_RECHECK_BUDGET_MS = 90_000
 
 export interface HostRecheckOptions {
     hostRoot: string
+    /** The run's integration worktree. Never the host checkout: a link there lets a gate write into it (#284). */
+    dependencyRoot?: string
     budgetMs?: number
     /** Test seam: builds a checkout of `rev` (a commit) at `dir`. */
     checkout?: (repoCwd: string, rev: string, dir: string) => Promise<void>
@@ -147,7 +151,7 @@ export class HostRecheck {
     }
 
     private async runAt(repoCwd: string, rev: string, labels: readonly string[]): Promise<Map<string, Outcome>> {
-        const root = this.opts.scratchRoot ?? tmpdir()
+        const root = this.opts.scratchRoot ?? join(worktreesRoot(), "recheck")
         mkdirSync(root, { recursive: true })
         const dir = join(mkdtempSync(join(root, "baro-recheck-")), "checkout")
         const checkout = this.opts.checkout ?? ((cwd: string, commit: string, at: string) =>
@@ -170,7 +174,30 @@ export class HostRecheck {
 
     private async defaultCheckout(repoCwd: string, rev: string, dir: string): Promise<void> {
         await git(repoCwd, ["worktree", "add", "--detach", dir, rev])
+        // A full dependency copy per recheck is tens of thousands of new files for
+        // the OS scanners; the run's own integration tree already holds them.
+        if (this.opts.dependencyRoot && linkDependencyDirs(this.opts.dependencyRoot, dir)) return
         await materializeDependencies({ hostRoot: this.opts.hostRoot, integrationRoot: dir })
+    }
+}
+
+/** Links each dependency dir the integration tree has into the checkout; false if it has none. */
+function linkDependencyDirs(from: string, to: string): boolean {
+    const dirs = ["", ...workspacePackageDirs(from, readWorkspaces(from)).map((dir) => relative(from, dir))]
+        .filter((rel) => existsSync(join(from, rel, "node_modules")))
+    for (const rel of dirs) {
+        const target = join(to, rel, "node_modules")
+        if (!existsSync(join(to, rel)) || existsSync(target)) continue
+        symlinkSync(join(from, rel, "node_modules"), target, "junction")
+    }
+    return dirs.length > 0
+}
+
+function readWorkspaces(dir: string): unknown {
+    try {
+        return (JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as { workspaces?: unknown }).workspaces
+    } catch {
+        return undefined
     }
 }
 
