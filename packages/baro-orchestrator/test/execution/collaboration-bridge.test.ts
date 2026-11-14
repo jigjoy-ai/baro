@@ -2629,6 +2629,7 @@ describe("CollaborationBridge — runtime path claims", () => {
                     },
                 })
                 assert.equal(sent.status, 202)
+                await waitFor(env.events, PathsClaimed.is)
 
                 const answer = JSON.stringify((await brokerFetch(claimant, "/v1/inbox")).value.messages)
                 assert.match(answer, /tests\/test_tools\.py: yours too \(S6 also writes it; git merges both/)
