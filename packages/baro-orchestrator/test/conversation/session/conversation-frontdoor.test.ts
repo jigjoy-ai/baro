@@ -249,6 +249,68 @@ describe("pre-PRD conversation front door", () => {
         assert.match(query, /CURRENT USER:/)
     })
 
+    it("refuses an over-long turn text with its length and the limit", async () => {
+        let scans = 0
+        let modelCalls = 0
+        const intake = new ConversationIntake({
+            sessionId: "session-too-long",
+            responder: readyResponder(() => { modelCalls += 1 }),
+        })
+        await assert.rejects(
+            runFrontDoorConversationTurn({
+                sessionId: "session-too-long",
+                turn: {
+                    requestId: "request-too-long",
+                    intent: "goal",
+                    text: "g".repeat(11_245),
+                },
+                intake,
+                scanner: {
+                    async scan() {
+                        scans += 1
+                        return validBrief("a", "src/billing.ts")
+                    },
+                },
+                repositoryTimeoutMs: 1_000,
+            }),
+            (error: unknown) =>
+                error instanceof TypeError &&
+                error.message === "the goal is 11,245 characters; the limit is 8,000",
+        )
+        assert.equal(scans, 0)
+        assert.equal(modelCalls, 0)
+    })
+
+    it("accepts a 7,999-character goal-file head that carries the truncation note", async () => {
+        let prompt = ""
+        const note =
+            "note: goal truncated for intake; read characters 1-7600 of 12000; " +
+            "the full goal is kept in the run directory for planning and stories\n"
+        const text = `${note}${"h".repeat(7_999 - note.length)}`
+        assert.equal(text.length, 7_999)
+        const intake = new ConversationIntake({
+            sessionId: "session-noted-head",
+            responder: readyResponder((value) => { prompt = value }),
+        })
+        const response = await runFrontDoorConversationTurn({
+            sessionId: "session-noted-head",
+            turn: {
+                requestId: "request-noted-head",
+                intent: "goal",
+                text,
+            },
+            intake,
+            scanner: {
+                async scan() {
+                    return validBrief("a", "src/billing.ts")
+                },
+            },
+            repositoryTimeoutMs: 1_000,
+        })
+        assert.equal(response.kind, "ready")
+        assert.match(prompt, /note: goal truncated for intake; read characters 1-7600 of 12000/)
+    })
+
     it("deduplicates replay, rejects conflicts, and ignores forged terminals", async () => {
         const gate = deferred<RepositoryBriefV1>()
         let scans = 0

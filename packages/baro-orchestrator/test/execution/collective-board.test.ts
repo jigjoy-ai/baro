@@ -164,6 +164,49 @@ describe("CollectiveBoard", () => {
         assert.match(prompt, /unrelated earlier amendments remain active/)
     })
 
+    it("gives story offers the full goal text kept in goal.md beside prd.json", async () => {
+        await withTempDir("collective-full-goal-", async (dir) => {
+            const runId = "run-full-goal"
+            const prdPath = join(dir, "prd.json")
+            writeFileSync(prdPath, JSON.stringify(prd(), null, 2) + "\n")
+            const fullGoal = `${"goal detail. ".repeat(900)}END OF THE FULL GOAL`
+            writeFileSync(join(dir, "goal.md"), `${fullGoal}\n`)
+            const board = new CollectiveBoard({
+                runId,
+                prdPath,
+                cwd: dir,
+                timeoutSecs: 60,
+                verifyBeforePush: true,
+            })
+            const env = joinWithCapture(board)
+            const request = await integrateSingleStory(env, runId)
+
+            const offers = env.events.filter(WorkOffered.is)
+            assert.equal(offers.length, 1)
+            const prompt = offers[0]!.payload.request.prompt
+            assert.match(prompt, /## Full goal text/)
+            assert.ok(prompt.includes(fullGoal), "the offer carries the complete goal")
+            assert.ok(
+                prompt.indexOf("## Full goal text") < prompt.indexOf("You are working on story S1"),
+            )
+
+            env.publish(
+                source("verifier"),
+                RunVerificationCompleted.create({
+                    runId,
+                    verificationId: request.payload.verificationId,
+                    status: "passed",
+                    commands: [{ command: "npm run test", status: "passed", durationMs: 1 }],
+                    durationMs: 1,
+                }),
+            )
+            await waitFor(env.events, RunPushRequested.is)
+            env.publish(source("repo"), RunPushed.create({ runId, pushed: false }))
+            const summary = await board.done
+            assert.equal(summary.success, true, summary.abortReason ?? undefined)
+        })
+    })
+
     it("cannot finish green after goal evidence advances during push", async () => {
         await withTempDir("collective-late-goal-evidence-", async (dir) => {
             const runId = "run-late-goal-evidence"

@@ -35,6 +35,7 @@ import {
     validateRepositoryBriefV1,
     type RepositoryBriefV1,
 } from "./repository-brief.js"
+import { boundedConversationTextOrThrow } from "./conversation-text.js"
 import type { RepositoryContextScanner } from "./repository-scanner.js"
 
 export interface FrontDoorConversationTurn {
@@ -829,7 +830,7 @@ function normalizeRequestedData(
         sessionId: value.sessionId,
         requestId: value.requestId,
         intent: value.intent,
-        text: boundedConversationText(value.text),
+        text: boundedConversationText(value.text, "the goal"),
     })
 }
 
@@ -864,7 +865,7 @@ function normalizeRepositoryRequest(
         requestId: value.requestId,
         contextRequestId: value.contextRequestId,
         intent: value.intent,
-        query: boundedConversationText(value.query),
+        query: boundedConversationText(value.query, "the repository query"),
     })
 }
 
@@ -931,15 +932,8 @@ function repositoryRequestFingerprint(value: RepositoryContextRequestedData): st
         .digest("hex")
 }
 
-function boundedConversationText(value: unknown): string {
-    if (typeof value !== "string") throw new TypeError("conversation text must be a string")
-    const text = value.replace(/\r\n?/gu, "\n").trim()
-    if (
-        text.length === 0 ||
-        text.length > 8_000 ||
-        /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(text)
-    ) throw new TypeError("conversation text is empty, too long, or unsafe")
-    return text
+function boundedConversationText(value: unknown, label: string): string {
+    return boundedConversationTextOrThrow(value, label)
 }
 
 function boundedFailureText(value: unknown): string {

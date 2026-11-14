@@ -10,6 +10,7 @@ import {
     validateRepositoryBriefV1,
     type RepositoryBriefV1,
 } from "./repository-brief.js"
+import { boundedConversationTextOrThrow } from "./conversation-text.js"
 import {
     activityIdleTimeoutMs,
     startActivityWatchdog,
@@ -203,7 +204,7 @@ export class ConversationIntake {
             return Promise.reject(new Error("conversation intake is closed"))
         }
         assertCorrelationId(request.requestId, "requestId")
-        const text = boundedUserText(request.text)
+        const text = boundedUserText(request.text, "the goal")
         const intent = request.intent ?? "goal"
         if (intent !== "goal" && intent !== "clarification" && intent !== "chat") {
             return Promise.reject(new TypeError("conversation request intent is invalid"))
@@ -482,12 +483,12 @@ export class ConversationIntake {
             const copiedUser = Object.freeze({
                 requestId: user.requestId,
                 role: "user" as const,
-                text: boundedUserText(user.text),
+                text: boundedUserText(user.text, "the history user text"),
             })
             const copiedAssistant = Object.freeze({
                 requestId: assistant.requestId,
                 role: "assistant" as const,
-                text: boundedUserText(assistant.text),
+                text: boundedUserText(assistant.text, "the history assistant text"),
             })
             this.history.push(copiedUser, copiedAssistant)
             this.historicalRequestIds.add(user.requestId)
@@ -585,17 +586,8 @@ export function conversationResponseHistoryText(
     return `${message}\n${questionBlock}`
 }
 
-function boundedUserText(value: unknown): string {
-    if (typeof value !== "string") throw new TypeError("conversation text must be a string")
-    const text = value.replace(/\r\n?/g, "\n").trim()
-    if (
-        text.length === 0 ||
-        text.length > 8_000 ||
-        /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(text)
-    ) {
-        throw new TypeError("conversation text is empty, too long, or unsafe")
-    }
-    return text
+function boundedUserText(value: unknown, label: string): string {
+    return boundedConversationTextOrThrow(value, label)
 }
 
 function boundedPositiveInteger(value: number, label: string): number {
